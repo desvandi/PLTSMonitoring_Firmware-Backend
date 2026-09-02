@@ -1,0 +1,15 @@
+# PLTS Monitor — OTA Partition Table (4 MB flash)
+# Brief §72: dual partition + rollback support
+# [FW-27 REMEDIATION 2026-08] NVS enlarged 0x5000 (20 KB) → 0x10000 (64 KB):
+# the transaction journal (16 × ~1.2 KB), SOC persistence state, critical
+# telemetry spool blob (8 × ~2.6 KB) and config namespaces together exceeded
+# the old 20 KB partition — putBytes would fail and idempotency/state would
+# silently degrade. Funded by shrinking app partitions 0x180000 → 0x170000
+# (OTA_MAX_SIZE updated to match) and SPIFFS 0xE0000 → 0xC0000.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x10000,
+otadata,    data, ota,      0x19000,  0x2000,
+app0,       app,  ota_0,    0x20000,  0x170000,
+app1,       app,  ota_1,    0x190000, 0x170000,
+spiffs,     data, spiffs,   0x300000, 0xC0000,
+coredump,   data, coredump, 0x3C0000, 0x20000,

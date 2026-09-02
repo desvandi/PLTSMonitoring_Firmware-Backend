@@ -1,0 +1,17 @@
+{
+  "name": "monitoriot-push-alarm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend GAS, firmware ESP32, alat deploy, dan suite regresi subsistem push-alarm MonitorIoT (PWA + GAS + firmware).",
+  "scripts": {
+    "test": "bash tests/run-all.sh",
+    "audit": "node tools/prepush-audit.js",
+    "push": "bash tools/push-all-repos.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
+}

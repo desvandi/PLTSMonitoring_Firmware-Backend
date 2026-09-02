@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="ui-sans-serif, system-ui, sans-serif">
+  <defs>
+    <marker id="arrow-ac" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#f97316"/>
+    </marker>
+    <style><![CDATA[
+      .lbl        { font-size: 13px; fill: #cbd5e1; }
+      .lbl-strong { font-size: 13px; fill: #f1f5f9; font-weight: 600; }
+      .title      { font-size: 22px; fill: #fbbf24; font-weight: 700; }
+      .caption    { font-size: 11px; fill: #94a3b8; }
+      .wire-ac-l  { stroke: #f97316; stroke-width: 3; fill: none; }
+      .wire-ac-n  { stroke: #a3a3a3; stroke-width: 3; fill: none; }
+      .wire-sig   { stroke: #eab308; stroke-width: 2; fill: none; stroke-dasharray: 6 3; }
+      .wire-i2c   { stroke: #22c55e; stroke-width: 2; fill: none; }
+      .box        { fill: #0b1220; stroke: #334155; stroke-width: 1.5; rx: 8; ry: 8; }
+      .box-hi     { fill: #111a2b; stroke: #fbbf24; stroke-width: 2; rx: 10; ry: 10; }
+      .box-warn   { fill: #111a2b; stroke: #f97316; stroke-width: 2; rx: 10; ry: 10; }
+      .pad        { fill: #1e293b; stroke: #475569; stroke-width: 1; rx: 4; ry: 4; }
+    ]]></style>
+  </defs>
+  <rect width="900" height="520" fill="#0b1220"/>
+
+  <text x="20" y="34" class="title">Domain AC — ACS712-30A (Modified 3.3V)</text>
+  <text x="20" y="54" class="caption">Sensitivitas 66 mV/A · Midpoint 1.65 V (auto-tared saat boot) · Sampling true-RMS 400 titik @ 100 µs.</text>
+
+  <!-- Inverter -->
+  <rect x="30" y="120" width="180" height="150" class="box"/>
+  <text x="120" y="150" text-anchor="middle" class="lbl-strong">INVERTER</text>
+  <text x="120" y="170" text-anchor="middle" class="lbl-strong">48VDC → 220VAC</text>
+  <circle cx="70" cy="230" r="10" fill="#f97316"/>
+  <text x="85" y="235" class="lbl-strong" fill="#f97316">L (fasa)</text>
+  <circle cx="70" cy="260" r="10" fill="#a3a3a3"/>
+  <text x="85" y="265" class="lbl-strong" fill="#a3a3a3">N (netral)</text>
+
+  <!-- ACS712 module -->
+  <rect x="330" y="120" width="240" height="180" class="box-warn"/>
+  <text x="450" y="145" text-anchor="middle" class="lbl-strong">ACS712-30A</text>
+  <text x="450" y="163" text-anchor="middle" class="caption">Hall-effect · isolasi galvanik 2.1 kV</text>
+
+  <!-- ACS712 pads (high-voltage side) -->
+  <rect x="345" y="180" width="60" height="24" class="pad"/><text x="375" y="197" text-anchor="middle" class="lbl">IP+</text>
+  <rect x="345" y="212" width="60" height="24" class="pad"/><text x="375" y="229" text-anchor="middle" class="lbl">IP−</text>
+  <!-- ACS712 pads (low-voltage side) -->
+  <rect x="500" y="180" width="60" height="24" class="pad"/><text x="530" y="196" text-anchor="middle" class="lbl">VCC (3.3V)</text>
+  <rect x="500" y="212" width="60" height="24" class="pad"/><text x="530" y="228" text-anchor="middle" class="lbl">OUT</text>
+  <rect x="500" y="244" width="60" height="24" class="pad"/><text x="530" y="260" text-anchor="middle" class="lbl">GND</text>
+
+  <!-- Hazard boundary line between sides -->
+  <path d="M453 175 L 453 295" stroke="#f97316" stroke-width="1" stroke-dasharray="4 4"/>
+  <text x="453" y="315" text-anchor="middle" class="caption" fill="#f97316">isolasi galvanik</text>
+
+  <!-- AC wiring L: Inverter -> IP+ -->
+  <path d="M80 230 L 100 230 L 100 190 L 345 190" class="wire-ac-l" marker-end="url(#arrow-ac)"/>
+  <text x="180" y="180" class="caption" fill="#f97316">L melewati IP+</text>
+
+  <!-- AC load block -->
+  <rect x="620" y="180" width="160" height="90" class="box"/>
+  <text x="700" y="210" text-anchor="middle" class="lbl-strong">BEBAN 220 VAC</text>
+  <text x="700" y="230" text-anchor="middle" class="caption">≤ 30 A (module rating)</text>
+
+  <!-- IP- to Load -->
+  <path d="M405 222 L 460 222 L 460 195 L 620 195" class="wire-ac-l" marker-end="url(#arrow-ac)"/>
+
+  <!-- Netral: inverter N -> load N (bypass ACS712) -->
+  <path d="M80 260 L 320 260 L 320 350 L 700 350 L 700 270" class="wire-ac-n"/>
+  <text x="380" y="343" class="caption" fill="#a3a3a3">Netral langsung ke beban (tidak lewat ACS712)</text>
+
+  <!-- ESP32 -->
+  <rect x="580" y="380" width="220" height="110" class="box-hi"/>
+  <text x="690" y="405" text-anchor="middle" class="lbl-strong">ESP32-WROOM-32</text>
+  <rect x="600" y="418" width="50" height="22" class="pad"/><text x="625" y="433" text-anchor="middle" class="lbl">3.3V</text>
+  <rect x="654" y="418" width="50" height="22" class="pad"/><text x="679" y="433" text-anchor="middle" class="lbl">GND</text>
+  <rect x="708" y="418" width="70" height="22" class="pad"/><text x="743" y="433" text-anchor="middle" class="lbl">GPIO35</text>
+
+  <!-- ACS712 VCC to ESP32 3.3V -->
+  <path d="M560 190 L 830 190 L 830 429 L 650 429" class="wire-i2c"/>
+  <text x="700" y="180" class="caption" fill="#22c55e">VCC 3.3V</text>
+
+  <!-- ACS712 OUT (analog) to GPIO35 -->
+  <path d="M560 224 L 860 224 L 860 460 L 743 460" class="wire-sig"/>
+  <text x="700" y="216" class="caption" fill="#eab308">OUT (analog) → GPIO35</text>
+
+  <!-- ACS712 GND to ESP32 GND -->
+  <path d="M560 256 L 850 256 L 850 470 L 679 470" class="wire-i2c"/>
+  <text x="700" y="248" class="caption" fill="#22c55e">GND ke common ESP32</text>
+
+  <!-- Safety note -->
+  <rect x="20" y="405" width="540" height="90" class="box-warn"/>
+  <text x="40" y="428" class="lbl-strong" fill="#f97316">⚠ SAFETY</text>
+  <text x="40" y="448" class="caption">1. Fasa (L) 220 VAC WAJIB melewati terminal IP+ dan IP− ACS712 (dalam-line).</text>
+  <text x="40" y="464" class="caption">2. Netral tidak lewat ACS712 — hubungkan langsung inverter N → beban N.</text>
+  <text x="40" y="480" class="caption">3. Jangan hubungkan Netral 220V ke rail GND DC — ACS712 sudah menyediakan isolasi galvanik.</text>
+  <text x="40" y="496" class="caption">4. Gunakan MCB 32 A + earth-leakage relay sebelum ACS712 untuk perlindungan.</text>
+</svg>

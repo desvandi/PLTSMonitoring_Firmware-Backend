@@ -1,0 +1,13 @@
+# repos.conf - konfigurasi push-all-repos.sh
+# ------------------------------------------------------------------
+# Salin file ini menjadi "repos.conf" (di-gitignore) lalu isi URL remote.
+# Format satu baris per repositori:
+#   <path-repo-relatif-ke-file-ini>|<url-remote>
+# Path default mengasumsikan kedua repo di-clone bersebelahan.
+# URL contoh di bawah memakai GitHub; GitLab/Bitbucket juga didukung.
+#
+# PENTING: push-all-repos.sh selalu menjalankan prepush-audit.js dulu;
+# push diblokir total bila ada temuan rahasia/higienitas.
+
+../../plts_monitor_PWA_only|https://github.com/GANTI_USERNAME/plts_monitor_PWA_only.git
+.|https://github.com/GANTI_USERNAME/plts_monitor_firmware-code.gs-etc.git

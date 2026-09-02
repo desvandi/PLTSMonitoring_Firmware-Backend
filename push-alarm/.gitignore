@@ -1,0 +1,33 @@
+# RAHASIA deployment - tidak pernah di-commit.
+secrets/
+vapid-keys.json
+device-token.txt
+script-properties.txt
+deploy/
+
+# Konfigurasi push pribadi (URL remote milik Anda)
+repos.conf
+
+# Build injektor (memuat URL deployment & nilai produksi)
+build/
+staging/
+out/
+
+# Keluaran build Arduino IDE / generator TLS
+*.hex
+*.bin
+*.elf
+*.map
+firmware/tools/tls-ca-embed.c
+
+# Node / uji
+node_modules/
+package-lock.json
+
+# Checkout sementara run-all.sh
+monitoriot-checkout/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

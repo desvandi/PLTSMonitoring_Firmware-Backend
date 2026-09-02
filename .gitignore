@@ -1,0 +1,66 @@
+# Build artifacts
+.pio/
+.pioenvs/
+.piolibdeps/
+.vscode/
+include/
+src/__pycache__/
+test/__pycache__/
+
+# Secrets (brief §98 — NEVER commit)
+secrets.h
+secrets.local.h
+*.local.h
+.env
+.env.local
+.env.production
+firmware_signing_private.pem
+firmware_signing_public.pem
+*.key
+*.pem
+!mosquitto_acl.conf
+
+# OTA binaries
+*.bin
+*.bin.sha256
+*.bin.sig
+*.bin.ota.json
+*.elf
+*.map
+# Zero-Touch generic firmware ships pre-built binaries for ESP Web Tools
+!firmware-generic/bin/*.bin
+
+# Logs
+*.log
+dev.log
+server.log
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+# Push-alarm MonitorIoT: roots.pem adalah bundel sertifikat CA
+# PUBLIK (GTS Root R1+R4) untuk verifikasi TLS firmware - bukan
+# rahasia, wajib ter-commit.
+!push-alarm/firmware/tools/roots.pem
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+
+# Node (for any PWA tests)
+node_modules/
+.next/
+dist/

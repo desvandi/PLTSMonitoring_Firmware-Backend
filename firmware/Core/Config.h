@@ -1,0 +1,363 @@
+#ifndef PLTS_CONFIG_H
+#define PLTS_CONFIG_H
+
+#include <cstdint>
+#include <cstddef>
+
+//=============================================================================
+// PLTS Monitor — Configuration Header
+// Production-Grade 48V LiFePO4 PLTS Monitoring System
+// Brief §2-9, §71-73, §98
+//
+// Phase 13-B (RC-6): All constants wrapped in `namespace Core` so that
+// `Core::INA219_SHUNT_OHM` etc. resolve correctly across the codebase.
+// Phase 13-B (RC-12): Compile-time constants (immutable hardware specs) are
+// distinguished from runtime cfg* globals (mutable, persisted, loaded by
+// ConfigStore at boot). See Globals.h for cfg* extern declarations.
+//=============================================================================
+
+// ---------------------------------------------------------------------------
+// v1.6.0 — BMS/INVERTER COMMUNICATION FEATURE FLAGS
+// Each protocol module compiles out entirely when disabled (RAM/flash budget:
+// the spool was already trimmed to 4 slots — every KB counts). Override per
+// environment in platformio.ini. Defaults below apply when the build does not
+// pass -D flags (e.g. Arduino IDE).
+// ---------------------------------------------------------------------------
+#ifndef PLTS_ENABLE_BMS_COMM
+#define PLTS_ENABLE_BMS_COMM 1        // master switch for the whole layer
+#endif
+#ifndef PLTS_ENABLE_PYLONTECH_CAN
+#define PLTS_ENABLE_PYLONTECH_CAN 1   // TWAI @500k + SN65HVD230
+#endif
+#ifndef PLTS_ENABLE_MODBUS_RTU
+#define PLTS_ENABLE_MODBUS_RTU 1      // UART2 + MAX3485 RS485
+#endif
+#ifndef PLTS_ENABLE_MODBUS_TCP
+#define PLTS_ENABLE_MODBUS_TCP 1      // WiFi client polling
+#endif
+#ifndef PLTS_ENABLE_PYLONTECH_RS485
+#define PLTS_ENABLE_PYLONTECH_RS485 0 // RESERVED — console protocol slot (not
+#endif                                 // implemented; see README §RS485-console)
+
+// ---------------------------------------------------------------------------
+// Build Profile Guard (brief §73) — must select exactly one
+// ---------------------------------------------------------------------------
+#ifndef DEVELOPMENT_BUILD
+#ifndef STAGING_BUILD
+#ifndef PRODUCTION_BUILD
+#error "No build profile selected. Define one of: -DDEVELOPMENT_BUILD | -DSTAGING_BUILD | -DPRODUCTION_BUILD"
+#endif
+#endif
+#endif
+
+#if defined(DEVELOPMENT_BUILD) + defined(STAGING_BUILD) + defined(PRODUCTION_BUILD) != 1
+#error "Exactly ONE build profile must be defined."
+#endif
+
+#define BUILD_PROFILE_NAME \
+  (defined(PRODUCTION_BUILD) ? "production" : (defined(STAGING_BUILD) ? "staging" : "development"))
+
+namespace Core {
+
+// ---------------------------------------------------------------------------
+// Versioning (brief §74) — single source of truth
+// ---------------------------------------------------------------------------
+static constexpr const char* FIRMWARE_VERSION        = "1.6.3";  // 1.6.3 — audit-noise: WDT fed inside OTA download loop + otaTask stack 6K + I2C lockup recovery (Utils/I2cRecovery) + ACS712 sensitivity applied at boot (fixes 1.85x systematic AC error after reboot) + WDT feed around blocking GAS POST
+static constexpr const char* FIRMWARE_BUILD_DATE     = __DATE__ " " __TIME__;
+static constexpr const char* PROTOCOL_VERSION         = "1";     // protocol v1 (PLTS)
+static constexpr const char* CONFIG_SCHEMA_VERSION    = "1";
+static constexpr const char* CALIBRATION_SCHEMA_VERSION = "1";
+static constexpr const char* SPOOL_SCHEMA_VERSION     = "1";
+static constexpr const char* JOURNAL_SCHEMA_VERSION   = "1";
+
+// ---------------------------------------------------------------------------
+// Canonical Hardware (brief §2)
+// ---------------------------------------------------------------------------
+static constexpr uint8_t  PIN_I2C_SDA       = 21;
+static constexpr uint8_t  PIN_I2C_SCL       = 22;
+static constexpr uint8_t  PIN_BATTERY_ADC    = 34;     // ADC1 CH6, input-only, WiFi-safe (brief §2.1)
+static constexpr uint8_t  PIN_ACS712_ADC     = 35;     // ADC1 CH7, input-only
+static constexpr uint32_t I2C_FREQUENCY      = 100000; // 100 kHz
+
+// ---------------------------------------------------------------------------
+// BMS / INVERTER COMMUNICATION PORTS (v1.6.0 multi-protocol feature)
+// I2C (GPIO21/22) stays RESERVED for the internal sensor bus (INA219 + SHT31)
+// — it is NOT a battery/inverter port. ACS712 remains analog on ADC1 GPIO35.
+// ---------------------------------------------------------------------------
+// RS485 half-duplex port (UART2 + MAX3485/MAX485 transceiver, 115200 8N1).
+// Serves Modbus RTU today; the Pylontech RS485-console slot shares this port.
+static constexpr uint8_t  PIN_RS485_TX       = 16;     // UART2 TX → MAX3485 DI
+static constexpr uint8_t  PIN_RS485_RX       = 17;     // UART2 RX ← MAX3485 RO
+static constexpr uint8_t  PIN_RS485_DE       = 4;      // DE+RE tied together (direction)
+// CAN 2.0 port (TWAI controller + SN65HVD230 transceiver, 500 kbps).
+static constexpr uint8_t  PIN_CAN_TX         = 25;     // TWAI TX → SN65HVD230 TXD
+static constexpr uint8_t  PIN_CAN_RX         = 26;     // TWAI RX ← SN65HVD230 RXD
+
+// BMS polling default (NVS-overridable via cfgBmsPollIntervalMs).
+static constexpr uint32_t BMS_POLL_INTERVAL_MS    = 5000;
+static constexpr uint8_t  BMS_MODBUS_SLAVE_ID     = 1;    // typical rack BMS default
+static constexpr uint16_t BMS_MODBUS_TCP_PORT     = 502;  // IANA standard
+
+// Sign conventions of the EXTERNAL protocols (verified on bench G-05):
+// Pylontech CAN current is discharge-positive → negate to canonical +charge.
+static constexpr float PYLONTECH_CAN_CURRENT_SIGN = -1.0f;
+// Most Modbus rack BMSes also report discharge-positive → negate likewise.
+// The shunt cross-check (BMS_CURRENT_MISMATCH alarm) catches a wrong constant
+// within one poll cycle — see Comm/BatteryCommManager.h.
+static constexpr float MODBUS_RACK_CURRENT_SIGN  = -1.0f;
+
+// Cell-imbalance alarm threshold (15S LiFePO4 — healthy pack delta < ~80 mV).
+static constexpr float BMS_CELL_IMBALANCE_V      = 0.250f;
+
+// Runtime BMS protocol selection strings (NVS cfgBmsProtocol values).
+static constexpr const char* BMS_PROTOCOL_DEFAULT = "auto";
+
+// INA219 (brief §4-6)
+static constexpr uint8_t  INA219_ADDRESS        = 0x40;
+static constexpr float    INA219_SHUNT_OHM      = 0.00075f;   // 75mV @ 100A → 0.75 mΩ
+static constexpr float    INA219_MAX_CURRENT_A  = 100.0f;
+static constexpr uint16_t INA219_CONFIG         = 0x3FFB;     // 32V FSR, ±320mV PGA, 16-sample avg
+// Sign correction: raw INA219 shunt voltage is POSITIVE when current leaves
+// battery (discharge). Canonical software semantics require positive = charging.
+// Therefore signCorrection = -1.0f inverts the raw reading.
+// STATUS: ASSUMED — NOT HARDWARE VERIFIED. Requires INA-001..INA-004 (Phase 13-K).
+static constexpr float    INA219_SIGN_CORRECTION = -1.0f;
+// Idle deadband (brief §5) — ±0.5 A configurable at runtime via cfgIdleCurrentThreshold
+static constexpr float    IDLE_CURRENT_THRESHOLD_A = 0.5f;
+
+// Battery voltage divider (brief §7)
+// R1 = 100kΩ ±5% (high side), R2 = 5.6kΩ ±5% (low side), series 2.2kΩ
+static constexpr float DIVIDER_R1       = 100000.0f;
+static constexpr float DIVIDER_R2       = 5600.0f;
+static constexpr float ADC_SERIES_R     = 2200.0f;
+static constexpr float ADC_VREF          = 3.3f;
+static constexpr uint16_t ADC_RESOLUTION = 4095;     // 12-bit
+static constexpr uint8_t  ADC_ATTENUATION_DB = 11;    // 11 dB → ~3.3V full-scale
+// Computed divider ratio (R1 + R2) / R2 — used by AdcVoltageDriver
+static constexpr float DIVIDER_RATIO    = (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;  // ≈ 18.857
+// Plausibility bounds for battery voltage (brief §9 — software must detect implausible)
+static constexpr float VBAT_MIN_PLAUSIBLE = 30.0f;   // below this = OUT_OF_RANGE
+static constexpr float VBAT_MAX_PLAUSIBLE = 60.0f;   // above this = OUT_OF_RANGE
+// ADC filtering (EMA alpha — 0..1, higher = faster response, more noise)
+static constexpr float ADC_FILTER_ALPHA   = 0.2f;
+
+// Current processing
+static constexpr float CURRENT_SPIKE_REJECT_A = 120.0f;  // reject |I| > this (shunt rating)
+static constexpr float CURRENT_SMOOTH_ALPHA    = 0.3f;     // EMA smoothing
+
+// ACS712 (brief §26-27)
+static constexpr float    ACS712_SENSITIVITY       = 0.185f;     // V/A for ACS712-20A (configurable)
+static constexpr float    ACS712_SENSITIVITY_MV_PER_A = 185.0f;  // mV/A (same as above in mV)
+static constexpr uint16_t ACS712_SAMPLE_RATE_HZ    = 1000;        // 1 kHz for 50 Hz AC
+static constexpr uint16_t ACS712_WINDOW_MS          = 40;          // 2 cycles of 50 Hz = 40 ms
+static constexpr uint16_t ACS712_WINDOW_CYCLES     = 2;
+static constexpr uint16_t ACS712_SAMPLES_PER_WINDOW = (ACS712_SAMPLE_RATE_HZ * ACS712_WINDOW_MS) / 1000; // 40
+static constexpr float    AC_OVERCURRENT_THRESHOLD  = 30.0f;      // A (configurable)
+// AC power estimation assumptions (brief §28 — AC power is ESTIMATED, not measured)
+// These are configurable at runtime but defaults assume typical Indonesian grid
+static constexpr float    ASSUMED_AC_VOLTAGE      = 220.0f;   // V (no AC voltage sensor)
+static constexpr float    ASSUMED_POWER_FACTOR    = 0.9f;     // typical inductive load
+
+// SHT31 (brief §29)
+static constexpr uint8_t SHT31_ADDRESS = 0x44;
+
+// ---------------------------------------------------------------------------
+// Battery Canonical Profile (brief §3)
+// ---------------------------------------------------------------------------
+static constexpr float    BATTERY_NOMINAL_V    = 48.0f;
+static constexpr float    BATTERY_FULL_V       = 54.0f;
+static constexpr float    BATTERY_LOW_V        = 45.0f;
+static constexpr uint8_t  BATTERY_SERIES_CELLS = 15;    // 15S LiFePO4
+static constexpr float    BATTERY_CELL_NOMINAL_V = 3.2f;
+static constexpr float    BATTERY_CELL_FULL_V  = 3.6f;
+static constexpr float    BATTERY_CELL_LOW_V   = 3.0f;
+static constexpr float    BATTERY_CAPACITY_AH  = 200.0f;   // compile-time default; runtime cfgBatteryCapacityAh overrides
+
+// Hysteresis (brief §24)
+static constexpr float BATTERY_LOW_CLEAR_V  = 46.0f;   // clear LOW alarm above this
+static constexpr float BATTERY_HIGH_V       = 55.0f;   // HIGH alarm
+static constexpr float BATTERY_HIGH_CLEAR_V  = 54.5f;
+
+// Full-charge detection (brief §19) — compile-time defaults; runtime cfg* overrides
+static constexpr float    FULL_CHARGE_CURRENT_THRESHOLD_A = 2.0f;   // configurable
+static constexpr uint32_t FULL_CHARGE_PERSISTENCE_SEC      = 600;    // 10 min, configurable
+
+// Overcurrent (brief §25 — monitoring only, no control)
+static constexpr float OVERCURRENT_CHARGE_A    = 80.0f;
+static constexpr float OVERCURRENT_DISCHARGE_A = 100.0f;
+
+// SOC thresholds (brief §24 — for alarm, NOT for control)
+static constexpr float    BATTERY_LOW_SOC_PCT     = 20.0f;   // low SOC warning
+static constexpr float    BATTERY_CRIT_SOC_PCT   = 10.0f;   // critical SOC alarm
+// Temperature thresholds (brief §30)
+static constexpr float    TEMP_HIGH_THRESHOLD_C    = 40.0f;
+static constexpr float    TEMP_CRIT_THRESHOLD_C   = 50.0f;
+static constexpr float    HUMIDITY_HIGH_PCT       = 85.0f;
+
+// ---------------------------------------------------------------------------
+// Telemetry (brief §39-43)
+// ---------------------------------------------------------------------------
+static constexpr uint32_t TELEMETRY_INTERVAL_MS     = 5000;     // 5s publish
+static constexpr uint32_t SENSOR_SAMPLE_INTERVAL_MS  = 200;     // 5 Hz INA219/ADC
+static constexpr uint32_t SHT31_SAMPLE_INTERVAL_MS   = 1000;    // 1 Hz
+static constexpr uint32_t ENERGY_CALC_INTERVAL_MS     = 1000;   // 1 Hz integration
+static constexpr uint32_t PERSIST_INTERVAL_MS        = 300000;  // 5 min NVS save (wear)
+// [FW-17] Sequence high-water mark margin: the persisted telemetry sequence
+// is stored as (current + margin) so that after ANY reboot the resumed
+// sequence is strictly GREATER than every pre-reboot value. Margin covers the
+// maximum counter increments possible between two checkpoints:
+// PERSIST_INTERVAL_MS / SENSOR_SAMPLE_INTERVAL_MS = 1500 → margin 2048.
+// Result: gaps may be reported (honest — the interval is unknown), but the
+// sequence NEVER regresses across a reboot (backend dedupe stays sound).
+static constexpr uint32_t SEQ_REBOOT_MARGIN          = 2048;
+
+// Spool (brief §43)
+static constexpr uint8_t  SPOOL_RAM_SIZE          = 16;
+static constexpr uint8_t  SPOOL_NVS_CRITICAL_SIZE = 8;
+static constexpr uint8_t  MAX_REPLAY_PER_SEC     = 2;
+
+// Transaction journal (brief §42)
+// [FW-27 REMEDIATION 2026-08] 64 slots × ~1.2 KB ≈ 76 KB cannot fit the old
+// 20 KB NVS partition — putBytes would start failing once full and command
+// idempotency would silently degrade. Reduced to 16 slots (~19 KB) AND the
+// NVS partition is enlarged to 64 KB (partitions_ota_1mb5.csv), keeping the
+// journal + SOC + spool-critical + config namespaces within budget.
+static constexpr uint8_t JOURNAL_SIZE = 16;
+
+// Alarm registry (brief §34)
+static constexpr uint8_t MAX_ALARMS = 24;
+
+// ---------------------------------------------------------------------------
+// Network (brief §47-49)
+// ---------------------------------------------------------------------------
+static constexpr uint16_t  HTTP_PORT               = 80;
+static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS  = 15000;
+static constexpr uint32_t MQTT_CONNECT_TIMEOUT_MS  = 10000;
+static constexpr uint32_t MQTT_RECONNECT_MIN_MS    = 5000;
+static constexpr uint32_t MQTT_RECONNECT_MAX_MS    = 60000;
+static constexpr uint16_t MQTT_BUFFER_SIZE         = 16384;
+static constexpr uint32_t NTP_SYNC_INTERVAL_MS     = 3600000; // 1 hour
+static constexpr char     DEFAULT_TIMEZONE[]       = "Asia/Jakarta";
+
+// GAS (brief §49, §95)
+static constexpr uint32_t GAS_POST_INTERVAL_MS = 3600000;  // 1 hour
+static constexpr uint32_t GAS_TIMEOUT_MS      = 30000;
+static constexpr uint16_t GAS_MAX_BODY_SIZE   = 16384;
+static constexpr uint8_t  GAS_MAX_POSTS_PER_HOUR = 10;
+
+// OTA (brief §72)
+// [FW-27] app partitions resized 0x180000 → 0x170000 to fund the larger NVS.
+static constexpr uint32_t OTA_MAX_SIZE          = 0x170000;  // 1.4375 MB
+static constexpr uint8_t  OTA_MAX_BOOT_ATTEMPTS = 3;
+static constexpr uint16_t OTA_TIMEOUT_MS        = 60000;
+static constexpr const char* OTA_ALLOWED_HOSTS[] = {
+  "github.com",
+  "raw.githubusercontent.com",
+  "objects.githubusercontent.com",
+  nullptr
+};
+
+// Auth (brief §71)
+static constexpr uint32_t JWT_ACCESS_TTL_SEC       = 900;     // 15 min
+static constexpr uint32_t JWT_REFRESH_TTL_SEC      = 604800;  // 7 days
+static constexpr uint16_t PBKDF2_ITERATIONS         = 10000;
+static constexpr uint8_t  MAX_REFRESH_TOKENS        = 4;      // NVS LRU
+static constexpr uint8_t  MAX_TRACKED_IPS           = 8;
+static constexpr uint8_t  CSRF_TOKEN_LEN           = 32;
+static constexpr uint16_t MAX_ACTIVITY_LOG_ENTRIES  = 200;
+static constexpr uint16_t RATE_LIMIT_SHORT_BLOCK_SEC = 60;
+static constexpr uint16_t RATE_LIMIT_LONG_BLOCK_SEC  = 300;
+static constexpr uint8_t  RATE_LIMIT_SHORT_THRESHOLD = 5;
+static constexpr uint8_t  RATE_LIMIT_LONG_THRESHOLD  = 10;
+// [P0-004] Failure window: failures older than this no longer count toward
+// a block. Prevents a permanent block from slow-drip attacks and gives
+// legitimate clients a clean slate after the window passes.
+static constexpr uint32_t RATE_LIMIT_WINDOW_MS       = 600000;  // 10 min
+static constexpr uint32_t FACTORY_RESET_TOKEN_TTL_SEC = 60;
+static constexpr uint32_t AUTH_BLOCK_SHORT_MS        = RATE_LIMIT_SHORT_BLOCK_SEC * 1000;
+static constexpr uint32_t AUTH_BLOCK_LONG_MS         = RATE_LIMIT_LONG_BLOCK_SEC * 1000;
+static constexpr uint32_t FACTORY_RESET_TOKEN_TTL_MS = FACTORY_RESET_TOKEN_TTL_SEC * 1000;
+
+// HTTP body limits
+static constexpr uint16_t HTTP_MAX_BODY_SIZE        = 16384;
+static constexpr uint16_t MAX_LOG_ENTRIES           = 200;
+static constexpr uint32_t AUDIT_LOG_ROTATE_BYTES    = 8192;
+
+// Auth credentials
+// NVS namespaces + keys
+static constexpr const char* NVS_NAMESPACE = "plts";
+static constexpr const char* NVS_KEY_WIFI_SSID = "wifi_ssid";
+static constexpr const char* NVS_KEY_WIFI_PASS = "wifi_pass";
+static constexpr int8_t WIFI_TX_POWER_DBM = 20;
+static constexpr uint32_t WIFI_STA_TIMEOUT_MS = 15000;
+static constexpr uint8_t WIFI_STA_MAX_RETRIES = 3;
+static constexpr uint8_t WIFI_CHANNEL = 11;
+static constexpr const char* AP_SSID_PREFIX = "PLTS-Setup";
+static constexpr uint8_t  MAX_USER_LEN   = 32;
+static constexpr uint8_t  SALT_LEN       = 16;
+static constexpr uint8_t  PASS_HASH_HEX_LEN = 65;  // 32 bytes × 2 + null
+
+// Topic structure (brief §48)
+// plts/<deviceId>/status   QoS 0  — telemetry publish (5s)
+// plts/<deviceId>/log      QoS 0  — log events
+// plts/<deviceId>/online   QoS 1 retain — presence (LWT)
+// plts/<deviceId>/config   QoS 1  — config commands (PWA → ESP32)
+// plts/<deviceId>/ack      QoS 1  — command ACKs (ESP32 → PWA)
+// plts/<deviceId>/ota      QoS 1  — OTA commands
+static constexpr const char* MQTT_TOPIC_PREFIX = "plts";
+
+// LittleFS paths
+static constexpr const char* PATH_CONFIG_JSON = "/config.json";
+static constexpr const char* PATH_CONFIG_BAK  = "/config.bak";
+static constexpr const char* PATH_CALIB_JSON  = "/calibration.json";
+static constexpr const char* PATH_CALIB_BAK   = "/calibration.bak";
+static constexpr const char* PATH_AUDIT_LOG   = "/audit.log";
+static constexpr const char* PATH_ACTIVITY_LOG = "/activity.log";
+static constexpr const char* PATH_CALIBRATION_JSON = "/calibration.json";
+static constexpr const char* PATH_CALIBRATION_BAK = "/calibration.bak";
+static constexpr const char* PATH_CALIBRATION_TMP = "/calibration.tmp";
+static constexpr uint8_t CONFIG_SCHEMA_VERSION_NUM = 1;
+extern bool calibrationDirty;
+
+} // namespace Core
+
+// ---------------------------------------------------------------------------
+// Security (brief §71, §98) — production fail-closed guards
+// These #error checks MUST remain at file scope (outside namespace) because
+// they are preprocessor directives evaluated before namespace resolution.
+// ---------------------------------------------------------------------------
+#ifdef PRODUCTION_BUILD
+  // [WAVE-5 / FW-C1] Value-shape validation (public-broker refusal, wildcard
+  // CORS, 64-hex Ed25519 key, PEM presence) moved OUT of the preprocessor —
+  // strcmp()/strlen() are NOT valid #if expressions, so the old lines
+  // GUARANTEED a compile failure for any production build that supplied real
+  // credentials ("missing binary operator before token '('"). Those checks
+  // are enforced — and were already duplicated — by
+  // firmware/scripts/assert_production_secrets.py (fail-closed pre-build
+  // gate: is_hex64, not_public_broker, not_wildcard, PEM body, placeholder
+  // scan). Presence checks below remain compile-time; value checks are the
+  // script's job.
+  #if !defined(MQTT_BROKER_HOST) || !defined(MQTT_BROKER_PORT)
+  #error "PRODUCTION_BUILD requires MQTT_BROKER_HOST and MQTT_BROKER_PORT"
+  #endif
+  #if MQTT_BROKER_PORT != 8883 && MQTT_BROKER_PORT != 8884
+  #error "PRODUCTION_BUILD requires MQTT TLS port 8883 or 8884"
+  #endif
+  #if !defined(MQTT_USERNAME) || !defined(MQTT_PASSWORD)
+  #error "PRODUCTION_BUILD requires MQTT_USERNAME and MQTT_PASSWORD"
+  #endif
+  #if !defined(MQTT_ROOT_CA)
+  #error "PRODUCTION_BUILD requires MQTT_ROOT_CA (PEM)"
+  #endif
+  #if !defined(ALLOWED_CORS_ORIGINS)
+  #error "PRODUCTION_BUILD requires ALLOWED_CORS_ORIGINS"
+  #endif
+  #if !defined(OTA_ED25519_PUBLIC_KEY_HEX)
+  #error "PRODUCTION_BUILD requires OTA_ED25519_PUBLIC_KEY_HEX (64 hex chars)"
+  #endif
+  #if !defined(OTA_HTTPS_ROOT_CA)
+  #error "PRODUCTION_BUILD requires OTA_HTTPS_ROOT_CA (PEM)"
+  #endif
+#endif
+
+#endif // PLTS_CONFIG_H

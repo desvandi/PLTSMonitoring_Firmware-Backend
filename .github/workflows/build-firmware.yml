@@ -1,0 +1,155 @@
+name: build-firmware
+
+# CI-hygiene 2026-09-02 (follow-up to REMEDIATION 2026-08 FW-26 / WAVE-5 FW-C2):
+#   - explicit `permissions`: top-level contents:read; contents:write only
+#     for build-generic-tree (its auto-commit step pushes rebuilt binaries;
+#     on 2026-09-01 that push was denied while the repo default was
+#     read-only, and it only worked after the repo default changed - the
+#     requirement is now explicit and least-privilege).
+#   - CI-staged binaries now named plts_firmware_v<version>.bin (README 4.3
+#     version-sync contract) and manifest.json synced to the source
+#     FIRMWARE_VERSION 1.6.0, so CI builds are no longer misnamed 1.5.4.
+#   - trigger verified byte-level via the GitHub Git Blobs API: the push
+#     filter already matched main in every published revision (an earlier
+#     local "typo" audit flag turned out to be a tooling display artifact).
+# Earlier history: this workflow previously built ONLY firmware-generic
+# (the legacy tree) and never compiled the production firmware/. Now:
+#   1. builds firmware/ (modular production tree) for development + staging
+#   2. runs the Python unit tests in scripts/
+#   3. builds firmware-generic (legacy) for continuity
+# Production builds (env:production) require real secrets and are
+# triggered manually via workflow_dispatch with secrets passed via env.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - 'firmware-generic/**'
+      - 'scripts/**'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python unit + property tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run firmware logic tests
+        run: |
+          python -m pip install --upgrade pip
+          fail=0
+          for t in scripts/test_*.py; do
+            echo "=== $t ==="
+            python "$t" || fail=1
+          done
+          exit $fail
+
+  build-production-tree:
+    name: PlatformIO build (firmware/ development + staging)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U platformio
+
+      - name: Compile development env
+        working-directory: firmware
+        run: pio run -e development
+
+      - name: Compile staging env
+        working-directory: firmware
+        run: pio run -e staging
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plts-firmware-modular
+          path: |
+            firmware/.pio/build/*/firmware.bin
+
+  build-generic-tree:
+    name: PlatformIO build (firmware-generic/ legacy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # auto-commit step pushes rebuilt binaries
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-generic-${{ runner.os }}-${{ hashFiles('firmware-generic/platformio.ini') }}
+          restore-keys: |
+            pio-generic-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U platformio
+
+      - name: Compile firmware
+        working-directory: firmware-generic
+        run: pio run -e esp32dev
+
+      - name: Stage binaries into /bin
+        working-directory: firmware-generic
+        run: |
+          mkdir -p bin
+          cp .pio/build/esp32dev/bootloader.bin bin/bootloader.bin
+          cp .pio/build/esp32dev/partitions.bin bin/partitions.bin
+          cp .pio/build/esp32dev/firmware.bin   "bin/plts_firmware_v$(python -c "import json;print(json.load(open('manifest.json'))['version'])").bin"
+          ls -la bin/
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plts-firmware-generic
+          path: |
+            firmware-generic/bin/*.bin
+            firmware-generic/manifest.json
+
+      - name: Auto-commit new binaries
+        if: github.event_name == 'push'
+        run: |
+          git config user.name  "plts-firmware-bot"
+          git config user.email "actions@github.com"
+          git add firmware-generic/bin
+          git diff --cached --quiet firmware-generic/bin || git commit -m "chore(firmware): rebuild ESP32 binaries [skip ci]"
+          git push || echo "no changes to push"

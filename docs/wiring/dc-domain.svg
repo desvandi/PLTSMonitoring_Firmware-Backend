@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" font-family="ui-sans-serif, system-ui, sans-serif">
+  <defs>
+    <marker id="arrow-dc" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 z" fill="#0ea5e9"/>
+    </marker>
+    <linearGradient id="battery-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <style><![CDATA[
+      .lbl        { font-size: 13px; fill: #cbd5e1; }
+      .lbl-strong { font-size: 13px; fill: #f1f5f9; font-weight: 600; }
+      .title      { font-size: 22px; fill: #fbbf24; font-weight: 700; }
+      .caption    { font-size: 11px; fill: #94a3b8; }
+      .wire-plus  { stroke: #f43f5e; stroke-width: 3; fill: none; }
+      .wire-minus { stroke: #0ea5e9; stroke-width: 3; fill: none; }
+      .wire-sig   { stroke: #eab308; stroke-width: 2; fill: none; stroke-dasharray: 6 3; }
+      .wire-i2c   { stroke: #22c55e; stroke-width: 2; fill: none; }
+      .box        { fill: #0b1220; stroke: #334155; stroke-width: 1.5; rx: 8; ry: 8; }
+      .box-hi     { fill: #111a2b; stroke: #fbbf24; stroke-width: 2; rx: 10; ry: 10; }
+      .pad        { fill: #1e293b; stroke: #475569; stroke-width: 1; rx: 4; ry: 4; }
+    ]]></style>
+  </defs>
+
+  <rect width="900" height="520" fill="#0b1220"/>
+  <text x="20" y="34" class="title">Domain DC — Baterai 48V &amp; INA219 (I²C 0x40)</text>
+  <text x="20" y="54" class="caption">Shunt eksternal 100A / 75mV Modified (Rshunt = 0.75 mΩ). LSB shunt-voltage 10 µV → I(A) = Vshunt(µV) ÷ 750.</text>
+
+  <!-- Battery -->
+  <rect x="40" y="120" width="140" height="260" fill="url(#battery-grad)" stroke="#475569" stroke-width="2" rx="12"/>
+  <text x="110" y="150" text-anchor="middle" class="lbl-strong">BATERAI</text>
+  <text x="110" y="170" text-anchor="middle" class="lbl-strong">48V LiFePO4</text>
+  <circle cx="110" cy="210" r="26" fill="#0f172a" stroke="#f43f5e" stroke-width="2"/>
+  <text x="110" y="215" text-anchor="middle" class="lbl-strong" fill="#f43f5e">+</text>
+  <circle cx="110" cy="330" r="26" fill="#0f172a" stroke="#0ea5e9" stroke-width="2"/>
+  <text x="110" y="336" text-anchor="middle" class="lbl-strong" fill="#0ea5e9">−</text>
+
+  <!-- Positive rail to load -->
+  <path d="M136 210 L 380 210" class="wire-plus" marker-end="url(#arrow-dc)"/>
+  <text x="220" y="200" class="caption" fill="#f43f5e">rail 48V+ ke beban/inverter</text>
+
+  <!-- Load / Inverter box -->
+  <rect x="380" y="180" width="180" height="80" class="box"/>
+  <text x="470" y="215" text-anchor="middle" class="lbl-strong">LOAD / INVERTER</text>
+  <text x="470" y="235" text-anchor="middle" class="caption">(sisi 48V input inverter)</text>
+
+  <!-- Negative return through shunt -->
+  <path d="M470 260 L 470 340 L 300 340" class="wire-minus"/>
+  <rect x="200" y="320" width="100" height="40" fill="#0f172a" stroke="#0ea5e9" stroke-width="2" rx="4"/>
+  <text x="250" y="345" text-anchor="middle" class="lbl-strong">SHUNT 100A</text>
+  <text x="250" y="315" text-anchor="middle" class="caption" fill="#0ea5e9">75mV @ 100A</text>
+  <path d="M200 340 L 136 340" class="wire-minus" marker-end="url(#arrow-dc)"/>
+  <text x="150" y="360" class="caption" fill="#0ea5e9">return ke Baterai −</text>
+
+  <!-- INA219 module -->
+  <rect x="580" y="130" width="220" height="220" class="box-hi"/>
+  <text x="690" y="160" text-anchor="middle" class="lbl-strong">INA219</text>
+  <text x="690" y="180" text-anchor="middle" class="caption">alamat I²C 0x40</text>
+
+  <!-- INA219 pads -->
+  <rect x="600" y="200" width="50" height="24" class="pad"/>
+  <text x="625" y="216" text-anchor="middle" class="lbl">Vin+</text>
+  <rect x="600" y="234" width="50" height="24" class="pad"/>
+  <text x="625" y="250" text-anchor="middle" class="lbl">Vin−</text>
+  <rect x="730" y="200" width="50" height="24" class="pad"/>
+  <text x="755" y="216" text-anchor="middle" class="lbl">VCC</text>
+  <rect x="730" y="234" width="50" height="24" class="pad"/>
+  <text x="755" y="250" text-anchor="middle" class="lbl">GND</text>
+  <rect x="730" y="268" width="50" height="24" class="pad"/>
+  <text x="755" y="284" text-anchor="middle" class="lbl">SDA</text>
+  <rect x="730" y="302" width="50" height="24" class="pad"/>
+  <text x="755" y="318" text-anchor="middle" class="lbl">SCL</text>
+
+  <!-- Shunt to INA219 sense pins -->
+  <path d="M220 320 L 220 260 L 600 212" class="wire-plus"/>
+  <path d="M280 320 L 280 280 L 600 246" class="wire-plus"/>
+  <text x="330" y="270" class="caption" fill="#f43f5e">Vin+ / Vin− ke ujung shunt</text>
+
+  <!-- ESP32 -->
+  <rect x="580" y="380" width="220" height="110" class="box-hi"/>
+  <text x="690" y="405" text-anchor="middle" class="lbl-strong">ESP32-WROOM-32</text>
+  <rect x="600" y="418" width="50" height="22" class="pad"/><text x="625" y="433" text-anchor="middle" class="lbl">3.3V</text>
+  <rect x="654" y="418" width="50" height="22" class="pad"/><text x="679" y="433" text-anchor="middle" class="lbl">GND</text>
+  <rect x="708" y="418" width="50" height="22" class="pad"/><text x="733" y="433" text-anchor="middle" class="lbl">GPIO21</text>
+  <rect x="600" y="450" width="50" height="22" class="pad"/><text x="625" y="465" text-anchor="middle" class="lbl">GPIO22</text>
+  <rect x="654" y="450" width="50" height="22" class="pad"/><text x="679" y="465" text-anchor="middle" class="lbl">GPIO34</text>
+  <rect x="708" y="450" width="50" height="22" class="pad"/><text x="733" y="465" text-anchor="middle" class="lbl">GND</text>
+
+  <!-- INA219 power + I2C to ESP32 -->
+  <path d="M780 212 L 830 212 L 830 430 L 650 430" class="wire-i2c"/>
+  <text x="810" y="230" class="caption" fill="#22c55e">VCC 3.3V</text>
+  <path d="M780 246 L 850 246 L 850 460 L 690 460" class="wire-i2c"/>
+  <path d="M780 280 L 810 280 L 810 429 L 733 429" class="wire-i2c"/>
+  <text x="815" y="360" class="caption" fill="#22c55e">SDA→GPIO21</text>
+  <path d="M780 314 L 800 314 L 800 461 L 660 461 L 660 472 L 625 472" class="wire-i2c"/>
+  <text x="820" y="378" class="caption" fill="#22c55e">SCL→GPIO22</text>
+
+  <!-- Voltage divider (R1/R2) -->
+  <rect x="300" y="80" width="240" height="90" class="box"/>
+  <text x="420" y="102" text-anchor="middle" class="lbl-strong">PEMBAGI TEGANGAN</text>
+  <text x="420" y="122" text-anchor="middle" class="caption">R1 = 100 kΩ · R2 = 5.6 kΩ · ratio 18.86</text>
+  <path d="M420 210 L 420 170" class="wire-plus"/>
+  <path d="M420 80 L 420 60 L 679 60 L 679 450" class="wire-sig"/>
+  <text x="500" y="52" class="caption" fill="#eab308">Vsense (0–3.3 V) → GPIO34</text>
+
+  <!-- Common GND note -->
+  <rect x="40" y="450" width="500" height="50" class="box"/>
+  <text x="60" y="475" class="lbl-strong">COMMON GROUND</text>
+  <text x="60" y="491" class="caption">ESP32 GND ↔ INA219 GND ↔ Baterai (−). JANGAN gabungkan Netral 220V AC ke rail ini.</text>
+</svg>
