@@ -1,8 +1,8 @@
 # PLTS Monitor & MonitorIoT Push-Alarm — Firmware, Backend GAS, Toolkit
 
-**Firmware produksi:** v1.6.3 · **Firmware generic:** v1.6.0 · **Firmware alarm:** v1.1.0 · **Backend GAS:** WAVE-7 · **License:** MIT
+**Firmware produksi:** v1.6.3 · **Firmware generic:** v1.7.0 · **Firmware alarm:** v1.1.0 · **Backend GAS:** WAVE-7 (remediasi P1/P2 + wave audit 7-10) · **License:** MIT
 **Status:** LIVE (dua repositori GitHub + dua proyek Vercel aktif, seluruh rantai platform gratis Rp0 — tanpa kartu kredit)
-**Repositori kembar (frontend/dasbor):** [desvandi/plts_monitor_PWA_only](https://github.com/desvandi/plts_monitor_PWA_only)
+**Repositori kembar (frontend/dasbor):** [desvandi/PLTSMonitoring_PWA](https://github.com/desvandi/PLTSMonitoring_PWA)
 
 Repositori ini adalah pusat backend & perangkat untuk sistem monitoring PLTS
 (pembangkit listrik tenaga surya, baterai 48 V LiFePO4). Ia memuat **dua
@@ -21,7 +21,7 @@ batas kuota semua platform gratis yang dipakai (rincian kuota vs beban ada di
 Lampiran A panduan deploy).
 
 > **Dokumen operasional utama:** [`Panduan_Deploy_Production_MonitorIoT.pdf`](Panduan_Deploy_Production_MonitorIoT.pdf)
-> (di **akar** repositori ini, Edisi 3, 38 halaman) — kamus klik-demi-klik
+> (di **akar** repositori ini, Edisi 4, 36 halaman) — kamus klik-demi-klik
 > semua parameter/env/kredensial, prosedur deploy GAS → PWA → firmware,
 > skenario acceptance, dan peta platform gratis Rp0. Salinan PDF yang sama
 > juga ada di akar repo kembar.
@@ -85,7 +85,10 @@ mendadak karena tidak ada kartu kredit terpasang.
 - **Verifikasi TLS firmware alarm:** CA GTS Root R1+R4 byte-identik dengan
   `pki.goog` (4/4).
 - Audit berlapis (desain → audit final → audit silang; gelombang remediasi
-  2026-08) — verdict **PRODUCTION GRADE**. Arsip laporan audit historis
+  2026-08; **remediasi P1/P2 + wave audit 7-10 pada 2026-09-02**: sensor
+  fail-closed `sensorFailPolicy` v1.7.0, identitas versi single-source (guard
+  CI), ADMIN_TOKEN sesi di PWA, rotasi EmergencyQueue W10, guard TLS-only
+  MQTT W7-1) — verdict **PRODUCTION GRADE**. Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
   terserap ke kode, README ini, dan panduan PDF.
@@ -95,7 +98,7 @@ mendadak karena tidak ada kartu kredit terpasang.
 ## 2. Struktur Repositori & Dokumentasi
 
 ```
-plts_monitor_firmware-code.gs-etc/
+PLTSMonitoring_Firmware-Backend/
 ├── README.md                                  ← dokumen ini (satu-satunya README)
 ├── Panduan_Deploy_Production_MonitorIoT.pdf   ← panduan go-live END-TO-END (akar)
 ├── code.gs/                 Backend GAS subsistem A (Master Sheet PLTS)
@@ -106,7 +109,7 @@ plts_monitor_firmware-code.gs-etc/
 │   └── scripts/assert_production_secrets.py
 ├── firmware-generic/        Firmware zero-touch (captive portal, /install)
 │   ├── src/plts_firmware_v1.ino · platformio.ini
-│   ├── bin/ (bootloader, partitions, plts_firmware_v1.6.0.bin)
+│   ├── bin/ (bootloader, partitions, plts_firmware_v1.7.0.bin)
 │   └── manifest.json
 ├── push-alarm/              Subsistem B lengkap
 │   ├── gas/Code.gs + gas/WebPushCore.gs      (backend Web Push)
@@ -253,7 +256,7 @@ curl -s -X POST "<WEB_APP_URL>" \
 ### 4.2 Langkah 2 — Frontend: Deploy PWA
 
 PWA adalah aplikasi **Next.js** — deploy dari repositori kembar
-[`plts_monitor_PWA_only`](https://github.com/desvandi/plts_monitor_PWA_only)
+[`PLTSMonitoring_PWA`](https://github.com/desvandi/PLTSMonitoring_PWA)
 (Vercel: import repo → framework terdeteksi otomatis → Deploy; tanpa env var
 untuk mode zero-touch). Buka domain PWA → redirect ke `/setup` → isi **GAS
 Web App URL** + **Auth Token** + **Device Key** (sama dengan Langkah 1) →
@@ -289,8 +292,8 @@ MQTT/TLS realtime, REST + auth per-device (JWT/HMAC), multi-protokol
 BMS/inverter, provenance SOC, alarm lanjutan, OTA Ed25519, spool offline.
 
 ```bash
-git clone https://github.com/desvandi/plts_monitor_firmware-code.gs-etc.git
-cd plts_monitor_firmware-code.gs-etc/firmware
+git clone https://github.com/desvandi/PLTSMonitoring_Firmware-Backend.git
+cd PLTSMonitoring_Firmware-Backend/firmware
 pio run -e development    # atau staging
 pio run -e development -t upload
 ```
@@ -373,13 +376,20 @@ boot baru gagal WiFi/health 3× berturut → kembali ke partisi lama + lapor
 (`scripts/sign_firmware.py --sign firmware.bin`), URL download wajib HTTPS
 dari allowlist.
 
+> **[P2-2] Semantik ACK OTA (jalur MQTT produksi):** ACK membawa `phase`
+eksplisit — `ACCEPTED` berarti pekerjaan unduh DIMULAI (BELUM diflash).
+Hasil akhir hanya dari event `OTA_STATUS` (ACCEPTED → DOWNLOADING →
+VERIFIED → APPLIED / ROLLBACK); state machine lengkap terdokumentasi di
+`OtaManager.h` + `MqttOtaHandler.cpp`. Operator tidak boleh menganggap
+ACCEPTED = terpasang.
+
 **Rilis versi generic baru:** CI mem-build binari hanya di repo ini; sinkron
 ke PWA lewat skrip resmi:
 
 ```bash
 # 1. Edit src/plts_firmware_v1.ino, bump FIRMWARE_VERSION + header changelog
 # 2. Edit manifest.json → samakan "version" (guard menolak bila beda)
-python3 scripts/release_firmware_generic.py --pwa-path ../plts_monitor_PWA_only
+python3 scripts/release_firmware_generic.py --pwa-path ../PLTSMonitoring_PWA
 # 3. Commit kedua repo sesuai perintah yang dicetak skrip
 ```
 
@@ -602,7 +612,7 @@ byte-level). `FW_VERSION` tunggal-sumber.
 
 ```bash
 # clone kedua repo bersebelahan, lalu:
-cd plts_monitor_firmware-code.gs-etc/push-alarm
+cd PLTSMonitoring_Firmware-Backend/push-alarm
 npm i -D playwright && npx playwright install chromium   # sekali saja
 bash tests/run-all.sh
 ```
@@ -809,6 +819,7 @@ fallback.
 | v1.6.0 | 2026-08 | Multi-protokol BMS/inverter + provenance SOC + hot-apply |
 | v1.6.1 | 2026-08-27 | Kontrak kanonik `GET /api/alarms` `{active, history}` |
 | v1.6.3 | 2026-09-02 | Audit noise inverter: WDT di-fed DI DALAM loop unduh OTA (sebelumnya unduh lama = reset watchdog tengah flash) + stack `otaTask` 4K→6K + `yield()` 1 ms; bus I²C terkunci pulih otomatis (`Utils/I2cRecovery`: 9x pulsa SCL + STOP, dipanggil INA219/SHT31 sebelum keputusan cooldown); **sensitivitas ACS712 diaplikasi di boot** (bug lama: default driver 100 mV/A vs modul 185 mV/A = error arus AC sistematis 1.85x setelah reboot) + `calibration.update` MQTT kini men-set driver LANGSUNG (live-apply, bukan hanya next-boot, 4 field kalibrasi); `esp_task_wdt_reset` mengapit POST GAS blocking |
+| v1.7.0 *(generic)* | 2026-09-02 | Remediasi audit P1/P2: **sensor fail-closed** — field ke-13 `sensorFailPolicy` (default 1: INA219/ACS712 = input keselamatan WAJIB; sensor hilang → ARM DITOLAK + sistem RUN kehilangan sensor TRIP `SENSOR_LOSS`; policy 0 = opt-out eksplisit operator, tidak aman untuk produksi); **identitas versi single-source** — guard CI `test_version_identity.py` (manifest == `FIRMWARE_VERSION` == changelog header; maks SATU binari versi aktif di `bin/`); skema darurat 13 field disinkronkan GAS + PWA (validasi 3 lapis) |
 
 ---
 
@@ -980,9 +991,14 @@ LED kedip 10× → reboot ke AP Mode.
 
 ### 11.2 CI (GitHub Actions)
 
-`.github/workflows/build-firmware.yml` — uji Python (`scripts/test_*.py`),
-build `firmware/` (development+staging), build firmware-generic. Sinkron ke
-PWA `public/firmware/` tetap **manual via skrip rilis** (§4.6) — CI tidak
+`.github/workflows/build-firmware.yml` — uji Python (`scripts/test_*.py`,
+termasuk guard identitas versi `test_version_identity.py` dan uji lintas-lapis
+`test_wave7_10_crosslayer.py`), build `firmware/` (development+staging), build
+firmware-generic. Uji lintas-lapis wave 7-10 melewatkan pemeriksaan sisi PWA
+(M1/M2/C1a/C1b/C5b) secara graceful saat checkout tunggal — set
+`PLTS_PWA_REPO` untuk menjalankan 25 cek penuh (20 cek sisi
+firmware/GAS berjalan di CI single-repo). Sinkron ke PWA
+`public/firmware/` tetap **manual via skrip rilis** (§4.6) — CI tidak
 punya akses lintas-repo.
 
 ### 11.3 Pengujian lokal (reproduksi audit)
@@ -995,6 +1011,10 @@ for t in scripts/test_*.py; do python3 "$t" || echo "GAGAL: $t"; done
 node scripts/test_gas_contract.js
 node scripts/test_emergency_gas.js            # 46 — lapisan darurat WAVE-7
 python3 scripts/test_emergency_firmware_logic.py  # 34 — logika darurat + pola fail-safe
+
+# Identitas versi + lintas-lapis wave 7-10 (baru, 2026-09-02)
+python3 scripts/test_version_identity.py     # manifest == FIRMWARE_VERSION == changelog header
+python3 scripts/test_wave7_10_crosslayer.py  # 20 cek single-repo; PLTS_PWA_REPO=... untuk 25 penuh
 
 # Scan rahasia sumber
 python3 scripts/secret_scan.py $(find firmware -name '*.cpp' -o -name '*.h')
@@ -1028,6 +1048,9 @@ bash push-alarm/tests/run-all.sh
 | BMS lock lalu hilang berulang | Bus berisik / terminasi hilang | Terminator 120 Ω dua ujung; manual override protokol |
 | Fleet PWA semua 404/kosong | device_key tak dikirim pada LATEST / tidak terdaftar | Update PWA; daftarkan `device_key` di tab `Devices` |
 | `400 Unknown device_key` | Gerbang fail-closed aktif | Tambahkan baris di tab `Devices` (sama persis dengan `device_id` firmware/PWA) |
+| ARM ditolak dengan alasan `SENSOR_LOSS` | Sensor keselamatan (INA219/ACS712) hilang/tidak valid saat `sensorFailPolicy=1` (default v1.7.0) | Perilaku BENAR (fail-closed) — periksa wiring sensor (W.2/W.6, `P6`); kembalikan sensor sebelum ARM. Jangan set policy=0 di produksi |
+| PWA menolak koneksi MQTT `ws://` | Guard W7-1: hanya `wss://` di produksi | Gunakan URL broker `wss://` (port TLS 8884); `ws://` hanya `NODE_ENV=development` |
+| Sheet `EmergencyQueue` tidak lagi memanjang | Rotasi W10-1: `EMERGENCY_QUEUE_MAX_ROWS` (default 200) memangkas baris settled oldest-first | Perilaku normal — baris PENDING/DELIVERED TIDAK PERNAH dihapus; riwayat lama tetap bisa diaudit dari `EmergencyEvents` |
 
 ---
 
@@ -1067,10 +1090,10 @@ bash push-alarm/tests/run-all.sh
 helpers; sertakan hasil `pio run` + suite sukses; PR ke `main`.
 
 **License:** MIT — bebas dipakai, dimodifikasi, didistribusikan. Cantumkan
-atribusi ke `desvandi/plts_monitor_*`.
+atribusi ke `desvandi/PLTSMonitoring_*`.
 
 ---
 
 *Dokumentasi operasional lengkap: [Panduan_Deploy_Production_MonitorIoT.pdf](Panduan_Deploy_Production_MonitorIoT.pdf)
-(Edisi 3). Arsip audit historis: riwayat git commit sebelum 2026-09-01
+(Edisi 4). Arsip audit historis: riwayat git commit sebelum 2026-09-01
 (folder `docs/remediation-2026-08/` + 2 PDF audit).*
