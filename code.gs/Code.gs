@@ -18,8 +18,11 @@
  *            is_late; HISTORY orders by event_time, not arrival.
  *   [P1-004] Gaps: missing sequence ranges are RECORDED (SeqIndex ledger),
  *            never filled with synthetic rows or interpolated energy.
- *   [P1-016] Atomicity: every mutation runs under LockService (device-scoped)
- *            — check-then-insert is a single critical section.
+ *   [P1-016] Atomicity: state-bearing mutations run under LockService
+ *            (script-wide — GAS has no per-device locks): telemetry ingest,
+ *            emergency queue insert + settle. Read-only scans and
+ *            UUID-keyed appends (calibration/OTA publish) run lock-free by
+ *            design. [W10-2 2026-09]
  *   [WAVE-2 2026-08-28] Data honesty (re-audit GAS-2-E/F/G/M):
  *            honest per-channel quality on read (no fabricated VALID),
  *            DAILY buckets in the deployment timezone (Config TIMEZONE,
@@ -184,6 +187,13 @@ const DEFAULT_CONFIG = [
   ['EMERGENCY_QUEUE_TTL_MIN', '10'],
   ['EMERGENCY_EVENTS_MAX_ROWS', '500'],
   ['EMERGENCY_ALERT_COOLDOWN_MIN', '2'],
+  // [W10-1 REMEDIATION 2026-09] Queue-sheet growth bound. Settled rows
+  // (APPLIED/REJECTED/EXPIRED) beyond this cap are pruned oldest-first;
+  // servable rows (PENDING/DELIVERED) are NEVER deleted — TTL expiry settles
+  // them first. Every other sheet already rotates (WAVE-4 / GAS-2-V); the
+  // queue was the last unbounded one (full-sheet reads on EVERY emergency
+  // touch grow linearly with history).
+  ['EMERGENCY_QUEUE_MAX_ROWS', '200'],
 ];
 
 // Flat persistence columns (the ADAPTER representation — not the contract).
@@ -531,6 +541,16 @@ function verifyHmac_(auth, body, action) {
   if (sig !== String(auth.signature).toLowerCase()) {
     return { ok: false, reason: 'signature mismatch' };
   }
+  // [W10-3 NOTE 2026-09 — ACCEPTED RESIDUAL RISK] The nonce check-then-put
+  // pair is not atomic: two truly concurrent requests carrying the SAME
+  // captured envelope could both pass cache.get() before either cache.put().
+  // Accepted because (a) the exploit requires a captured valid signature AND
+  // millisecond-level racing, (b) every mutation has its own idempotency
+  // guard anyway — TELEMETRY dedups on (device_key, sequence) inside the
+  // script lock, emergency ACK settle is idempotent, queue rows are
+  // device+command bound — and (c) CacheService offers no put-if-absent.
+  // Reserving the nonce BEFORE signature verification would burn victim
+  // nonces on attacker garbage (a worse DoS), so verify-then-reserve stays.
   cache.put(nonceKey, '1', 600);
   // [WAVE-4 / GAS-2-X] No sheet write-back of last_nonce/last_ts: that added
   // a sheet WRITE (~0.5–1.5 s) to EVERY authenticated POST with zero
@@ -1688,6 +1708,11 @@ function expireStaleEmergencyCommands_() {
  * Operator-only (verified by the caller). Idempotent-ish: an identical
  * still-servable command for the same device returns the EXISTING row instead
  * of stacking a second one (operator double-tap must not double-apply).
+ * [W10-2 REMEDIATION 2026-09] The duplicate-scan + appendRow critical section
+ * now runs under the script Lock (same discipline as recordTelemetry_):
+ * two concurrent operator submissions can no longer both pass the scan and
+ * append two rows. Telegram alert fires AFTER the lock is released (GAS-2-O:
+ * an external network round-trip must never serialize the fleet).
  */
 function emergencyCommand_(body, deviceKey) {
   if (!deviceKey) return resp_(400, 'Missing device_key', null);
@@ -1702,6 +1727,24 @@ function emergencyCommand_(body, deviceKey) {
     if (!v.ok) return resp_(400, 'Invalid emergency config: ' + v.error, null);
     paramsJson = JSON.stringify(v.config);
   }
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return resp_(503, 'Backend busy — retry (lock timeout)', null);
+  }
+  let out;
+  try {
+    out = emergencyCommandLocked_(command, paramsJson, note, deviceKey);
+  } finally {
+    lock.releaseLock();
+  }
+  if (out.alert) {
+    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_CMD_' + deviceKey);
+  }
+  return out.resp;
+}
+
+/** Locked critical section: expire stale rows, dedup scan, append, rotate. */
+function emergencyCommandLocked_(command, paramsJson, note, deviceKey) {
   expireStaleEmergencyCommands_();
   const sheet = emergencySheet_();
   const last = sheet.getLastRow();
@@ -1713,10 +1756,10 @@ function emergencyCommand_(body, deviceKey) {
       if (status !== 'PENDING' && status !== 'DELIVERED') continue;
       if (String(rows[i][2]).toUpperCase() !== command) continue;
       if (String(rows[i][3]) !== paramsJson) continue;
-      return resp_(200, 'Emergency command already queued', {
+      return { resp: resp_(200, 'Emergency command already queued', {
         command_id: String(rows[i][0]), command: command, status: status,
         duplicate: true
-      });
+      }) };
     }
   }
   const commandId = Utilities.getUuid();
@@ -1724,13 +1767,38 @@ function emergencyCommand_(body, deviceKey) {
     commandId, String(deviceKey), command, paramsJson, note,
     new Date(), 'PENDING', '', ''
   ]);
-  maybeSendTelegramAlert_(
-    'EMERGENCY ' + command + ' queued [' + deviceKey + ']' +
-    (note ? ' — ' + note : ''),
-    'PLTS_TG_EMG_CMD_' + deviceKey);
-  return resp_(200, 'Emergency command queued', {
+  rotateEmergencyQueue_();
+  return { resp: resp_(200, 'Emergency command queued', {
     command_id: commandId, command: command, status: 'PENDING'
-  });
+  }), alert: 'EMERGENCY ' + command + ' queued [' + deviceKey + ']' +
+    (note ? ' — ' + note : '') };
+}
+
+/**
+ * [W10-1 REMEDIATION 2026-09] Bound EmergencyQueue growth. Every other sheet
+ * rotates (WAVE-4 / GAS-2-V); the queue was the last unbounded one — each
+ * emergency touch reads the FULL sheet, so latency (and GAS read quota)
+ * degraded linearly with operator history. Settled rows beyond
+ * EMERGENCY_QUEUE_MAX_ROWS are deleted oldest-first; servable rows
+ * (PENDING/DELIVERED) are NEVER deleted — TTL expiry settles them on the
+ * next touch, safety over size.
+ */
+function rotateEmergencyQueue_() {
+  const cap = parseInt(safeConfig_('EMERGENCY_QUEUE_MAX_ROWS'), 10) || 200;
+  const sheet = emergencySheet_();
+  const dataRows = sheet.getLastRow() - 1;
+  if (dataRows <= cap) return;
+  const rows = sheet.getRange(2, 1, dataRows, EMERGENCY_QUEUE_HEADER.length).getValues();
+  let excess = dataRows - cap;
+  let deleted = 0;
+  for (let i = 0; i < rows.length && excess > 0; i++) {
+    const status = String(rows[i][6] || '').toUpperCase();
+    if (status !== 'APPLIED' && status !== 'REJECTED' && status !== 'EXPIRED') continue;
+    sheet.deleteRows(i + 2 - deleted, 1);   // index shift from prior deletes
+    deleted++;
+    excess--;
+  }
+  // Any remaining excess is live PENDING/DELIVERED rows — intentionally kept.
 }
 
 /**
@@ -1784,6 +1852,10 @@ function emergencyPendingFor_(deviceKey) {
  * command was queued for (GAS-2-I pattern). result: 'APPLIED' | 'REJECTED'.
  * Idempotent: re-ACK of an APPLIED row returns 200 without side effects
  * (in-flight retries are safe).
+ * [W10-2 REMEDIATION 2026-09] The scan + settle + event-append critical
+ * section runs under the script Lock (two concurrent device retries can no
+ * longer both see an unsettled row and double-append events). Telegram fires
+ * AFTER the lock is released.
  */
 function emergencyAck_(commandId, result, message, state, deviceKey) {
   if (!commandId) return resp_(400, 'Missing command_id', null);
@@ -1795,20 +1867,38 @@ function emergencyAck_(commandId, result, message, state, deviceKey) {
   if (res !== 'APPLIED' && res !== 'REJECTED') {
     return resp_(400, "result must be 'APPLIED' or 'REJECTED'", null);
   }
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return resp_(503, 'Backend busy — retry (lock timeout)', null);
+  }
+  let out;
+  try {
+    out = emergencyAckLocked_(commandId, res, message, state, deviceKey);
+  } finally {
+    lock.releaseLock();
+  }
+  if (out.alert) {
+    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_ACK_' + deviceKey);
+  }
+  return out.resp;
+}
+
+/** Locked critical section: scan, settle row, append the operator event. */
+function emergencyAckLocked_(commandId, res, message, state, deviceKey) {
   const sheet = emergencySheet_();
   const last = sheet.getLastRow();
-  if (last < 2) return resp_(404, 'command_id not found', null);
+  if (last < 2) return { resp: resp_(404, 'command_id not found', null) };
   const rows = sheet.getRange(2, 1, last - 1, EMERGENCY_QUEUE_HEADER.length).getValues();
   for (let i = rows.length - 1; i >= 0; i--) {
     if (String(rows[i][0]) !== String(commandId)) continue;
     const owner = String(rows[i][1]).trim();
     if (owner !== String(deviceKey).trim()) {
-      return resp_(400, 'command_id belongs to device "' + owner +
-        '" — cross-device ACK rejected (authenticated as "' + deviceKey + '")', null);
+      return { resp: resp_(400, 'command_id belongs to device "' + owner +
+        '" — cross-device ACK rejected (authenticated as "' + deviceKey + '")', null) };
     }
     const status = String(rows[i][6] || '').toUpperCase();
     if (status === 'APPLIED' || status === 'REJECTED' || status === 'EXPIRED') {
-      return resp_(200, 'Command already settled: ' + status, { settled: status });
+      return { resp: resp_(200, 'Command already settled: ' + status, { settled: status }) };
     }
     sheet.getRange(i + 2, 7).setValue(res);
     sheet.getRange(i + 2, 8).setValue(new Date());
@@ -1821,13 +1911,12 @@ function emergencyAck_(commandId, result, message, state, deviceKey) {
       String(rows[i][2]).toUpperCase() + ' (operator)',
       String(message || '').slice(0, 200),
       String(state || 'UNKNOWN'), 'operator');
-    maybeSendTelegramAlert_(
-      'EMERGENCY ' + res + ' [' + deviceKey + '] cmd=' + String(rows[i][2]).toUpperCase() +
-      (message ? ' — ' + String(message).slice(0, 120) : ''),
-      'PLTS_TG_EMG_ACK_' + deviceKey);
-    return resp_(200, 'Emergency command ' + res.toLowerCase(), { result: res });
+    return { resp: resp_(200, 'Emergency command ' + res.toLowerCase(), { result: res }),
+             alert: 'EMERGENCY ' + res + ' [' + deviceKey + '] cmd=' +
+               String(rows[i][2]).toUpperCase() +
+               (message ? ' — ' + String(message).slice(0, 120) : '') };
   }
-  return resp_(404, 'command_id not found', null);
+  return { resp: resp_(404, 'command_id not found', null) };
 }
 
 /**

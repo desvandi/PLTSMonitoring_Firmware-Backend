@@ -544,6 +544,8 @@ perangkat memvalidasi ulang + eksekusi --EMERGENCY_ACK--> baris APPLIED
 | Otorisasi | `EMERGENCY_COMMAND` wajib `admin_token` (= `Config!ADMIN_TOKEN`); **fail-closed** saat kosong — kredensial perangkat TIDAK cukup menghentikan/menyalakan sistem |
 | Konsumsi | Piggyback pada respons `TELEMETRY` (nol polling tambahan saat jalur normal) + `EMERGENCY_PENDING` khusus (15 dtk) saat backoff |
 | Umur perintah | TTL `EMERGENCY_QUEUE_TTL_MIN` (default 10 menit) — perintah basi EXPIRED, tidak pernah diterapkan diam-diam |
+| Batas pertumbuhan queue | `EMERGENCY_QUEUE_MAX_ROWS` (default 200 baris) — baris settled (APPLIED/REJECTED/EXPIRED) dipangkas oldest-first; baris servable (PENDING/DELIVERED) TIDAK PERNAH dihapus (W10-1 2026-09: EmergencyQueue adalah sheet terakhir yang belum berputasi; pembacaan full-sheet tiap sentuhan emergency tumbuh linearis dengan riwayat) |
+| Atomisitas | `EMERGENCY_COMMAND` (scan-dedup + append) dan `EMERGENCY_ACK` (scan + settle + event) kini berjalan di dalam `LockService` script-lock — sama dengan disiplin ingest TELEMETRY; Telegram tetap dikirim SETELAH lock dilepas (W10-2 2026-09) |
 | ACK | Terikat `device_key` (ACK lintas perangkat → 400), idempoten (re-ACK → 200 settled) |
 | Validasi CONFIG | Skema **13 field** divalidasi **3 lapis** (PWA clamp → GAS range-check → firmware range-check); field tak dikenal dibuang |
 | Event | `EMERGENCY_EVENT` (TRIP/ESTOP/BOOT/CRASHLOOP/ARMED/DISARMED/…) → sheet `EmergencyEvents` (rotasi 500 baris) + Telegram opsional + cooldown per topik |

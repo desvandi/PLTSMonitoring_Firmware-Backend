@@ -31,6 +31,13 @@
  *     CONFIG is merged with server-side defaults (unknown fields dropped —
  *     only whitelisted keys ever reach the device).
  *
+ *   Group G — [W10-1/W10-2 2026-09] Queue rotation + lock atomicity:
+ *     EMERGENCY_QUEUE_MAX_ROWS bounds growth (settled rows pruned
+ *     oldest-first; servable PENDING/DELIVERED rows NEVER deleted);
+ *     EMERGENCY_COMMAND and EMERGENCY_ACK acquire the script lock around
+ *     their check-then-mutate critical sections; ACK appends exactly one
+ *     event row; Telegram alerts still fire from outside the lock.
+ *
  *   Group F — TELEMETRY piggyback + v1.7 columns:
  *     Ingest stores i_ac_gen + emergency fields; the TELEMETRY response
  *     carries pendingEmergency when a command is queued (and null when the
@@ -181,7 +188,8 @@ function createGasContext() {
       MimeType: { JSON: 'JSON' },
     },
     UrlFetchApp: {
-      fetch: (url) => { telegramSent.push(String(url)); return {}; },
+      fetch: (url, opts) => { telegramSent.push(String(url) + ' :: ' +
+        (opts && opts.payload ? JSON.stringify(opts.payload) : '')); return {}; },
     },
   };
 
@@ -545,6 +553,80 @@ console.log('\n[F] TELEMETRY piggyback + v1.7 columns:');
   check('F10 pre-1.7 row → no fabricated emergency block',
     f10.data.emergency === undefined && f10.data.ac.gensetRmsCurrent === undefined,
     JSON.stringify(f10.data.emergency));
+}
+
+// ---------------------------------------------------------------------------
+// GROUP G — [W10-1/W10-2 2026-09] Queue rotation + lock atomicity
+// ---------------------------------------------------------------------------
+console.log('[G] Queue rotation + lock atomicity:');
+{
+  const genv = createGasContext();
+  genv.sandbox.setupMasterTemplate();
+  setConfig(genv, 'ADMIN_TOKEN', ADMIN);
+  setConfig(genv, 'EMERGENCY_QUEUE_MAX_ROWS', '5');   // small cap for the test
+  setConfig(genv, 'TELEGRAM_BOT_TOKEN', '111:tg-test');   // G4 alert delivery
+  setConfig(genv, 'TELEGRAM_CHAT_ID', '42');
+  genv.sandbox.invalidatePltsCache();
+  genv.ss.sheets['Devices'].appendRow([DEV, '', 'Gudang Rotasi', '', '']);
+
+  // G1 — settled rows are pruned oldest-first; servable rows survive.
+  // (EmergencyQueue is created LAZILY on first emergency touch — seed it.)
+  doPost(genv, { action: 'EMERGENCY_COMMAND', token: TOKEN,
+    admin_token: ADMIN, command: 'DISARM', device_key: DEV, note: 'seed' });
+  const q = genv.ss.sheets['EmergencyQueue'];
+  for (let i = 0; i < 8; i++) {
+    q.appendRow(['g-settled-' + i, DEV, 'DISARM', '', 'settled row ' + i,
+      new Date(Date.now() - (8 - i) * 60000), 'APPLIED', new Date(), 'ok']);
+  }
+  q.appendRow(['g-pending-live', DEV, 'ARM', '', 'must survive rotation',
+    new Date(), 'PENDING', '', '']);
+  const before = q.getLastRow() - 1;   // 9 data rows
+  const g1 = doPost(genv, { action: 'EMERGENCY_COMMAND', token: TOKEN,
+    admin_token: ADMIN, command: 'CONFIG', device_key: DEV,
+    config: { vbatLowV: 44.0 } });
+  const after = q.getLastRow() - 1;
+  const ids = q.getDataRange().getValues().map((r) => String(r[0]));
+  check('G1 rotation prunes settled rows beyond cap (9+1 -> <= 5+1 new)',
+    g1.status === 'SUCCESS' && after <= 6 && after < before,
+    `before=${before} after=${after} resp=${JSON.stringify(g1)}`);
+  check('G1b oldest settled rows deleted, newest kept',
+    ids.indexOf('g-settled-0') === -1 && ids.indexOf('g-settled-7') >= 0,
+    JSON.stringify(ids));
+  check('G1c servable (PENDING) row NEVER deleted by rotation',
+    ids.indexOf('g-pending-live') >= 0, JSON.stringify(ids));
+
+  // G2 — EMERGENCY_COMMAND runs under the script lock.
+  const locksBefore = genv.locks.acquired;
+  doPost(genv, { action: 'EMERGENCY_COMMAND', token: TOKEN,
+    admin_token: ADMIN, command: 'DISARM', device_key: DEV });
+  check('G2 EMERGENCY_COMMAND acquires the script lock',
+    genv.locks.acquired > locksBefore,
+    `before=${locksBefore} after=${genv.locks.acquired}`);
+
+  // G3 — EMERGENCY_ACK runs under the script lock, settles exactly once.
+  const pending = doPost(genv, { action: 'EMERGENCY_PENDING', token: TOKEN,
+    device_key: DEV });
+  const cmdId = pending.data && pending.data.command_id;
+  const evSheetBefore = genv.ss.sheets['EmergencyEvents'];
+  const evRowsBefore = evSheetBefore ? evSheetBefore.getLastRow() : 1;
+  const locksBefore3 = genv.locks.acquired;
+  const g3 = doPost(genv, { action: 'EMERGENCY_ACK', token: TOKEN,
+    device_key: DEV, command_id: cmdId, result: 'APPLIED', message: 'relay on' });
+  const evRowsAfter = genv.ss.sheets['EmergencyEvents'].getLastRow();
+  check('G3 EMERGENCY_ACK acquires the script lock and settles',
+    genv.locks.acquired > locksBefore3 && g3.code === 200,
+    `locks ${locksBefore3}->${genv.locks.acquired} resp=${JSON.stringify(g3)}`);
+  check('G3b ACK appends exactly ONE event row',
+    evRowsAfter === evRowsBefore + 1, `before=${evRowsBefore} after=${evRowsAfter}`);
+
+  // G4 — Telegram alert still fires for the queued command (outside lock).
+  const tgText = genv.telegramSent.join('\n');
+  // (The seed DISARM consumed the per-device command-alert cooldown; the
+  //  seed alert itself proves delivery from inside the locked path.)
+  check('G4 command Telegram alert still fires', /EMERGENCY (DISARM|CONFIG) queued/.test(tgText),
+    `sent=${genv.telegramSent.length}`);
+  check('G4b ACK Telegram alert carries the result', /EMERGENCY APPLIED/.test(tgText),
+    `sent=${genv.telegramSent.length}`);
 }
 
 // ---------------------------------------------------------------------------
