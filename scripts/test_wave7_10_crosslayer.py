@@ -61,11 +61,25 @@ def check(cid, desc, cond, detail=""):
         print(f"  [FAIL] {cid}: {desc}" + (f"  -> {detail}" if detail else ""))
 
 
+# --- PWA availability: single-repo CI checkouts skip PWA-side checks ---------
+PWA_AVAILABLE = PWA.exists() and (PWA / "src" / "lib" / "mqtt.ts").exists()
+if not PWA_AVAILABLE:
+    print("  [SKIP] PWA repo not present (single-repo CI checkout) — "
+          "PWA-side checks (M1/M2/C1a/C1b/C5b) skipped; set PLTS_PWA_REPO "
+          "to run the full cross-layer suite")
+
+
+def check_or_skip(cid, desc, cond, detail=""):
+    if not PWA_AVAILABLE:
+        print(f"  [SKIP] {cid}: {desc} (PWA repo absent)")
+        return
+    check(cid, desc, cond, detail)
+
 # ---------------------------------------------------------------------------
 print("== WAVE 7: MQTT/TLS security review ==")
 
 # --- M1: PWA mqtt.ts wss:// scheme guard (fail-closed TLS) ----------------
-mqtt_src = MQTT_TS.read_text(encoding="utf-8")
+mqtt_src = MQTT_TS.read_text(encoding="utf-8") if PWA_AVAILABLE else ""
 # Strip comments so a 'wss://' mention in a comment cannot fake a pass.
 mqtt_code = re.sub(r"//.*", "", mqtt_src)
 mqtt_code = re.sub(r"/\*.*?\*/", "", mqtt_code, flags=re.S)
@@ -73,7 +87,7 @@ has_scheme_guard = bool(re.search(
     r'protocol\s*===?\s*[\'"]wss:|startsWith\(\s*[\'"]wss://|'
     r'scheme\s*===?\s*[\'"]wss',
     mqtt_code))
-check("M1", "PWA connectMqtt() enforces wss:// (TLS-only broker URL) in CODE",
+check_or_skip("M1", "PWA connectMqtt() enforces wss:// (TLS-only broker URL) in CODE",
       has_scheme_guard,
       "no wss:// scheme validation in connectMqtt() — a ws:// (plaintext) "
       "broker URL is silently accepted in production builds")
@@ -83,7 +97,7 @@ public_brokers = ["broker.hivemq.com", "broker.emqx.io", "test.mosquitto.org",
                   "public.mqtthq.com"]
 mqtt_defaults = re.findall(r"MQTT_BROKER_URL\s*=\s*([^;]+);", mqtt_src)
 leaked = [pb for pb in public_brokers if any(pb in d for d in mqtt_defaults)]
-check("M2", "PWA has no public-broker fallback default", not leaked,
+check_or_skip("M2", "PWA has no public-broker fallback default", not leaked,
       f"public broker(s) present as default: {leaked}")
 
 # --- M3: setInsecure only on DEVELOPMENT_BUILD path ------------------------
@@ -128,7 +142,7 @@ print("== WAVE 8: cross-layer contract consistency ==")
 
 # --- C1: Emergency CONFIG schema parity (GAS <-> PWA <-> firmware) ---------
 gas_src = GAS.read_text(encoding="utf-8")
-emg_ts_src = EMERGENCY_TS.read_text(encoding="utf-8")
+emg_ts_src = EMERGENCY_TS.read_text(encoding="utf-8") if PWA_AVAILABLE else ""
 ino_src = INO.read_text(encoding="utf-8")
 
 # GAS fields: ['name', min, max, dflt]
@@ -143,10 +157,11 @@ for f in re.findall(
 pwa_m = re.search(
     r"export const EMERGENCY_CONFIG_FIELDS[^=]+= \[(.*?)\n\];", emg_ts_src, re.S)
 pwa_fields = {}
-for f in re.findall(
-        r'key:\s*"([A-Za-z0-9_]+)",\s*min:\s*(-?[\d.]+),\s*max:\s*(-?[\d.]+),'
-        r'\s*dflt:\s*(-?[\d.]+)', pwa_m.group(1)):
-    pwa_fields[f[0]] = (float(f[1]), float(f[2]), float(f[3]))
+if pwa_m:   # absent PWA repo (single-repo CI) → C1a/C1b report SKIP
+    for f in re.findall(
+            r'key:\s*"([A-Za-z0-9_]+)",\s*min:\s*(-?[\d.]+),\s*max:\s*(-?[\d.]+),'
+            r'\s*dflt:\s*(-?[\d.]+)', pwa_m.group(1)):
+        pwa_fields[f[0]] = (float(f[1]), float(f[2]), float(f[3]))
 
 # Firmware struct defaults + ranges from comments [a..b]
 fw_struct_m = re.search(
@@ -160,7 +175,7 @@ for line in fw_struct_m.group(1).splitlines():
         fw_defaults[d.group(1)] = float(d.group(2))
         fw_ranges[d.group(1)] = (float(d.group(3)), float(d.group(4)))
 
-check("C1a", "Emergency schema: GAS / PWA / firmware all define 13 fields",
+check_or_skip("C1a", "Emergency schema: GAS / PWA / firmware all define 13 fields",
       len(gas_fields) == len(pwa_fields) == len(fw_defaults) == 13,
       f"GAS={len(gas_fields)} PWA={len(pwa_fields)} FW={len(fw_defaults)}")
 
@@ -178,7 +193,7 @@ for name, (mn, mx, df) in gas_fields.items():
         mismatch.append(f"{name}: default GAS {df} != FW {f_d}")
     if f_r and (mn, mx) != f_r:
         mismatch.append(f"{name}: range GAS{(mn, mx)} != FW {f_r}")
-check("C1b", "Emergency schema: ranges + defaults identical across 3 layers",
+check_or_skip("C1b", "Emergency schema: ranges + defaults identical across 3 layers",
       not mismatch, "; ".join(mismatch))
 
 # --- C2: firmware emgApplyCommand range checks == schema ---------------------
@@ -247,7 +262,7 @@ pwa_subs = set(re.findall(r"`\$\{baseTopic\}/([a-z]+)`", mqtt_src))
 allowed = {"status", "log", "online", "ack", "config", "ota"}
 check("C5a", "Firmware MQTT topic suffixes within documented contract",
       fw_suffixes <= allowed, f"unknown suffixes: {fw_suffixes - allowed}")
-check("C5b", "PWA subscribes only to monitoring topics (no command topics)",
+check_or_skip("C5b", "PWA subscribes only to monitoring topics (no command topics)",
       bool(pwa_subs) and pwa_subs <= {"status", "log", "online"},
       f"PWA subscription set: {pwa_subs}")
 
