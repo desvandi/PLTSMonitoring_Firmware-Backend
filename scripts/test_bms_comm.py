@@ -18,6 +18,8 @@ Run:  python3 scripts/test_bms_comm.py
 """
 
 import math
+import os
+import re
 import sys
 
 PASS = 0
@@ -102,6 +104,9 @@ def plausible_soh(v):   return not math.isnan(v) and 0 <= v <= 100
 def plausible_volt(v):  return not math.isnan(v) and 10 <= v <= 70
 def plausible_cur(v):   return not math.isnan(v) and -1000 <= v <= 1000
 def plausible_cell(v):  return not math.isnan(v) and 1.5 <= v <= 4.5
+# [2026-09 #4] bmsTempPlausible mirror — physically-possible envelope (a real
+# 90 C overheating pack IS reported; only impossible garbage is nulled).
+def plausible_temp(v):  return not math.isnan(v) and -40 < v < 100
 
 
 def decode_registers(regs):
@@ -126,7 +131,7 @@ def decode_registers(regs):
     out["soh"] = soh if plausible_soh(soh) else None
     out["cellVoltageMin"] = cmin if plausible_cell(cmin) else None
     out["cellVoltageMax"] = cmax if plausible_cell(cmax) else None
-    out["temperature"] = t if -40 < t < 100 else None
+    out["temperature"] = t if plausible_temp(t) else None
     out["chargeCurrentLimit"] = ccl if plausible_cur(ccl) else None
     out["dischargeCurrentLimit"] = dcl if plausible_cur(dcl) else None
     out["cycleCount"] = u16(OFF_CYCLE_COUNT)
@@ -171,11 +176,22 @@ def test_register_decode():
     bad[OFF_PACK_VOLTAGE] = 8000      # 80 V — outside 10..70 plausibility
     bad[OFF_CELL_MIN_MV] = 9999       # 9.999 V — impossible cell
     bad[OFF_CELL_COUNT] = 500         # impossible count → 0 (not reported)
+    bad[OFF_TEMP_X01C] = 32767        # +3276.7 C — sensor garbage
     d2 = decode_registers(bad)
     check("implausible soc → None", d2["soc"] is None)
     check("implausible voltage → None", d2["voltage"] is None)
     check("implausible cell → None", d2["cellVoltageMin"] is None)
     check("implausible cellCount → 0 (not reported)", d2["cellCount"] == 0)
+    check("implausible temperature (sensor garbage) → None", d2["temperature"] is None)
+    # [2026-09 #4] A REAL overheat must survive the gate (possible ≠ safe).
+    hot = [0] * REG_COUNT
+    hot[OFF_TEMP_X01C] = 900          # +90.0 C — dangerous but REAL
+    d3 = decode_registers(hot)
+    check("real overheat (+90 C) is REPORTED, not nulled", d3["temperature"] == 90.0)
+    cold = [0] * REG_COUNT
+    cold[OFF_TEMP_X01C] = -600        # -60.0 C — impossible for this system
+    d4 = decode_registers(cold)
+    check("impossible cold (-60 C) → None", d4["temperature"] is None)
 
 
 # ============================================================================
@@ -408,6 +424,45 @@ def test_provenance_cascade():
           provenance(False, False, False, False, False) == "UNKNOWN")
 
 
+# ============================================================================
+# 6. [2026-09 #4 closure] Plausibility-gate COVERAGE — static source asserts
+# Every gated BmsData field must actually pass its gate at EVERY decode site;
+# a transport must never smuggle an impossible value past a forgotten gate.
+# ============================================================================
+def test_gate_coverage():
+    here = os.path.dirname(os.path.abspath(__file__))
+    fw = os.path.join(here, "..", "firmware", "Comm")
+    proto = open(os.path.join(fw, "BatteryProtocol.h"), encoding="utf-8").read()
+    rtu = open(os.path.join(fw, "ModbusRtuClient.cpp"), encoding="utf-8").read()
+    can = open(os.path.join(fw, "PylontechCanClient.cpp"), encoding="utf-8").read()
+
+    gates = ["bmsSocPlausible", "bmsSohPlausible", "bmsVoltPlausible",
+             "bmsCurrentPlausible", "bmsCellVPlausible", "bmsTempPlausible"]
+    for g in gates:
+        check(f"gate {g} defined in BatteryProtocol.h (single source)",
+              ("inline bool " + g) in proto)
+    check("Modbus RTU decode gates temperature via bmsTempPlausible",
+          "bmsTempPlausible(t)" in rtu)
+    check("Pylontech CAN decode gates temperature via bmsTempPlausible",
+          "bmsTempPlausible(t)" in can)
+    check("no inline duplicated temperature range check left in clients",
+          "t > -40.0f" not in rtu and "t > -40.0f" not in can)
+    # Every float field assignment in decodeRegisters is gate-wrapped.
+    gated = ["out.voltage", "out.current", "out.soc", "out.soh",
+             "out.cellVoltageMin", "out.cellVoltageMax", "out.temperature",
+             "out.chargeCurrentLimit", "out.dischargeCurrentLimit"]
+    for f in gated:
+        m = re.search(re.escape(f) + r"\s*=", rtu)
+        line_start = rtu.rfind("\n", 0, m.start()) + 1
+        line = rtu[line_start:rtu.find("\n", m.end())]
+        check(f"RTU decode assigns {f} only through a plausibility gate",
+              re.search(r"if \(bms\w+Plausible", line) is not None, line.strip())
+    check("cellCount bounded (0 < n < 256) in RTU decode",
+          "cells > 0 && cells < 256" in rtu)
+    check("moduleCount bounded (0 < n < 64) in CAN decode",
+          re.search(r"d\[0\] > 0 && d\[0\] < 64", can) is not None)
+
+
 if __name__ == "__main__":
     test_crc16()
     test_register_decode()
@@ -415,5 +470,6 @@ if __name__ == "__main__":
     test_state_machine()
     test_cross_check()
     test_provenance_cascade()
+    test_gate_coverage()
     print(f"\nBMS comm logic tests: {PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

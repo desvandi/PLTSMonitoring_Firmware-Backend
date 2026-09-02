@@ -158,6 +158,26 @@ inline String serialize(const Core::SystemStatus& s) {
 
   ac["signalQuality"] = Core::acSignalQualityToStr(s.ac.signalQuality);
 
+#if PLTS_ENABLE_PZEM_AC
+  // v1.7.0 — REAL AC meter (PZEM-004T, optional). Absent from <= v1.6.x
+  // payloads entirely (compiled out) — consumers must treat the missing
+  // block as "no meter, estimatedPower is the estimate".
+  JsonObject acMeter = ac.createNestedObject("meter");
+  acMeter["connected"] = s.ac.meter.connected;
+  if (isValidFloat(s.ac.meter.voltage))     acMeter["voltage"].set(s.ac.meter.voltage);
+  else                                      acMeter["voltage"].set(nullptr);
+  if (isValidFloat(s.ac.meter.current))     acMeter["current"].set(s.ac.meter.current);
+  else                                      acMeter["current"].set(nullptr);
+  if (isValidFloat(s.ac.meter.power))       acMeter["power"].set(s.ac.meter.power);
+  else                                      acMeter["power"].set(nullptr);
+  if (isValidFloat(s.ac.meter.energy))      acMeter["energy"].set(s.ac.meter.energy);
+  else                                      acMeter["energy"].set(nullptr);
+  if (isValidFloat(s.ac.meter.frequency))   acMeter["frequency"].set(s.ac.meter.frequency);
+  else                                      acMeter["frequency"].set(nullptr);
+  if (isValidFloat(s.ac.meter.powerFactor)) acMeter["powerFactor"].set(s.ac.meter.powerFactor);
+  else                                      acMeter["powerFactor"].set(nullptr);
+#endif
+
   // Environment block
   JsonObject env = doc.createNestedObject("environment");
   JsonObject envT = env.createNestedObject("temperature");
@@ -198,6 +218,19 @@ inline String serialize(const Core::SystemStatus& s) {
   health["storageOk"]            = s.health.storageOk;
   health["spoolSize"]            = s.health.spoolSize;
   health["highestAlarmSeverity"]  = Core::severityToStr(s.health.highestAlarmSeverity);
+
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE emergency layer block (additive; <= v1.6.3 consumers
+  // treat absent as DISABLED — the PWA/GAS contract is neutral-frontend).
+  JsonObject emg = doc.createNestedObject("emergency");
+  emg["state"]          = s.emergency.state ? s.emergency.state : "DISABLED";
+  emg["reason"]         = s.emergency.reason ? s.emergency.reason : "";
+  emg["estopOpen"]      = s.emergency.estopOpen;
+  emg["relayEnergized"] = s.emergency.relayEnergized;
+  emg["trips"]          = s.emergency.trips;
+  emg["tripAtMs"]       = s.emergency.tripAtMs;
+  emg["crashChain"]     = s.emergency.crashChain;
+#endif
 
   // Active alarms
   JsonArray alarms = doc.createNestedArray("activeAlarms");

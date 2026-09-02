@@ -38,6 +38,12 @@ void BatteryCommManager::begin() {
   const char* mode = Core::cfgBmsProtocol;
   if (strcmp(mode, "none") == 0) {
     _setState(State::Disabled);
+  } else if (strcmp(mode, "rs485_console") == 0) {
+    // v1.7.0 — bench capture mode: the shared RS485 port is owned exclusively
+    // by Comm::rs485Console (passive, never transmits). No polling client is
+    // built, no probing runs — capture and polling never collide on the bus.
+    _setState(State::Disabled);
+    _log("RS485_CONSOLE_MODE — passive capture, no BMS polling", ProtocolId::None);
   } else {
     _setState(State::Probing);
     _log("BMS_COMM_START", ProtocolId::None);

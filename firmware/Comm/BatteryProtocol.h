@@ -158,6 +158,11 @@ inline bool bmsSohPlausible(float soh)   { return Core::isValidFloat(soh) && soh
 inline bool bmsVoltPlausible(float v)    { return Core::isValidFloat(v) && v >= 10.0f && v <= 70.0f; }
 inline bool bmsCurrentPlausible(float i) { return Core::isValidFloat(i) && i >= -1000.0f && i <= 1000.0f; }
 inline bool bmsCellVPlausible(float v)   { return Core::isValidFloat(v) && v >= 1.5f && v <= 4.5f; }
+// [2026-09 #4 closure] Temperature: -40..+100 C is the PHYSICALLY-POSSIBLE
+// envelope (not the safe envelope — a genuinely overheating pack at 90 C is
+// REAL data and must be reported, never nulled; plausibility rejects only
+// impossible values like sensor garbage 3276.7 C or -55 C).
+inline bool bmsTempPlausible(float t)    { return Core::isValidFloat(t) && t > -40.0f && t < 100.0f; }
 
 } // namespace Comm
 

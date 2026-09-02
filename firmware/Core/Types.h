@@ -317,6 +317,11 @@ namespace AlarmCode {
   constexpr const char* WATCHDOG_RESET          = "WATCHDOG_RESET";
   constexpr const char* BROWNOUT_RESET          = "BROWNOUT_RESET";
   constexpr const char* BOOT_LOOP               = "BOOT_LOOP";
+  // Emergency layer (v1.7.0 E-WAVE port) — raised on ANY transition into
+  // EMERGENCY (sensor trip / E-stop / operator DISARM / crash-loop hold),
+  // cleared on operator ARM. The relay itself is latched in hardware; this
+  // alarm exists so alarm-center/PWA visibility matches relay reality.
+  constexpr const char* EMERGENCY_TRIP          = "EMERGENCY_TRIP";
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +354,8 @@ enum class TaskId : uint8_t {
   HealthMonitor,
   Persistence,
   BmsComm,      // v1.6.0: battery/inverter protocol manager task
+  Emergency,    // v1.7.0: E-WAVE supervisor tick (local-first, 10 Hz)
+  GasEmergency, // v1.7.0: GAS command poll / ACK / event flush task
   COUNT
 };
 
@@ -366,6 +373,8 @@ inline const char* taskIdToStr(TaskId t) {
     case TaskId::HealthMonitor: return "healthMonitor";
     case TaskId::Persistence:  return "persistence";
     case TaskId::BmsComm:      return "bmsComm";
+    case TaskId::Emergency:    return "emergency";
+    case TaskId::GasEmergency: return "gasEmergency";
     case TaskId::COUNT:        break;
   }
   return "unknown";

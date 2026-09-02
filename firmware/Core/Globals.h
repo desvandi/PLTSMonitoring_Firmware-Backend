@@ -31,6 +31,12 @@ namespace Drivers {
   class Acs712Driver;
   class Sht31Driver;
   class RtcDriver;
+#if PLTS_ENABLE_EMERGENCY
+  class EmergencyRelayDriver;   // v1.7.0 E-WAVE port
+#endif
+#if PLTS_ENABLE_PZEM_AC
+  class Pzem004tDriver;         // v1.7.0 — optional AC power meter
+#endif
 }
 namespace Services {
   // Forward declare the Alarm struct (defined in Services/AlarmRegistry.h)
@@ -51,6 +57,9 @@ namespace Services {
   class LogService;
   class WifiManager;
   class TimeManager;
+#if PLTS_ENABLE_EMERGENCY
+  class EmergencySupervisor;    // v1.7.0 E-WAVE port
+#endif
 }
 namespace Comm {
   class BatteryCommManager;   // v1.6.0 multi-protocol BMS/inverter comm
@@ -60,6 +69,9 @@ namespace Network {
   class MqttTelemetryPublisher;
   class MqttConfigReceiver;
   class MqttOtaHandler;
+#if PLTS_ENABLE_EMERGENCY
+  class GasEmergencyChannel;    // v1.7.0 E-WAVE port
+#endif
 }
 namespace AI {
   class GasAdvisor;
@@ -92,6 +104,25 @@ extern char     cfgBmsProtocol[16];        // "auto"|"none"|protocol id
 extern uint8_t  cfgBmsModbusSlaveId;       // Modbus RTU/TCP unit id
 extern char     cfgBmsModbusTcpHost[64];   // empty = Modbus TCP slot off
 extern uint16_t cfgBmsModbusTcpPort;       // default 502
+#if PLTS_ENABLE_EMERGENCY
+// v1.7.0 — E-WAVE emergency trigger config (persisted in NVS "plts_emg"
+// via Storage::ConfigStore; GAS EMERGENCY_CONFIG command rewrites it after
+// range validation on BOTH sides — ranges mirror Code.gs EMERGENCY_CONFIG_
+// FIELDS byte-for-byte).
+extern float    cfgEmgVbatLowV;         // [30,60] default 42
+extern float    cfgEmgVbatLowHystV;     // [0.1,5] default 1
+extern float    cfgEmgVbatHighV;        // [48,60] default 55
+extern float    cfgEmgVbatHighHystV;    // [0.1,5] default 1
+extern float    cfgEmgIDcOverA;         // [10,120] default 110
+extern float    cfgEmgIAcLoadOverA;     // [5,40] default 28
+extern float    cfgEmgIAcGenOverA;      // [5,40] default 28 (RESERVED channel)
+extern uint8_t  cfgEmgDebounceN;        // [1,10] default 3
+extern uint32_t cfgEmgRecoverySec;      // [0,3600] default 60
+extern uint8_t  cfgEmgRelayPin;         // [12,39] default 27
+extern int8_t   cfgEmgEstopPin;         // [-1,39] default 14 (-1 = disabled)
+extern uint8_t  cfgEmgEstopEnabled;     // {0,1} default 1
+extern uint8_t  cfgEmgSensorFailPolicy; // {0,1} default 1 (fail-closed)
+#endif
 // Calibration + timezone globals — declared after Calibration struct below
 
 // ===========================================================================
@@ -268,6 +299,22 @@ struct SystemStatus {
       struct { float voltage; float powerFactor; } assumptions;
     } estimatedPower;
     AcSignalQuality signalQuality;
+#if PLTS_ENABLE_PZEM_AC
+    // v1.7.0 — REAL AC meter block (PZEM-004T, OPTIONAL). When connected,
+    // power here is MEASURED (replaces the ACS712 estimate in reporting);
+    // when absent, connected=false + null — never a silent swap. energy is
+    // the meter's own cumulative counter (resets on METER power loss — NOT
+    // integrated into the DC shunt energy counters, which stay canonical).
+    struct {
+      bool  connected;
+      float voltage;        // V
+      float current;        // A
+      float power;          // W active
+      float energy;         // Wh (meter counter)
+      float frequency;      // Hz
+      float powerFactor;    // 0..1
+    } meter;
+#endif
   } ac;
   struct {
     Measurement temperature;
@@ -296,6 +343,21 @@ struct SystemStatus {
     uint8_t  spoolSize;
     AlarmSeverity highestAlarmSeverity;
   } health;
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE emergency layer snapshot (written by
+  // Services::emergency.publishStatus() under telemetryMutex at 10 Hz).
+  // Absent in <= v1.6.3 payloads — consumers must treat absent as DISABLED.
+  struct {
+    const char* state;          // "RUN" | "EMERGENCY"
+    const char* reason;         // BOOT|VBAT_LOW|VBAT_HIGH|I_DC_OVER|I_AC_LOAD_OVER|
+                                // I_AC_GEN_OVER|SENSOR_LOSS|ESTOP|OPERATOR|CRASHLOOP|""
+    bool     estopOpen;         // physical E-stop line OPEN (latched)
+    bool     relayEnergized;    // true = kontaktor path CLOSED (system RUN)
+    uint32_t trips;             // lifetime counter (NVS)
+    uint32_t tripAtMs;          // uptime ms of last transition into EMERGENCY
+    uint8_t  crashChain;        // consecutive unhealthy reboots
+  } emergency;
+#endif
   // Alarms are owned by AlarmRegistry (Services::Alarm); SystemStatus holds a pointer
   const Services::Alarm* activeAlarms;
   uint8_t activeAlarmCount;
@@ -344,6 +406,14 @@ extern Network::MqttOtaHandler&           mqttOtaHandler;
 extern Comm::BatteryCommManager&          batteryComm;
 extern AI::GasAdvisor&                    advisor;
 extern Web::HttpServer&                   server;
+#if PLTS_ENABLE_EMERGENCY
+extern Drivers::EmergencyRelayDriver      emergencyRelay;   // v1.7.0 E-WAVE
+extern Services::EmergencySupervisor      emergency;        // v1.7.0 E-WAVE
+extern Network::GasEmergencyChannel       gasEmergency;     // v1.7.0 E-WAVE
+#endif
+#if PLTS_ENABLE_PZEM_AC
+extern Drivers::Pzem004tDriver            pzemAc;           // v1.7.0 optional AC meter
+#endif
 
 // Core state globals — at global scope
 extern SemaphoreHandle_t telemetryMutex;
@@ -379,6 +449,21 @@ namespace Core {
   extern char apPassword[33];
   extern bool calibrationDirty;
   extern char deviceId[17];
+#if PLTS_ENABLE_EMERGENCY
+  extern float    cfgEmgVbatLowV;
+  extern float    cfgEmgVbatLowHystV;
+  extern float    cfgEmgVbatHighV;
+  extern float    cfgEmgVbatHighHystV;
+  extern float    cfgEmgIDcOverA;
+  extern float    cfgEmgIAcLoadOverA;
+  extern float    cfgEmgIAcGenOverA;
+  extern uint8_t  cfgEmgDebounceN;
+  extern uint32_t cfgEmgRecoverySec;
+  extern uint8_t  cfgEmgRelayPin;
+  extern int8_t   cfgEmgEstopPin;
+  extern uint8_t  cfgEmgEstopEnabled;
+  extern uint8_t  cfgEmgSensorFailPolicy;
+#endif
 }
 
 #endif // PLTS_GLOBALS_H

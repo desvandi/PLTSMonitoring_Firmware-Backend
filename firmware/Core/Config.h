@@ -39,6 +39,28 @@
 #define PLTS_ENABLE_PYLONTECH_RS485 0 // RESERVED — console protocol slot (not
 #endif                                 // implemented; see README §RS485-console)
 
+// v1.7.0 — RS485 vendor-frame CAPTURE console (bench tool for the reserved
+// Pylontech RS485 slot). Strictly passive (DE pinned LOW, never transmits);
+// runtime-activated ONLY via cfgBmsProtocol = "rs485_console".
+#ifndef PLTS_ENABLE_RS485_CONSOLE
+#define PLTS_ENABLE_RS485_CONSOLE 1
+#endif
+
+// ---------------------------------------------------------------------------
+// v1.7.0 — E-WAVE EMERGENCY CONTROL LAYER (ported from firmware-generic)
+// Relay + E-stop + GAS command polling. When enabled, this firmware is no
+// longer purely monitoring-only: it drives ONE safety relay whose FAIL-SAFE
+// direction is ISOLATED (active-LOW module; GPIO Hi-Z at reset/crash =
+// de-energized = isolated). When disabled (0), the module compiles out and
+// the system behaves exactly like v1.6.3 (monitoring-only).
+// ---------------------------------------------------------------------------
+#ifndef PLTS_ENABLE_EMERGENCY
+#define PLTS_ENABLE_EMERGENCY 1
+#endif
+#ifndef PLTS_ENABLE_PZEM_AC
+#define PLTS_ENABLE_PZEM_AC 0          // RESERVED — PZEM-004T AC power meter
+#endif                                 // (bench-validation pending; see README §PZEM)
+
 // ---------------------------------------------------------------------------
 // Build Profile Guard (brief §73) — must select exactly one
 // ---------------------------------------------------------------------------
@@ -62,7 +84,7 @@ namespace Core {
 // ---------------------------------------------------------------------------
 // Versioning (brief §74) — single source of truth
 // ---------------------------------------------------------------------------
-static constexpr const char* FIRMWARE_VERSION        = "1.6.3";  // 1.6.3 — audit-noise: WDT fed inside OTA download loop + otaTask stack 6K + I2C lockup recovery (Utils/I2cRecovery) + ACS712 sensitivity applied at boot (fixes 1.85x systematic AC error after reboot) + WDT feed around blocking GAS POST
+static constexpr const char* FIRMWARE_VERSION        = "1.7.0";  // modular line parity with firmware-generic 1.7.0: E-WAVE emergency layer ported (relay/E-stop/GAS HMAC command channel; sensorFailPolicy fail-closed; reserved genset current channel). Still carries every 1.6.3 audit-noise fix. Separate product line — see scripts/test_version_identity.py G7.
 static constexpr const char* FIRMWARE_BUILD_DATE     = __DATE__ " " __TIME__;
 static constexpr const char* PROTOCOL_VERSION         = "1";     // protocol v1 (PLTS)
 static constexpr const char* CONFIG_SCHEMA_VERSION    = "1";
@@ -89,9 +111,57 @@ static constexpr uint32_t I2C_FREQUENCY      = 100000; // 100 kHz
 static constexpr uint8_t  PIN_RS485_TX       = 16;     // UART2 TX → MAX3485 DI
 static constexpr uint8_t  PIN_RS485_RX       = 17;     // UART2 RX ← MAX3485 RO
 static constexpr uint8_t  PIN_RS485_DE       = 4;      // DE+RE tied together (direction)
+// v1.7.0 — RS485 capture-console bounds (Comm/Rs485Console.h).
+static constexpr uint16_t RS485_FRAME_MAX_BYTES = 64;   // vendor console frames are short
+static constexpr uint16_t RS485_FRAME_GAP_MS    = 6;    // bus-idle frame boundary
+static constexpr uint8_t  RS485_FRAME_RING      = 16;   // last N frames served via REST
 // CAN 2.0 port (TWAI controller + SN65HVD230 transceiver, 500 kbps).
 static constexpr uint8_t  PIN_CAN_TX         = 25;     // TWAI TX → SN65HVD230 TXD
 static constexpr uint8_t  PIN_CAN_RX         = 26;     // TWAI RX ← SN65HVD230 RXD
+
+// ---------------------------------------------------------------------------
+// v1.7.0 — E-WAVE emergency layer pins (parity with firmware-generic).
+// Relay: 5V optocoupler module, ACTIVE-LOW input (GPIO LOW = energized =
+// RUN; Hi-Z at boot/crash = de-energized = ISOLATED — the ESP32 must be
+// ALIVE to keep the system running). E-stop sense: normally-closed physical
+// line (INPUT_PULLUP; HIGH = OPEN = tripped); the E-stop itself breaks the
+// relay module's negative supply IN HARDWARE — the sense line only latches.
+// LED: local indicator (RUN solid / EMERGENCY 2 Hz blink).
+// All three sit on ADC1-safe / non-strapping GPIOs, clear of the pin map
+// above (21/22/34/35/16/17/4/25/26 all in use).
+// ---------------------------------------------------------------------------
+static constexpr uint8_t  PIN_EMERGENCY_RELAY = 27;    // relay module IN (active-LOW)
+static constexpr int8_t   PIN_EMERGENCY_ESTOP = 14;    // E-stop sense (INPUT_PULLUP; -1 = disabled)
+static constexpr uint8_t  PIN_EMERGENCY_LED   = 2;     // local state LED
+
+// ---------------------------------------------------------------------------
+// v1.7.0 — PZEM-004T v3 AC power meter (OPTIONAL, PLTS_ENABLE_PZEM_AC,
+// default 0 — bench validation pending, see README §PZEM). Serial1 (UART1)
+// 9600 8N1, isolated TTL UART. Wiring: ESP32 TX(19) -> PZEM RX,
+// ESP32 RX(18) <- PZEM TX. Pins 18/19 chosen because they are free,
+// non-strapping, and NOT ADC1 — pin 32 stays reserved for a possible future
+// second ACS712 (genset channel of the E-WAVE layer).
+// ---------------------------------------------------------------------------
+static constexpr uint8_t  PIN_PZEM_RX         = 18;     // UART1 RX <- PZEM TX
+static constexpr uint8_t  PIN_PZEM_TX         = 19;     // UART1 TX -> PZEM RX
+static constexpr uint32_t PZEM_BAUD           = 9600;   // PZEM-004T v3 fixed rate
+static constexpr uint32_t PZEM_POLL_MS        = 1000;   // 1 Hz measurement
+static constexpr uint32_t PZEM_TIMEOUT_MS     = 400;    // response window
+static constexpr uint8_t  PZEM_DEFAULT_ADDR   = 0x01;   // factory slave address
+
+// E-WAVE default trigger config (runtime-overridable via NVS cfgEmg* /
+// GAS EMERGENCY_CONFIG; validation ranges match Code.gs EMERGENCY_CONFIG_
+// FIELDS exactly — mixed-version fleets must agree on the same table).
+static constexpr float    EMG_VBAT_LOW_V        = 42.0f;   // trip below (V)
+static constexpr float    EMG_VBAT_LOW_HYST_V   = 1.0f;    // hysteresis (V)
+static constexpr float    EMG_VBAT_HIGH_V       = 55.0f;   // trip above (V)
+static constexpr float    EMG_VBAT_HIGH_HYST_V  = 1.0f;    // hysteresis (V)
+static constexpr float    EMG_IDC_OVER_A        = 110.0f;  // |I_dc| trip (A)
+static constexpr float    EMG_IAC_LOAD_OVER_A   = 28.0f;   // I_ac load trip (A)
+static constexpr float    EMG_IAC_GEN_OVER_A    = 28.0f;   // RESERVED genset channel (A)
+static constexpr uint8_t  EMG_DEBOUNCE_N        = 3;       // consecutive violating ticks (10 Hz)
+static constexpr uint32_t EMG_RECOVERY_SEC      = 60;      // clear-time before ARM
+static constexpr uint8_t  EMG_SENSOR_FAIL_POLICY = 1;      // 1 = fail-closed (P1-SC3)
 
 // BMS polling default (NVS-overridable via cfgBmsPollIntervalMs).
 static constexpr uint32_t BMS_POLL_INTERVAL_MS    = 5000;

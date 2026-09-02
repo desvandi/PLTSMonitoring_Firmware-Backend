@@ -167,7 +167,7 @@ void ModbusRtuClient::decodeRegisters(const uint16_t* regs, size_t count, BmsDat
   if (bmsSohPlausible(soh))   out.soh = soh;
   if (bmsCellVPlausible(cMin)) out.cellVoltageMin = cMin;
   if (bmsCellVPlausible(cMax)) out.cellVoltageMax = cMax;
-  if (Core::isValidFloat(t) && t > -40.0f && t < 100.0f) out.temperature = t;
+  if (bmsTempPlausible(t)) out.temperature = t;
   if (bmsCurrentPlausible(ccl)) out.chargeCurrentLimit = ccl;
   if (bmsCurrentPlausible(dcl)) out.dischargeCurrentLimit = dcl;
   out.cycleCount = rdU16(ModbusMap::OFF_CYCLE_COUNT);

@@ -122,7 +122,8 @@ PLTSMonitoring_Firmware-Backend/
 ├── scripts/                 Suite uji Python + kontrak GAS + rilis/signing
 ├── docs/
 │   ├── Desain_Push_API_VAPID_Alarm_PWA.pdf    (desain subsystem push-alarm)
-│   └── wiring/ (dc-domain.svg, ac-domain.svg)
+│   ├── bench/ (PROTOKOL_BENCH_DARURAT · CHECKLIST_HW_ACCEPTANCE · PANDUAN_VALIDASI)
+│   └── wiring/ (dc-domain.svg, ac-domain.svg, emergency-relay.png)
 └── .github/workflows/build-firmware.yml       (CI — uji Python + build PIO)
 ```
 
@@ -820,6 +821,7 @@ fallback.
 | v1.6.1 | 2026-08-27 | Kontrak kanonik `GET /api/alarms` `{active, history}` |
 | v1.6.3 | 2026-09-02 | Audit noise inverter: WDT di-fed DI DALAM loop unduh OTA (sebelumnya unduh lama = reset watchdog tengah flash) + stack `otaTask` 4K→6K + `yield()` 1 ms; bus I²C terkunci pulih otomatis (`Utils/I2cRecovery`: 9x pulsa SCL + STOP, dipanggil INA219/SHT31 sebelum keputusan cooldown); **sensitivitas ACS712 diaplikasi di boot** (bug lama: default driver 100 mV/A vs modul 185 mV/A = error arus AC sistematis 1.85x setelah reboot) + `calibration.update` MQTT kini men-set driver LANGSUNG (live-apply, bukan hanya next-boot, 4 field kalibrasi); `esp_task_wdt_reset` mengapit POST GAS blocking |
 | v1.7.0 *(generic)* | 2026-09-02 | Remediasi audit P1/P2: **sensor fail-closed** — field ke-13 `sensorFailPolicy` (default 1: INA219/ACS712 = input keselamatan WAJIB; sensor hilang → ARM DITOLAK + sistem RUN kehilangan sensor TRIP `SENSOR_LOSS`; policy 0 = opt-out eksplisit operator, tidak aman untuk produksi); **identitas versi single-source** — guard CI `test_version_identity.py` (manifest == `FIRMWARE_VERSION` == changelog header; maks SATU binari versi aktif di `bin/`); skema darurat 13 field disinkronkan GAS + PWA (validasi 3 lapis) |
+| v1.7.0 *(modular)* | 2026-09-03 | **Port E-WAVE ke firmware modular** (menutup keterbatasan §13 #7): `Drivers/EmergencyRelayDriver` (relai aktif-LOW GPIO 27 + E-stop NC GPIO 14, isolasi fail-safe SEBELUM LittleFS/WiFi), `Services/EmergencySupervisor` (mesin status RUN/EMERGENCY, debounce+histeresis 6 kanal, gerbang ARM fail-closed, rantai crash NVS, lokal-dulu 10 Hz — tanpa dependensi jaringan), `Network/GasEmergencyChannel` (poll `EMERGENCY_PENDING` 15 s via **envelope HMAC per-perangkat** — lebih kuat dari token fleet generic — ACK + event dengan retry-budget nyata; task khusus agar POST blocking tidak menghambat MQTT/E-stop), konfigurasi 13 field di NVS `plts_emg` (rentang identik `EMERGENCY_CONFIG_FIELDS` GAS), blok telemetri `emergency`. Bonus keterbatasan lain: `bmsTempPlausible` disatukan + cakupan gerbang terkunci (test_bms_comm 80), **konsol capture RS485 pasif** (`rs485_console`, `/api/rs485/frames`), **driver PZEM-004T v3** (flag OFF hingga validasi bench), protokol bench B1–B9 + checklist HW + panduan validasi di `docs/bench/`. Uji: `test_emergency_modular_logic.py` 85 asersi + `test_rs485_console.py` 22 + `test_pzem_driver.py` 25 |
 
 ---
 
@@ -834,7 +836,7 @@ ada BMS yang merespons.
 | **Pylontech CAN** | TWAI 500 kbps + SN65HVD230 | Penuh (US2000/US3000/Force + klon rack) |
 | **Modbus RTU** | RS485 (UART2 + MAX3485) | Penuh* — *peta register default generik, wajib diverifikasi ke manual BMS* |
 | **Modbus TCP** | WiFi (ESP32 client) | Penuh* (peta register sama; host/port via PWA) |
-| **Pylontech RS485 console** | RS485 115200 8N1 | Slot dicadangkan — menunggu capture frame riil |
+| **Pylontech RS485 console** | RS485 115200 8N1 | Slot parser tetap dicadangkan — **konsol capture pasif v1.7.0 siap** (`bmsProto=rs485_console` → `GET /api/rs485/frames`, DE dipakukan RX, tidak pernah transmit); prosedur: `docs/bench/PANDUAN_VALIDASI.md` §1 |
 | **I²C** | — | Bukan port eksternal (eksklusif INA219+SHT31) |
 | **SPI** | — | Dicadangkan (W5500/MCP2515 masa depan) |
 
@@ -1012,6 +1014,12 @@ node scripts/test_gas_contract.js
 node scripts/test_emergency_gas.js            # 46 — lapisan darurat WAVE-7
 python3 scripts/test_emergency_firmware_logic.py  # 34 — logika darurat + pola fail-safe
 
+# Port E-WAVE ke firmware modular + alat keterbatasan lain (baru, 2026-09-03)
+python3 scripts/test_emergency_modular_logic.py  # 85 — supervisor + kanal GAS HMAC + kontrak lintas Code.gs
+python3 scripts/test_rs485_console.py            # 22 — konsol capture pasif (tak pernah transmit)
+python3 scripts/test_pzem_driver.py              # 25 — driver PZEM-004T (CRC vs frame kanonik)
+python3 scripts/test_bms_comm.py                 # 80 — +15 cakupan gerbang plausibilitas (bmsTempPlausible)
+
 # Identitas versi + lintas-lapis wave 7-10 (baru, 2026-09-02)
 python3 scripts/test_version_identity.py     # manifest == FIRMWARE_VERSION == changelog header
 python3 scripts/test_wave7_10_crosslayer.py  # 20 cek single-repo; PLTS_PWA_REPO=... untuk 25 penuh
@@ -1056,30 +1064,74 @@ bash push-alarm/tests/run-all.sh
 
 ## 13. Keterbatasan yang Diketahui (jujur)
 
-1. **Peta register Modbus default bersifat contoh** — verifikasi ke manual
-   baterai sebelum produksi.
-2. **Pylontech RS485 console belum diimplementasi** — menunggu capture
-   frame vendor (jangan menebak).
-3. **Modbus TCP tanpa autentikasi** — ESP32 hanya *client* polling; tidak
-   membuka port listening.
-4. **Data BMS mengikuti kualitas BMS itu sendiri** — SOC 150% ditolak
-   plausibility gate (field jadi `null`).
-5. **Hardware Acceptance Tests (HW-001..HW-025) belum dieksekusi** — butuh
-   hardware fisik; prosedur bench ada di riwayat git (dokumen remediation
-   lama) dan ringkas di panduan PDF.
-6. **Audit independen TIDAK DIKLAIM** — audit yang ada adalah audit proses
-   berlapis internal dengan suite regresi mekanis.
-7. **Lapisan kendali darurat (E-WAVE v1.6.0) hanya terpasang di
-   firmware-generic** — firmware modular (`firmware/`) belum punya driver
-   relai darurat / E-stop / poll perintah GAS; kontrak GAS & PWA sudah
-   netral-frontend sehingga porting hanya menyentuh sisi ESP32.
-8. **Uji acceptance lapisan darurat belum dieksekusi di perangkat nyata** —
-   logika teruji mekanis (34 asersi + 46 kontrak GAS), tetapi sembilan
-   skenario bench (boot isolasi, trip, E-stop, ARM ditolak, dst.) tetap
-   harus dijalankan operator sebelum daya tinggi dihubungkan.
-9. **Daya AC tetap estimasi** — ACS712 mengukur arus saja; tegangan & PF
-   diasumsikan (220 V / tidak diukur). Untuk daya jenset presisi, sensor
-   daya AC nyata (PZEM) adalah upgrade yang disarankan.
+> Pembaruan 2026-09-03: tujuh dari sembilan butir berikut mendapat penutupan
+> perangkat lunak / prosedur (v1.7.0 modular). Status tiap butir ditandai
+> eksplisit — yang butuh tangan operator TETAP butuh tangan operator; klaim
+> selesai tanpa eksekusi fisik adalah kebohongan.
+
+1. **[VERIFIKASI OPERATOR — prosedur siap]** Peta register Modbus default
+   bersifat contoh — verifikasi ke manual baterai sebelum produksi.
+   *Tambahan v1.7.0:* prosedur cek silang per-register terdokumentasi
+   (`docs/bench/PANDUAN_VALIDASI.md` §2), gerbang plausibilitas + alarm
+   `BMS_CURRENT_MISMATCH` menjaga kesalahan satuan/tanda.
+2. **[ALAT SIAP — menunggu frame vendor]** Pylontech RS485 console:
+   **konsol capture pasif v1.7.0 terpasang** (`bmsProto=rs485_console` →
+   `GET /api/rs485/frames`; DE dipakukan RX, tidak pernah mengirim satu byte
+   ke bus vendor). Parser slot tetap RESERVED sampai ≥ 30 frame asli
+   tercapture — *jangan menebak* tetap berlaku (`docs/bench/PANDUAN_VALIDASI.md` §1).
+3. **[MITIGASI TERDOKUMENTASI]** Modbus TCP tanpa autentikasi — sifat
+   protokol; ESP32 hanya *client* polling, tidak membuka port listening.
+   Panduan hardening jaringan (segmen/VLAN, allowlist IP, host wajib
+   privat, larangan port-forward): `docs/bench/PANDUAN_VALIDASI.md` §4.
+4. **[GERBANG DIPERLUAS + TERKUNCI REGRESI]** Data BMS mengikuti kualitas BMS
+   itu sendiri — SOC 150% ditolak plausibility gate (field jadi `null`).
+   *Perluasan v1.7.0:* suhu kini digerbangi `bmsTempPlausible` (satu sumber,
+   dua klien), dan **cakupan gerbang dikunci regresi** — setiap field
+   float BmsData wajib lolos gerbang di setiap decode site
+   (`test_bms_comm.py` 80/80, termasuk asersi "overheat nyata +90 °C
+   DILAPORKAN, bukan dinolkan"). Sampah yang *fisik-mungkin* tetap bisa
+   lolos — itulah batas instrumen pihak ketiga.
+5. **[TEMPLATE SIAP — eksekusi operator]** Hardware Acceptance Tests
+   (HW-001..HW-025) belum dieksekusi — butuh hardware fisik. Daftar asli
+   hidup di dokumen remediasi lama yang tidak pernah di-commit; v1.7.0
+   menyediakan **rekonstruksi checklist 25 butir + template log** yang
+   provenance-nya dinyatakan jujur (`docs/bench/CHECKLIST_HW_ACCEPTANCE.md`).
+6. **[TETAP — kejujuran dipertahankan]** Audit independen TIDAK DIKLAIM —
+   audit yang ada adalah audit proses berlapis internal dengan suite regresi
+   mekanis. Bukti internal kini bertambah: 3 suite baru (85+22+25 asersi)
+   + syntax-check penuh host; itu memperkuat posisi *bukan* menggantikannya.
+7. **[SELESAI — SOFTWARE]** Lapisan kendali darurat (E-WAVE v1.6.0) kini
+   **terpasang juga di firmware modular** (v1.7.0, `PLTS_ENABLE_EMERGENCY=1`
+   default; 0 = perilaku murni-monitoring v1.6.3): driver relai aktif-LOW +
+   E-stop NC dengan isolasi fail-safe sebelum LittleFS/WiFi; supervisor
+   status 10 Hz **lokal-dulu** (tanpa dependensi WiFi/GAS); poll perintah GAS
+   `EMERGENCY_PENDING` 15 s **via envelope HMAC per-perangkat** (lebih kuat
+   dari token fleet generic; Code.gs menerima keduanya); konfigurasi 13 field
+   identik rentang GAS; blok telemetri `emergency` aditif (PWA netral).
+   *Delta port yang didokumentasikan:* kanal arus genset (iGen) RESERVED
+   (papan modular belum memasang ACS712 #2 — trigger dorman, dikecualikan
+   dari sensor-loss), input sensor dari pipeline kualitas kanonik, event
+   retry-budget nyata (20 percobaan), event ARMED/DISARMED dipancarkan
+   (whitelist GAS sudah menerima).
+8. **[PROTOKOL SIAP — eksekusi operator WAJIB]** Uji acceptance lapisan
+   darurat di perangkat nyata: logika teruji mekanis kini **85 asersi
+   lintas-lapis** (+ 46 kontrak GAS lama tetap berlaku) plus syntax-check
+   host penuh, tetapi **sembilan skenario bench (B1–B9: boot isolasi, trip
+   ambang, E-stop fisik, ARM ditolak/diterima, stop jarak jauh, perintah
+   basi TTL, crash-loop hold, CONFIG persisten) tetap harus dijalankan
+   operator sebelum daya tinggi dihubungkan** —
+   `docs/bench/PROTOKOL_BENCH_DARURAT.md` (pemetaan ke skenario S6–S11
+   panduan PDF disertakan).
+9. **[JALUR UPGRADE TERIMPLEMENTASI — validasi bench pending]** Daya AC
+   tetap estimasi (ACS712 arus + asumsi 220 V/PF 0.9) SELAMA PZEM belum
+   tervalidasi. *Driver PZEM-004T v3 lengkap terpasang* (UART1 9600 8N1
+   RX18/TX19; decode V/A/W/Wh/Hz/PF + plausibilitas; 25 asersi termasuk CRC
+   terhadap frame kanonik vendor), flag `PLTS_ENABLE_PZEM_AC` **default 0**
+   sampai satu unit fisik lulus prosedur 24 jam
+   (`docs/bench/PANDUAN_VALIDASI.md` §3). Setelah tervalidasi: blok
+   `ac.meter` MEASURED menggantikan estimasi dalam pelaporan (estimasi
+   tetap sebagai jalur mundur berlabel); energi PZEM adalah pencacah meter
+   (reset saat meter mati) dan tidak diintegrasikan ke pencacah energi DC.
 
 ---
 

@@ -11,6 +11,7 @@
 #include "../Services/LogService.h"
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <cmath>
 
 namespace Storage {
 
@@ -340,6 +341,73 @@ void ConfigStore::saveBatteryConfig() {
   p.end();
   Services::Log.append(Core::LogType::ConfigurationChanged, "Battery config saved", 0);
 }
+
+#if PLTS_ENABLE_EMERGENCY
+// ============================================================================
+// v1.7.0 — E-WAVE EMERGENCY TRIGGER CONFIG (NVS "plts_emg", short keys).
+// Range sanitization on load (defaults-on-read; parity with Code.gs
+// EMERGENCY_CONFIG_FIELDS + EmergencySupervisor::clampEmg*).
+// ============================================================================
+void ConfigStore::loadEmergencyConfig() {
+  Preferences p;
+  p.begin("plts_emg", true);
+  Core::cfgEmgVbatLowV      = p.getFloat("vLow",  Core::EMG_VBAT_LOW_V);
+  Core::cfgEmgVbatLowHystV  = p.getFloat("vLowH", Core::EMG_VBAT_LOW_HYST_V);
+  Core::cfgEmgVbatHighV     = p.getFloat("vHi",   Core::EMG_VBAT_HIGH_V);
+  Core::cfgEmgVbatHighHystV = p.getFloat("vHiH",  Core::EMG_VBAT_HIGH_HYST_V);
+  Core::cfgEmgIDcOverA      = p.getFloat("iDc",   Core::EMG_IDC_OVER_A);
+  Core::cfgEmgIAcLoadOverA  = p.getFloat("iAcL",  Core::EMG_IAC_LOAD_OVER_A);
+  Core::cfgEmgIAcGenOverA   = p.getFloat("iAcG",  Core::EMG_IAC_GEN_OVER_A);
+  Core::cfgEmgDebounceN     = p.getUChar("deb",   Core::EMG_DEBOUNCE_N);
+  Core::cfgEmgRecoverySec   = p.getULong("rec",   Core::EMG_RECOVERY_SEC);
+  Core::cfgEmgRelayPin      = p.getUChar("rlyPin", Core::PIN_EMERGENCY_RELAY);
+  Core::cfgEmgEstopPin      = p.getChar("ePin",   Core::PIN_EMERGENCY_ESTOP);
+  Core::cfgEmgEstopEnabled  = p.getUChar("eEn",   1);
+  Core::cfgEmgSensorFailPolicy = p.getUChar("sfp", Core::EMG_SENSOR_FAIL_POLICY);
+  p.end();
+  // Sanitize — a corrupt/old NVS image must never arm a garbage interlock.
+  if (!std::isfinite(Core::cfgEmgVbatLowV) || Core::cfgEmgVbatLowV < 30.0f || Core::cfgEmgVbatLowV > 60.0f)
+    Core::cfgEmgVbatLowV = Core::EMG_VBAT_LOW_V;
+  if (!std::isfinite(Core::cfgEmgVbatLowHystV) || Core::cfgEmgVbatLowHystV < 0.1f || Core::cfgEmgVbatLowHystV > 5.0f)
+    Core::cfgEmgVbatLowHystV = Core::EMG_VBAT_LOW_HYST_V;
+  if (!std::isfinite(Core::cfgEmgVbatHighV) || Core::cfgEmgVbatHighV < 48.0f || Core::cfgEmgVbatHighV > 60.0f)
+    Core::cfgEmgVbatHighV = Core::EMG_VBAT_HIGH_V;
+  if (!std::isfinite(Core::cfgEmgVbatHighHystV) || Core::cfgEmgVbatHighHystV < 0.1f || Core::cfgEmgVbatHighHystV > 5.0f)
+    Core::cfgEmgVbatHighHystV = Core::EMG_VBAT_HIGH_HYST_V;
+  if (!std::isfinite(Core::cfgEmgIDcOverA) || Core::cfgEmgIDcOverA < 10.0f || Core::cfgEmgIDcOverA > 120.0f)
+    Core::cfgEmgIDcOverA = Core::EMG_IDC_OVER_A;
+  if (!std::isfinite(Core::cfgEmgIAcLoadOverA) || Core::cfgEmgIAcLoadOverA < 5.0f || Core::cfgEmgIAcLoadOverA > 40.0f)
+    Core::cfgEmgIAcLoadOverA = Core::EMG_IAC_LOAD_OVER_A;
+  if (!std::isfinite(Core::cfgEmgIAcGenOverA) || Core::cfgEmgIAcGenOverA < 5.0f || Core::cfgEmgIAcGenOverA > 40.0f)
+    Core::cfgEmgIAcGenOverA = Core::EMG_IAC_GEN_OVER_A;
+  if (Core::cfgEmgDebounceN < 1 || Core::cfgEmgDebounceN > 10)   Core::cfgEmgDebounceN = Core::EMG_DEBOUNCE_N;
+  if (Core::cfgEmgRecoverySec > 3600)                            Core::cfgEmgRecoverySec = Core::EMG_RECOVERY_SEC;
+  if (Core::cfgEmgRelayPin < 12 || Core::cfgEmgRelayPin > 39)    Core::cfgEmgRelayPin = Core::PIN_EMERGENCY_RELAY;
+  if (Core::cfgEmgEstopPin < -1 || Core::cfgEmgEstopPin > 39)    Core::cfgEmgEstopPin = Core::PIN_EMERGENCY_ESTOP;
+  if (Core::cfgEmgEstopEnabled > 1)                              Core::cfgEmgEstopEnabled = 1;
+  if (Core::cfgEmgSensorFailPolicy > 1)                          Core::cfgEmgSensorFailPolicy = Core::EMG_SENSOR_FAIL_POLICY;
+}
+
+void ConfigStore::saveEmergencyConfig() {
+  Preferences p;
+  p.begin("plts_emg", false);
+  p.putFloat("vLow",  Core::cfgEmgVbatLowV);
+  p.putFloat("vLowH", Core::cfgEmgVbatLowHystV);
+  p.putFloat("vHi",   Core::cfgEmgVbatHighV);
+  p.putFloat("vHiH",  Core::cfgEmgVbatHighHystV);
+  p.putFloat("iDc",   Core::cfgEmgIDcOverA);
+  p.putFloat("iAcL",  Core::cfgEmgIAcLoadOverA);
+  p.putFloat("iAcG",  Core::cfgEmgIAcGenOverA);
+  p.putUChar("deb",   Core::cfgEmgDebounceN);
+  p.putULong("rec",   Core::cfgEmgRecoverySec);
+  p.putUChar("rlyPin", Core::cfgEmgRelayPin);
+  p.putChar("ePin",   Core::cfgEmgEstopPin);
+  p.putUChar("eEn",   Core::cfgEmgEstopEnabled);
+  p.putUChar("sfp",   Core::cfgEmgSensorFailPolicy);
+  p.end();
+  Services::Log.append(Core::LogType::ConfigurationChanged, "Emergency config saved", 0);
+}
+#endif
 
 // ============================================================================
 // CALIBRATION (atomic + CRC)

@@ -128,7 +128,7 @@ void PylontechCanClient::_handleFrame(uint32_t id, const uint8_t* d,
         decodeVit(d, &v, &i, &t);
         if (bmsVoltPlausible(v))    _data.voltage = v;
         if (bmsCurrentPlausible(i)) _data.current = i;
-        if (Core::isValidFloat(t) && t > -40.0f && t < 100.0f) _data.temperature = t;
+        if (bmsTempPlausible(t)) _data.temperature = t;
         _got356 = true;
       }
       break;

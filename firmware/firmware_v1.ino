@@ -19,10 +19,17 @@
  *   - NetworkTask     : WiFi/MQTT/GAS/NTP
  *   - PersistenceTask : periodic NVS save (config, energy, SOC)
  *   - HealthTask      : Services::health supervision, alarm evaluation, anomaly detection
+ *   - EmergencyTask   : [v1.7.0 E-WAVE] emergency supervisor, LOCAL-FIRST 10 Hz —
+ *                       relay/E-stop/trigger evaluation run regardless of WiFi
+ *   - GasEmergencyTask: [v1.7.0 E-WAVE] EMERGENCY_PENDING poll + ACK + events (HMAC)
  *
  * Brief §1: "Never fabricate certainty." Every measurement has value/unit/quality/source/timestamp/sequence.
  * Brief §75: Local-first — ESP32 remains operational when Internet/MQTT/GAS/PWA all OFF.
- * Brief §102: Monitoring-only — never controls charger, inverter, BMS, or battery current.
+ * Brief §102 (v1.7.0 amendment): the firmware drives exactly ONE actuator — the
+ *   E-WAVE safety relay (PLTS_ENABLE_EMERGENCY, default ON) — whose fail-safe
+ *   direction is ISOLATED (GPIO Hi-Z at boot/crash = de-energized). Every other
+ *   subsystem remains monitoring-only. With the flag OFF, this build is
+ *   byte-equivalent in behavior to v1.6.3 (pure monitoring).
  */
 
 #include <Arduino.h>
@@ -55,6 +62,13 @@
 #include "Drivers/Acs712Driver.h"
 #include "Drivers/Sht31Driver.h"
 #include "Drivers/RtcDriver.h"
+// v1.7.0 — E-WAVE emergency layer (ported from firmware-generic)
+#if PLTS_ENABLE_EMERGENCY
+#include "Drivers/EmergencyRelayDriver.h"
+#endif
+#if PLTS_ENABLE_PZEM_AC
+#include "Drivers/Pzem004tDriver.h"   // v1.7.0 — optional real AC power meter
+#endif
 
 // Services MUST be included before Globals.h (forward-declared there)
 #include "Services/VoltageCalibration.h"
@@ -72,6 +86,9 @@
 #include "Services/LogService.h"
 #include "Services/WifiManager.h"
 #include "Services/TimeManager.h"
+#if PLTS_ENABLE_EMERGENCY
+#include "Services/EmergencySupervisor.h"
+#endif
 
 #include "Storage/FileSystem.h"
 #include "Storage/ConfigStore.h"
@@ -79,6 +96,9 @@
 // v1.6.0 — multi-protocol BMS/inverter communication layer
 #include "Comm/BatteryProtocol.h"
 #include "Comm/BatteryCommManager.h"
+#if PLTS_ENABLE_RS485_CONSOLE
+#include "Comm/Rs485Console.h"   // v1.7.0 — passive vendor-frame capture (bench)
+#endif
 #if PLTS_ENABLE_PYLONTECH_CAN
 #include "Comm/PylontechCanClient.h"
 #endif
@@ -97,6 +117,9 @@
 #include "Network/MqttTelemetryPublisher.h"
 #include "Network/MqttConfigReceiver.h"
 #include "Network/MqttOtaHandler.h"
+#if PLTS_ENABLE_EMERGENCY
+#include "Network/GasEmergencyChannel.h"
+#endif
 #include "AI/GasAdvisor.h"
 
 #include "Web/HttpServer.h"
@@ -135,6 +158,23 @@ namespace Core {
   uint8_t  cfgBmsModbusSlaveId           = BMS_MODBUS_SLAVE_ID;
   char     cfgBmsModbusTcpHost[64]       = "";       // empty = Modbus TCP off
   uint16_t cfgBmsModbusTcpPort           = BMS_MODBUS_TCP_PORT;
+  // v1.7.0 — E-WAVE emergency trigger config (NVS "plts_emg", loaded by
+  // Storage::config.loadEmergencyConfig(); GAS CONFIG command rewrites it)
+#if PLTS_ENABLE_EMERGENCY
+  float    cfgEmgVbatLowV        = EMG_VBAT_LOW_V;
+  float    cfgEmgVbatLowHystV    = EMG_VBAT_LOW_HYST_V;
+  float    cfgEmgVbatHighV       = EMG_VBAT_HIGH_V;
+  float    cfgEmgVbatHighHystV   = EMG_VBAT_HIGH_HYST_V;
+  float    cfgEmgIDcOverA        = EMG_IDC_OVER_A;
+  float    cfgEmgIAcLoadOverA    = EMG_IAC_LOAD_OVER_A;
+  float    cfgEmgIAcGenOverA     = EMG_IAC_GEN_OVER_A;
+  uint8_t  cfgEmgDebounceN      = EMG_DEBOUNCE_N;
+  uint32_t cfgEmgRecoverySec    = EMG_RECOVERY_SEC;
+  uint8_t  cfgEmgRelayPin       = PIN_EMERGENCY_RELAY;
+  int8_t   cfgEmgEstopPin       = PIN_EMERGENCY_ESTOP;
+  uint8_t  cfgEmgEstopEnabled   = 1;
+  uint8_t  cfgEmgSensorFailPolicy = EMG_SENSOR_FAIL_POLICY;
+#endif
   Calibration calibration = {};
   char deviceId[17] = "";  // Generated from MAC at boot
   char cfgTimezone[40] = "Asia/Jakarta";
@@ -163,6 +203,10 @@ void networkTask(void* pv);
 void persistenceTask(void* pv);
 void healthTask(void* pv);
 void bmsCommTask(void* pv);   // v1.6.0 — BMS/inverter protocol manager
+#if PLTS_ENABLE_EMERGENCY
+void emergencyTask(void* pv);     // v1.7.0 — E-WAVE supervisor (local-first)
+void gasEmergencyTask(void* pv);  // v1.7.0 — GAS command poll/ACK/events
+#endif
 void publishTelemetry();
 void printBootBanner();
 
@@ -184,6 +228,16 @@ void setup() {
   esp_task_wdt_add(NULL);
   esp_task_wdt_reset();
 
+  // v1.7.0 [E-WAVE] — FAIL-SAFE FIRST: drive the emergency relay pin HIGH
+  // (ISOLATED on the active-LOW module) BEFORE LittleFS/WiFi/anything that
+  // can hang. ESP32 GPIOs are Hi-Z at reset -> module opto OFF -> isolated
+  // anyway; this makes it EXPLICIT and covers the window until user code
+  // runs (boot-isolation ordering is asserted by the mechanical test suite,
+  // same as firmware-generic's E1).
+#if PLTS_ENABLE_EMERGENCY
+  Drivers::emergencyRelay.begin();
+#endif
+
   // I2C bus — initialized ONCE here, shared by INA219 + SHT31
   Wire.begin(Core::PIN_I2C_SDA, Core::PIN_I2C_SCL, Core::I2C_FREQUENCY);
 
@@ -200,6 +254,9 @@ void setup() {
   Storage::config.loadUserConfig();
   Storage::config.loadDeviceConfig();
   Storage::config.loadBatteryConfig();  // populates cfg* runtime globals
+#if PLTS_ENABLE_EMERGENCY
+  Storage::config.loadEmergencyConfig(); // v1.7.0 — E-WAVE trigger config
+#endif
   Storage::config.loadCalibration();
   Storage::config.loadEnergyFromNVS();
   telemetrySequence = Storage::config.loadTelemetrySequence();
@@ -224,6 +281,9 @@ void setup() {
   Drivers::acs712.begin();
   Drivers::sht31.begin();
   Drivers::rtc.begin();
+#if PLTS_ENABLE_PZEM_AC
+  Drivers::pzemAc.begin();   // optional — presence proven by the first valid frame
+#endif
 
   // Voltage calibration — inject into ADC driver
   // [FW-15 REMEDIATION 2026-08] Persisted calibration is now APPLIED AT BOOT.
@@ -251,6 +311,13 @@ void setup() {
   Services::alarms.begin();
   Services::health.begin();
   Services::health.recordBoot();
+
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE supervisor: crash-chain NVS accounting, BOOT/CRASHLOOP
+  // event, relay pins from persisted config, LED init. Every boot re-enters
+  // EMERGENCY — ARM is operator-only (never automatic).
+  Services::emergency.begin();
+#endif
 
   // Spool & Services::journal
   Services::telemetrySpool.begin();
@@ -307,6 +374,13 @@ void setup() {
   // GAS advisor (AI insights proxy — HMAC to GAS)
   AI::advisor.begin();
 
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE GAS channel (EMERGENCY_PENDING poll, 15 s). Fail-closed
+  // when GAS_INGEST_URL / device secret are absent — the supervisor keeps
+  // running locally regardless.
+  Network::gasEmergency.begin();
+#endif
+
   // HTTP server
   Web::server.begin();
   // [FW-20] Seed the in-RAM OTA history with this boot's record
@@ -325,6 +399,11 @@ void setup() {
   // When cfgBmsProtocol = "none" the manager stays DISABLED and the system
   // behaves exactly like v1.5.0 (INA219/ACS712 shunt path only).
   Comm::batteryComm.begin();
+#if PLTS_ENABLE_RS485_CONSOLE
+  // v1.7.0 — passive RS485 capture console. Self-gated: only takes the UART
+  // when cfgBmsProtocol == "rs485_console" (bench capture mode).
+  Comm::rs485Console.begin();
+#endif
   // [AUDIT v1.6.0] Zero-init makes floats 0.0 — the serializer would emit a
   // fake "0 V / 0 A BMS" in the window before the first energyTask cycle.
   // Initialize to NaN so the serializer emits null (honest "no data yet").
@@ -347,6 +426,20 @@ void setup() {
   latestStatus.bms.currentMismatchA = NAN;
   latestStatus.battery.soc.provenance = Core::SocProvenance::Unknown;
 
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE: seed the emergency block BEFORE tasks start so the
+  // first REST/MQTT serialization is honest (publishStatus below refreshes
+  // it now that telemetryMutex exists, then emergencyTask at 10 Hz).
+  latestStatus.emergency.state          = "EMERGENCY";
+  latestStatus.emergency.reason         = "BOOT";
+  latestStatus.emergency.estopOpen      = Drivers::emergencyRelay.isEstopOpen();
+  latestStatus.emergency.relayEnergized = false;
+  latestStatus.emergency.trips          = Services::emergency.trips();
+  latestStatus.emergency.tripAtMs       = 0;
+  latestStatus.emergency.crashChain     = Services::emergency.crashChain();
+  Services::emergency.publishStatus();
+#endif
+
   // FreeRTOS tasks (brief §78 — 9 tasks: 8 system + 1 OTA driver)
   xTaskCreatePinnedToCore(sensorTask,       "sensor",      4096, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(measurementTask,  "measure",     4096, NULL, 3, NULL, 0);
@@ -357,6 +450,13 @@ void setup() {
   xTaskCreatePinnedToCore(healthTask,       "Services::health",       4096, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(otaTask,          "ota",         6144, NULL, 1, NULL, 0);  // [v1.6.3] 4K→6K: TLS + flash-write in one stack frame chain
   xTaskCreatePinnedToCore(bmsCommTask,      "bmscomm",     4096, NULL, 2, NULL, 0);
+#if PLTS_ENABLE_EMERGENCY
+  // v1.7.0 — E-WAVE: safety-critical tick at 10 Hz on core 0 (same core as
+  // sensors, priority 3 = sensor tier); GAS network I/O on core 1 so a
+  // blocking TLS POST (7 s cap) can never stall MQTT/web or the supervisor.
+  xTaskCreatePinnedToCore(emergencyTask,    "emg",         4096, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(gasEmergencyTask, "gasemg",      6144, NULL, 2, NULL, 1);
+#endif
 
   Serial.println("[BOOT] All tasks started. System ready.");
   Services::Log.append(Core::LogType::Info, String("SYSTEM_READY version=") + Core::FIRMWARE_VERSION);
@@ -689,6 +789,31 @@ void measurementTask(void* pv) {
       snap.ac.signalQuality = sample.acCurrentValid
           ? Core::AcSignalQuality::Good
           : Core::AcSignalQuality::Invalid;
+
+#if PLTS_ENABLE_PZEM_AC
+      // v1.7.0 — PZEM-004T AC meter (OPTIONAL, flag OFF until bench
+      // validation). Real V/P/f/PF replaces the ACS712 estimate IN
+      // REPORTING when healthy; an absent meter reports connected=false +
+      // null — never a silent estimate swap (the estimate block stays
+      // labeled estimatedPower either way, so the operator always knows
+      // which instrument produced the number).
+      Drivers::pzemAc.tick();
+      {
+        Drivers::PzemReading r = Drivers::pzemAc.getReading();
+        bool meterOk = Drivers::pzemAc.isAvailable() &&
+                       r.status == Drivers::PzemStatus::Ok;
+        if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+          latestStatus.ac.meter.connected   = meterOk;
+          latestStatus.ac.meter.voltage     = meterOk ? r.voltageV    : NAN;
+          latestStatus.ac.meter.current     = meterOk ? r.currentA    : NAN;
+          latestStatus.ac.meter.power       = meterOk ? r.powerW      : NAN;
+          latestStatus.ac.meter.energy      = meterOk ? r.energyWh    : NAN;
+          latestStatus.ac.meter.frequency   = meterOk ? r.frequencyHz : NAN;
+          latestStatus.ac.meter.powerFactor = meterOk ? r.powerFactor : NAN;
+          xSemaphoreGive(telemetryMutex);
+        }
+      }
+#endif
 
       // [FW-25 REMEDIATION 2026-08] condensationRisk was copied into telemetry
       // but NEVER computed — it read uninitialized stack memory. Now derived
@@ -1201,17 +1326,62 @@ void bmsCommTask(void* pv) {
   while (true) {
     esp_task_wdt_reset();
     Comm::batteryComm.tick(millis());
+#if PLTS_ENABLE_RS485_CONSOLE
+    Comm::rs485Console.tick(millis());   // no-op unless capture mode active
+#endif
     Services::health.recordHeartbeat(Core::TaskId::BmsComm);
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(100));
   }
 }
+
+#if PLTS_ENABLE_EMERGENCY
+//=============================================================================
+// EMERGENCY TASK — v1.7.0 E-WAVE supervisor (LOCAL-FIRST, 10 Hz).
+// E-stop poll, trigger evaluation, ARM gating bookkeeping, LED, status
+// publish. NO network I/O ever — a safety function must never depend on
+// WiFi/MQTT/GAS being up (brief §75). The relay state itself is latched in
+// the GPIO/driver, so even a total task stall leaves the system ISOLATED
+// (fail-safe direction) — the WDT panic path resets the GPIO to Hi-Z which
+// ALSO isolates. Both failure directions point to safety.
+//=============================================================================
+void emergencyTask(void* pv) {
+  esp_task_wdt_add(NULL);
+  TickType_t lastWake = xTaskGetTickCount();
+
+  while (true) {
+    esp_task_wdt_reset();
+    Services::emergency.tick();
+    Services::health.recordHeartbeat(Core::TaskId::Emergency);
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(100));
+  }
+}
+
+//=============================================================================
+// GAS EMERGENCY TASK — v1.7.0 E-WAVE remote command channel (10 Hz pump).
+// Own task because the TLS POST blocks up to 7 s: stalling networkTask would
+// break MQTT keepalive + web server, stalling emergencyTask would delay
+// E-stop polling. Here it can only delay the next poll cadence (15 s base,
+// backoff to 60 s on failures — bounded, never the safety path).
+//=============================================================================
+void gasEmergencyTask(void* pv) {
+  esp_task_wdt_add(NULL);
+  TickType_t lastWake = xTaskGetTickCount();
+
+  while (true) {
+    esp_task_wdt_reset();
+    Network::gasEmergency.tick();
+    Services::health.recordHeartbeat(Core::TaskId::GasEmergency);
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(100));
+  }
+}
+#endif
 
 //=============================================================================
 // BOOT BANNER
 //=============================================================================
 void printBootBanner() {
   Serial.println("\n========================================");
-  Serial.println("  PLTS Monitor — Production-Grade v1.0.0");
+  Serial.printf("  PLTS Monitor — Production-Grade v%s\n", Core::FIRMWARE_VERSION);
   // Build profile name (macro — not in namespace)
   const char* profile = "development";
 #ifdef PRODUCTION_BUILD

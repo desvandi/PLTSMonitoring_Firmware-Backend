@@ -12,6 +12,7 @@ void registerRoutes();
 void noteBootEvent();                       // seed /api/ota/history with the boot record
 void noteOtaEvent(const char* version, const char* event);
 void handleAlarmAckGeneric();               // POST /api/alarms/acknowledge {code}
+void handleRs485Frames();                   // GET /api/rs485/frames (bench capture)
 
 } // namespace ExtraHandlers
 } // namespace Web

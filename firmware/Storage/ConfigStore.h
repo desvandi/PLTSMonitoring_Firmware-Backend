@@ -9,6 +9,7 @@
 
 #include <Arduino.h>
 #include "../Core/Types.h"
+#include "../Core/Config.h"   // PLTS_ENABLE_* feature flags (v1.7.0 E-WAVE)
 
 namespace Storage {
 
@@ -26,6 +27,14 @@ public:
   // ---------- RUNTIME BATTERY CONFIG (capacity, thresholds, intervals) ----------
   void loadBatteryConfig();   // populates Core::cfg* globals
   void saveBatteryConfig();
+
+#if PLTS_ENABLE_EMERGENCY
+  // ---------- v1.7.0 E-WAVE EMERGENCY TRIGGER CONFIG (NVS "plts_emg") ----------
+  // 13 fields, ranges mirror Code.gs EMERGENCY_CONFIG_FIELDS. Defaults-on-read
+  // means old NVS images upgrade silently — no migration needed.
+  void loadEmergencyConfig();   // populates Core::cfgEmg* globals
+  void saveEmergencyConfig();
+#endif
 
   // ---------- CALIBRATION ----------
   void loadCalibration();

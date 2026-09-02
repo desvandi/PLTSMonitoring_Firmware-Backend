@@ -13,6 +13,7 @@
 #include "ExtraHandlers.h"
 #include "HttpServer.h"
 #include "Common.h"
+#include "../Comm/Rs485Console.h"
 #include "../Core/Globals.h"
 #include "../Core/Config.h"
 #include "../Core/Common.h"
@@ -368,6 +369,10 @@ void registerRoutes() {
   http.on("/api/config/import", HTTP_POST, handleImport);
   // v1.6.0 — multi-protocol BMS/inverter comm diagnostics
   http.on("/api/bms", HTTP_GET, handleBmsStatus);
+#if PLTS_ENABLE_RS485_CONSOLE
+  // v1.7.0 — passive RS485 vendor-frame capture (bench; protocol=rs485_console)
+  http.on("/api/rs485/frames", HTTP_GET, handleRs485Frames);
+#endif
   // Per-alarm ACK: pattern-routed via the wildcard handler registered by
   // AlarmHandlers (onNotFound) — simplified: exact-match common codes path.
   http.on("/api/alarms/acknowledge", HTTP_POST, handleAlarmAckGeneric);
@@ -386,6 +391,25 @@ void handleAlarmAckGeneric() {
   if (!a) { sendError(404, "Alarm not found"); return; }
   Services::alarms.acknowledge(code);
   sendSuccess("Alarm acknowledged", "{}");
+}
+
+// ---------------------------------------------------------------------------
+// v1.7.0 — GET /api/rs485/frames: passive vendor-frame capture (bench tool).
+// Raw hex only — NO interpretation (the PylontechRs485 parser stays RESERVED
+// until real vendor frames are captured and documented). Fail-closed: when
+// the console is compiled out or not active, the route says so honestly.
+// ---------------------------------------------------------------------------
+void handleRs485Frames() {
+  if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+#if PLTS_ENABLE_RS485_CONSOLE
+  if (!Comm::rs485Console.isActive()) {
+    sendError(503, "RS485 console not active — set bmsProtocol=rs485_console (bench mode)");
+    return;
+  }
+  sendSuccess("RS485 console frames (raw, uninterpreted)", Comm::rs485Console.framesJson());
+#else
+  sendError(503, "RS485 console compiled out (PLTS_ENABLE_RS485_CONSOLE=0)");
+#endif
 }
 
 } // namespace ExtraHandlers
