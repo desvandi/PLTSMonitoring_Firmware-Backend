@@ -377,15 +377,28 @@ dari allowlist.
 ke PWA lewat skrip resmi:
 
 ```bash
-# 1. Edit src/plts_firmware_v1.ino, bump FIRMWARE_VERSION
+# 1. Edit src/plts_firmware_v1.ino, bump FIRMWARE_VERSION + header changelog
 # 2. Edit manifest.json → samakan "version" (guard menolak bila beda)
 python3 scripts/release_firmware_generic.py --pwa-path ../plts_monitor_PWA_only
 # 3. Commit kedua repo sesuai perintah yang dicetak skrip
 ```
 
-Skrip ini: build → guard kejujuran versi → salin 3 binari ke `bin/` → hapus
-binari lama → sinkron ke PWA `public/firmware/` → cetak perintah commit.
-Gagal di tengah = abort, tidak pernah menulis setengah rilis.
+Skrip ini: build → guard kejujuran versi (manifest == constant == header) →
+salin 3 binari ke `bin/` → hapus binari lama → sinkron ke PWA
+`public/firmware/` → cetak perintah commit. Gagal di tengah = abort, tidak
+pernah menulis setengah rilis.
+
+> **[P1-REMEDIATION] Identitas versi — single source of truth.** Anti-
+> downgrade OTA membandingkan konstanta `FIRMWARE_VERSION` firmware yang
+> berjalan dengan versi manifest — BUKAN nama file `.bin`. Karena itu tiga
+> identitas wajib identik pada setiap commit: (1) konstanta di
+> `plts_firmware_v1.ino`, (2) `"version"` di `manifest.json`, (3) komentar
+> changelog teratas di header `.ino`. Dua penjaga memaksa ini:
+> `scripts/test_version_identity.py` (dijalankan CI pada setiap push,
+> memverifikasi juga bahwa `bin/` maksimal berisi SATU binari versi aktif)
+> dan guard header baru di `release_firmware_generic.py`. Lini firmware
+> modular (`firmware/`, versi `Core/Config.h`) adalah produk TERPISAH yang
+> boleh punya versi berbeda — yang dilarang hanya referensi silang.
 
 ---
 
@@ -532,12 +545,13 @@ perangkat memvalidasi ulang + eksekusi --EMERGENCY_ACK--> baris APPLIED
 | Konsumsi | Piggyback pada respons `TELEMETRY` (nol polling tambahan saat jalur normal) + `EMERGENCY_PENDING` khusus (15 dtk) saat backoff |
 | Umur perintah | TTL `EMERGENCY_QUEUE_TTL_MIN` (default 10 menit) — perintah basi EXPIRED, tidak pernah diterapkan diam-diam |
 | ACK | Terikat `device_key` (ACK lintas perangkat → 400), idempoten (re-ACK → 200 settled) |
-| Validasi CONFIG | Skema 12 field divalidasi **3 lapis** (PWA clamp → GAS range-check → firmware range-check); field tak dikenal dibuang |
+| Validasi CONFIG | Skema **13 field** divalidasi **3 lapis** (PWA clamp → GAS range-check → firmware range-check); field tak dikenal dibuang |
 | Event | `EMERGENCY_EVENT` (TRIP/ESTOP/BOOT/CRASHLOOP/ARMED/DISARMED/…) → sheet `EmergencyEvents` (rotasi 500 baris) + Telegram opsional + cooldown per topik |
-| Gate ARM perangkat | Firmware MENOLAK ARM bila pemicu masih aktif (histeresis), masa pulih belum lewat, atau crash-chain ≥ 3 — alasan penolakan dikirim balik ke operator |
+| Gate ARM perangkat | Firmware MENOLAK ARM bila pemicu masih aktif (histeresis), masa pulih belum lewat, crash-chain ≥ 3, **atau sensor keselamatan hilang/tidak valid (sensorFailPolicy=1)** — alasan penolakan dikirim balik ke operator |
+| Sensor keselamatan | **v1.7.0 [P1]: `sensorFailPolicy` (field ke-13, default 1 = fail-closed)** — sensor arus INA219/ACS712 adalah input trip darurat; sensor hilang → ARM DITOLAK + sistem RUN yang kehilangan sensor TRIP `SENSOR_LOSS` (debounce standar). Policy 0 = opt-out eksplisit operator (bench/komisioning, TIDAK aman untuk produksi). Armada campur versi: field absen → default 1 (arah aman). |
 | Kolom telemetri v1.7 | `i_ac_gen`, `emg_state`, `emg_reason`, `emg_estop`, `emg_trips` (di-append; baris lama → `UNKNOWN`, tidak difabrikasi) |
 
-Pin default firmware-generic v1.6.0: relay **GPIO 27**, sense E-stop
+Pin default firmware-generic v1.7.0: relay **GPIO 27**, sense E-stop
 **GPIO 14** (INPUT_PULLUP, opsional), ACS712 #2 jenset **GPIO 32**
 (ADC1_CH4). Semua bisa dipindahkan lewat perintah CONFIG tanpa reflash.
 Wiring: lihat [`docs/wiring/emergency-relay.png`](docs/wiring/emergency-relay.png)

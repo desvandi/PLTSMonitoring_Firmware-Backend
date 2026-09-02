@@ -275,8 +275,20 @@ console.log('\n[B] FW6-1 OTA_STATUS event surface:');
 // ===========================================================================
 console.log('\n[C] firmware-generic v1.5.4 source contract:');
 {
-  check('C1 FIRMWARE_VERSION == 1.6.0',
-    /FIRMWARE_VERSION\s*=\s*"1\.6\.0"/.test(INO));
+  // [P1-REMEDIATION 2026-09] The literal 1.6.0 pin is retired: a hard-coded
+  // version literal here would fight the bump discipline. The invariant that
+  // actually matters is CONSISTENCY (constant == manifest == header), which
+  // scripts/test_version_identity.py enforces in CI. This check now verifies
+  // the version is a well-formed semver constant, and cross-checks the
+  // manifest so this suite also fails on drift.
+  {
+    const m = INO.match(/FIRMWARE_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/);
+    const manifest = fs.readFileSync(
+      path.join(__dirname, '..', 'firmware-generic', 'manifest.json'), 'utf8');
+    const mv = JSON.parse(manifest).version;
+    check('C1 FIRMWARE_VERSION is semver AND matches manifest.json',
+      !!m && m[1] === mv, `source=${m && m[1]} manifest=${mv}`);
+  }
   check('C2 no setInsecure() call anywhere (comments excluded)',
     !/\.setInsecure\s*\(/.test(INO));
   check('C3 per-device key derivation in applyOta',

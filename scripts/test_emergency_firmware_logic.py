@@ -2,7 +2,7 @@
 """
 test_emergency_firmware_logic.py — [E-WAVE] firmware emergency layer
 =====================================================================
-Mirrors the emergency-relay algorithm from firmware-generic v1.6.0
+Mirrors the emergency-relay algorithm from firmware-generic v1.7.0
 (src/plts_firmware_v1.ino) line-for-line and proves the safety invariants:
 
   Group A — Trip debounce + hysteresis:
@@ -13,6 +13,9 @@ Mirrors the emergency-relay algorithm from firmware-generic v1.6.0
     ARM is rejected while any trigger is still active (with hysteresis);
     rejected during the recovery window; allowed after recoverySec; rejected
     while crash-chain hold is active; idempotent when already RUN.
+    v1.7.0 [P1-SC2]: under sensorFailPolicy=1 (default) ARM is ALSO rejected
+    while any safety sensor is absent/invalid — unmonitored IS unsafe for a
+    safety interlock. Policy 0 = explicit legacy opt-out (bench only).
 
   Group C — E-stop latching:
     E-stop open → trip + relay OFF; release → still ISOLATED until operator
@@ -21,6 +24,11 @@ Mirrors the emergency-relay algorithm from firmware-generic v1.6.0
   Group D — Command application:
     DISARM always isolates (safe direction); CONFIG range-checks re-validated
     locally (out-of-range values silently dropped, valid ones applied).
+
+  Group S — Safety-sensor loss (v1.7.0 [P1-SC3], policy-gated):
+    A running system that loses a safety sensor TRIPS to ISOLATED after the
+    debounce window (fail-closed); with policy 0 it keeps running (legacy,
+    documented unsafe).
 
   Group E — Static fail-safe patterns in the .ino source:
     relay pin driven HIGH before WiFi/LittleFS; emgInit before loadConfig's
@@ -67,6 +75,8 @@ class EmergencyConfig:
         self.relayPin = 27
         self.estopPin = 14
         self.estopEnabled = 1
+        # v1.7.0 [P1-SC1] — 13th schema field (0/1, default 1 = fail-closed)
+        self.sensorFailPolicy = 1
         for k, v in kw.items():
             setattr(self, k, v)
 
@@ -85,12 +95,13 @@ class EmgFirmware:
         self.reason = "BOOT"
         self.trips = 0
         self.estop_open = False
-        self.debounce = [0, 0, 0, 0, 0]   # vbatLo, vbatHi, iDc, iAc, iAcGen
+        # v1.7.0 — slot 5 = safety-sensor loss (policy-gated)
+        self.debounce = [0, 0, 0, 0, 0, 0]   # vbatLo, vbatHi, iDc, iAc, iAcGen, sensorLoss
         self.clear_at_ms = 0
         self.crash_chain = 0
         self.relay_gpio_low = False        # LOW = energized = RUN
         self.now_ms = 0
-        self.ina219_present = True
+        self.ina219_present = True         # INA219 detected at boot
         self.vbat = float("nan")
         self.idc = float("nan")
         self.iac = float("nan")
@@ -151,12 +162,33 @@ class EmgFirmware:
                 self.trip("I_AC_GEN_OVER"); return
         elif _fin(g) and g < cfg.iAcGenOverA:
             self.debounce[4] = 0
+        # v1.7.0 [P1-SC3] — safety-sensor loss (fail-closed, policy-gated)
+        if cfg.sensorFailPolicy:
+            sensor_loss = (not _fin(v)) or (not _fin(i)) or (not _fin(a)) or (not _fin(g))
+            if sensor_loss:
+                self.debounce[5] += 1
+                if self.debounce[5] >= cfg.debounceN:
+                    self.trip("SENSOR_LOSS"); return
+            else:
+                self.debounce[5] = 0
+        else:
+            self.debounce[5] = 0
 
     def arm_block_reason(self):
         v, i, a, g = self.vbat, self.idc, self.iac, self.igen
         cfg = self.cfg
         if not _fin(v):
             return "sensor tegangan tidak valid"
+        # v1.7.0 [P1-SC2] — fail-closed: safety sensors are mandatory inputs.
+        if cfg.sensorFailPolicy:
+            if not self.ina219_present:
+                return "sensor INA219 tidak terdeteksi — proteksi arus DC nonaktif (sensorFailPolicy=1)"
+            if not _fin(i):
+                return "sensor arus DC tidak valid"
+            if not _fin(a):
+                return "sensor arus beban AC tidak valid"
+            if not _fin(g):
+                return "sensor arus genset tidak valid"
         if v <= cfg.vbatLowV + cfg.vbatLowHystV:
             return "VBAT masih rendah"
         if v >= cfg.vbatHighV - cfg.vbatHighHystV:
@@ -317,14 +349,44 @@ fw3.vbat = float("nan")
 res = fw3.apply_command("ARM")
 check("B6 invalid voltage sensor blocks ARM", res[0] == "REJECTED" and "tidak valid" in res[1], str(res))
 
-# B7 — INA219 absent: iDc NaN does not block ARM (unmonitored ≠ unsafe).
+# B7 — v1.7.0 [P1-SC2] INA219 absent now BLOCKS ARM (fail-closed default).
+# The old "unmonitored ≠ unsafe" stance silently disabled I_DC_OVER
+# protection; under sensorFailPolicy=1 an absent safety sensor is a hard
+# ARM block with an honest, actionable reason.
 fw4 = EmgFirmware()
 fw4.ina219_present = False
 healthy_sensors(fw4)
 fw4.vbat = 51.2; fw4.idc = float("nan")
 fw4.clear_at_ms = fw4.now_ms - 61_000
 res = fw4.apply_command("ARM")
-check("B7 INA219 absent does not block ARM", res[0] == "APPLIED", str(res))
+check("B7 INA219 absent BLOCKS ARM under sensorFailPolicy=1 (fail-closed)",
+      res[0] == "REJECTED" and "INA219" in res[1], str(res))
+
+# B7b — invalid AC current also blocks ARM (same fail-closed contract).
+fw4b = EmgFirmware()
+healthy_sensors(fw4b)
+fw4b.iac = float("nan")
+fw4b.clear_at_ms = fw4b.now_ms - 61_000
+res = fw4b.apply_command("ARM")
+check("B7b invalid AC-load sensor BLOCKS ARM (fail-closed)",
+      res[0] == "REJECTED" and "arus beban AC" in res[1], str(res))
+
+# B8 — policy 0 = explicit operator opt-out (legacy bench behavior).
+fw4c = EmgFirmware(EmergencyConfig(sensorFailPolicy=0))
+fw4c.ina219_present = False
+healthy_sensors(fw4c)
+fw4c.vbat = 51.2; fw4c.idc = float("nan")
+fw4c.clear_at_ms = fw4c.now_ms - 61_000
+res = fw4c.apply_command("ARM")
+check("B8 sensorFailPolicy=0 restores legacy (unmonitored ≠ unsafe, opt-out)",
+      res[0] == "APPLIED", str(res))
+
+# B9 — healthy sensors + policy 1 still ARM normally (no regression).
+fw4d = EmgFirmware()
+healthy_sensors(fw4d)
+fw4d.clear_at_ms = fw4d.now_ms - 61_000
+res = fw4d.apply_command("ARM")
+check("B9 healthy sensors + policy 1 → ARM allowed", res[0] == "APPLIED", str(res))
 
 # ---------------------------------------------------------------------------
 # Group C — E-stop latching
@@ -352,6 +414,54 @@ check("D1 DISARM isolates from RUN",
 res = fw6.apply_command("DISARM")
 check("D2 DISARM idempotent (already isolated, no double count)",
       res[0] == "APPLIED" and fw6.trips == 1, f"trips={fw6.trips}")
+
+# ---------------------------------------------------------------------------
+# Group S — Safety-sensor loss while RUN (v1.7.0 [P1-SC3], fail-closed)
+# ---------------------------------------------------------------------------
+print("\n[S] Safety-sensor loss while RUN (fail-closed):")
+# S1 — a running system that loses the INA219 (iDc → NaN) trips to ISOLATED
+# after the debounce window — protection must not silently vanish.
+fwS = EmgFirmware()
+armed(fwS)
+fwS.idc = float("nan")
+fwS.evaluate_triggers(); fwS.evaluate_triggers()
+check("S1a 2 lost samples still RUN (debounce)", fwS.state == RUN)
+fwS.evaluate_triggers()
+check("S1b 3rd lost sample trips SENSOR_LOSS",
+      fwS.state == EMERGENCY and fwS.reason == "SENSOR_LOSS" and fwS.relay_gpio_low is False)
+
+# S2 — noise burst (2 lost samples then recovery) never trips.
+fwS2 = EmgFirmware()
+armed(fwS2)
+for _ in range(2):
+    fwS2.iac = float("nan")
+    fwS2.evaluate_triggers()
+fwS2.iac = 1.8
+fwS2.evaluate_triggers()
+check("S2 noise burst (2 < debounceN) never trips SENSOR_LOSS", fwS2.state == RUN)
+
+# S3 — trip is latched (idempotent, single trip count).
+fwS.evaluate_triggers(); fwS.evaluate_triggers()
+check("S3 SENSOR_LOSS trip is LATCHED (no re-trip)",
+      fwS.state == EMERGENCY and fwS.trips == 1)
+
+# S4 — with policy 0 the same runtime loss does NOT trip (legacy opt-out).
+fwS3 = EmgFirmware(EmergencyConfig(sensorFailPolicy=0))
+armed(fwS3)
+fwS3.idc = float("nan")
+for _ in range(5):
+    fwS3.evaluate_triggers()
+check("S4 policy=0: runtime sensor loss does NOT trip (legacy, unsafe-by-record)",
+      fwS3.state == RUN)
+
+# S5 — voltage NaN is ALSO a sensor-loss trip while RUN (previously only an
+# ARM-gate check; now the running system isolates too).
+fwS5 = EmgFirmware()
+armed(fwS5)
+fwS5.vbat = float("nan")
+fwS5.evaluate_triggers(); fwS5.evaluate_triggers(); fwS5.evaluate_triggers()
+check("S5 voltage NaN while RUN trips SENSOR_LOSS",
+      fwS5.state == EMERGENCY and fwS5.reason == "SENSOR_LOSS")
 
 # ---------------------------------------------------------------------------
 # Group E — static fail-safe patterns in the real .ino source
@@ -415,6 +525,27 @@ check("E9 ACS712 #2 sampled in sampleSensors()",
 check("E10 crash-chain accounting present",
       "NVS_KEY_EMG_RUN_OK" in ino and "NVS_KEY_EMG_CHAIN" in ino and
       "EMG_CRASH_CHAIN_LIMIT" in ino)
+
+# E11 — v1.7.0 [P1-SC1] sensorFailPolicy is a first-class schema field:
+# struct member + CONFIG parse (both load + apply paths) + persistence.
+check("E11a sensorFailPolicy in EmergencyConfig struct",
+      "sensorFailPolicy = 1;" in ino)
+check("E11b sensorFailPolicy parsed from persisted config (loadConfig)",
+      ino.count('emg["sensorFailPolicy"] | -1') == 1)
+check("E11c sensorFailPolicy parsed from operator CONFIG command",
+      ino.count('cfg["sensorFailPolicy"]') == 1)
+check("E11d sensorFailPolicy persisted in saveConfig()",
+      'emg["sensorFailPolicy"] = config.emg.sensorFailPolicy;' in ino)
+
+# E12 — v1.7.0 [P1-SC2/SC3] the fail-closed policy is actually wired into
+# the ARM gate and the trigger evaluator (not just declared).
+check("E12a ARM gate consults sensorFailPolicy",
+      "if (config.emg.sensorFailPolicy) {" in ino and
+      "sensor INA219 tidak terdeteksi" in ino)
+check("E12b SENSOR_LOSS runtime trip present (debounced)",
+      'emgTrip("SENSOR_LOSS")' in ino)
+check("E12c debounce array extended to 6 slots",
+      "emgDebounce[6]" in ino)
 
 # ---------------------------------------------------------------------------
 # Summary

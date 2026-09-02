@@ -52,6 +52,17 @@ void handlePostConfig() {
   // Tag with canonical (type, action)
   doc["type"] = "config";
   doc["action"] = "update";
+  // [P2-1 REMEDIATION 2026-09] Freshness gate BEFORE the journal decides —
+  // REST must not be the weak sibling of the MQTT path (same contract as
+  // MqttConfigReceiver: an expired command can neither be applied nor
+  // safely deduplicated once its ring slot is gone).
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {
+      sendError(400, expiryErr);
+      return;
+    }
+  }
   Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(doc);
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =

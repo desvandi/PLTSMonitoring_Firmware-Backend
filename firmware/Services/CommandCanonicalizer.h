@@ -46,6 +46,18 @@ public:
   static bool validateTransactionId(const String& tid, String& errOut);
   static bool validateProtocolVersion(int version, String& errOut);
 
+  // [P2-1 REMEDIATION 2026-09 — retention/freshness contract]
+  // Journaled commands are deduplicated ONLY while their requestId sits in
+  // the 64-slot ring (see TransactionJournal.h). A command whose expiresAt
+  // is in the past can no longer be safely deduplicated NOR safely applied.
+  // Every ingress (REST + MQTT) MUST call this BEFORE decideTransaction().
+  //   doc       — the full command envelope (expiresAt, unix-seconds)
+  //   errOut    — human-readable reason when rejected
+  // Returns TRUE when the command is fresh (or has no usable clock yet —
+  // same fallback semantics as MqttConfigReceiver: a device without RTC
+  // sync cannot enforce freshness and MUST NOT brick command handling).
+  static bool isCommandExpired(JsonDocument& doc, String& errOut);
+
   static CanonicalResult canonicalizeAndHash(JsonDocument& doc);
   static DecisionResult decideTransaction(const String& tid, const String& hash);
 

@@ -164,6 +164,15 @@ void handleDevicePost() {
   if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
   doc["type"] = "config";
   doc["action"] = "device";
+  // [P2-1 REMEDIATION 2026-09] Freshness gate (REST/MQTT parity — see
+  // ConfigHandlers.cpp for the full rationale).
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {
+      sendError(400, expiryErr);
+      return;
+    }
+  }
   Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(doc);
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =

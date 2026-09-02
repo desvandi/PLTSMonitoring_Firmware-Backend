@@ -132,7 +132,16 @@ const EMERGENCY_CONFIG_FIELDS = [
   ['recoverySec',   0,    3600, 60],
   ['relayPin',      12,   39,  27],
   ['estopPin',      -1,   39,  14],
-  ['estopEnabled',  0,    1,   1]
+  ['estopEnabled',  0,    1,   1],
+  // v1.7.0 [P1-SC1] (audit remediation) — safety-sensor failure policy.
+  // 1 (default) = fail-closed: the current sensors are MANDATORY safety
+  //   inputs (they feed I_DC/I_AC_LOAD/I_AC_GEN trip triggers); firmware
+  //   rejects ARM and trips SENSOR_LOSS while any safety sensor is
+  //   absent/invalid. "Unmonitored IS unsafe" for a safety interlock.
+  // 0 = explicit legacy opt-out (bench/commissioning only, unsafe).
+  // Mixed-version fleets: field omitted by an older PWA → GAS injects the
+  // default 1 here, so the fail-closed direction survives version skew.
+  ['sensorFailPolicy', 0,  1,   1]
 ];
 
 // [P0-007] 48 V / 15S LiFePO4 — matches firmware Core::Config defaults.

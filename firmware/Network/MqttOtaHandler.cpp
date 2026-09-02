@@ -78,6 +78,18 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     }
   }
 
+  // --- 2b. [P2-1 REMEDIATION 2026-09] Freshness gate (RETENTION CONTRACT) ------
+  // An expired OTA command can be neither applied nor safely deduplicated
+  // once its journal ring slot is gone (see TransactionJournal.h).
+  {
+    String errOut;
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, errOut)) {
+      _publishAck(tid.c_str(), false, "REJECTED", errOut);
+      _rejected++;
+      return;
+    }
+  }
+
   // --- 3. Field whitelist -------------------------------------------------------
   {
     JsonObject root = doc.as<JsonObject>();
@@ -179,12 +191,22 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
   }
 
   // --- 7. Store transaction + publish ACK -------------------------------------
+  // [P2-2 REMEDIATION 2026-09] ACK state semantics made EXPLICIT:
+  //   "phase": "ACCEPTED"  — the OTA JOB was accepted and the download was
+  //                          STARTED. It does NOT mean the image flashed.
+  //   "phase": "REJECTED"  — the job was refused (policy/validation failure).
+  // The FINAL outcome is reported out-of-band via OTA_STATUS events:
+  //   DOWNLOAD_FAILED | VERIFICATION_FAILED | ROLLBACK | ACTIVATED
+  // A command-sender that treats ACK as "flashed" is misreading the contract
+  // — the ACK is a transport-level settle for the journal (idempotent
+  // replay returns this same ACK), never a lifecycle completion signal.
   String ackJson;
   {
     JsonDocument ack;
     ack["transactionId"] = canon.transactionId;
     ack["ok"] = ok;
     ack["code"] = ok ? "ACCEPTED" : "REJECTED";
+    ack["phase"] = ok ? "ACCEPTED" : "REJECTED";   // job-level, not flash-level
     ack["message"] = message;
     ack["source"] = "mqtt";
     ack["appliedAt"] = (uint32_t)::time(nullptr);

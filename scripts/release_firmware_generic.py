@@ -81,6 +81,20 @@ def main() -> None:
             f"sebelum rilis — manifest tidak boleh bohong tentang isi binari."
         )
 
+    # --- 3b. GUARD KEJUJURAN (extra, P1-remediation): header changelog ---------
+    # Audit finding "version identity drift": the .ino header comment
+    # (top-of-file changelog) stayed at v1.5.4 while the constant moved to
+    # 1.6.0. A stale header lies to every reader doing a release diff.
+    hm = re.search(r"Generic Firmware v(\d+\.\d+\.\d+)", ino_text)
+    header_version = hm.group(1) if hm else None
+    if header_version != version:
+        die(
+            f"MISMATCH VERSI HEADER: manifest.json={version} tapi header .ino="
+            f"{header_version}. Perbarui komentar changelog teratas di "
+            f"src/plts_firmware_v1.ino agar sama dengan versi rilis "
+            f"(header basi = identitas versi drift, guard ini menutupnya)."
+        )
+
     # --- 4. Salin binari ke bin/ --------------------------------------------
     fw_name = f"plts_firmware_v{version}.bin"
     sources = {

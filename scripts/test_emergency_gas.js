@@ -447,7 +447,37 @@ console.log('\n[E] CONFIG validation:');
   check('E5 unknown field DROPPED (rogueField absent)', cfg && cfg.rogueField === undefined, JSON.stringify(cfg));
   check('E6 defaults merged (debounceN 3)', cfg && cfg.debounceN === 3, JSON.stringify(cfg));
   const cfgKeys = Object.keys(cfg).sort();
-  check('E7 exactly the 12 schema keys delivered', cfgKeys.length === 12, JSON.stringify(cfgKeys));
+  check('E7 exactly the 13 schema keys delivered', cfgKeys.length === 13, JSON.stringify(cfgKeys));
+  // v1.7.0 [P1-SC1] — the 13th field (safety-sensor fail-closed policy) must
+  // be merged with the fail-closed default even when the caller omits it.
+  check('E8 sensorFailPolicy default 1 (fail-closed) when omitted',
+        cfg && cfg.sensorFailPolicy === 1, JSON.stringify(cfg));
+  // E9 — an explicit policy 0 passes validation (legacy opt-out is allowed
+  // but must round-trip honestly, never silently rewritten).
+  const e9 = doPost(env, { action: 'EMERGENCY_COMMAND', token: TOKEN, admin_token: ADMIN,
+    command: 'CONFIG', device_key: DEV,
+    config: { sensorFailPolicy: 0, recoverySec: 30 } });
+  check('E9 explicit sensorFailPolicy=0 accepted (operator opt-out)',
+        e9.status === 'SUCCESS', JSON.stringify(e9));
+  // E10 — the explicit policy 0 round-trips to the device verbatim (0 stays 0:
+  // GAS must not "helpfully" rewrite an operator opt-out back to 1).
+  // Drain the whole un-ACKed queue (oldest first: E3's CONFIG is DELIVERED
+  // but un-ACKed, then E9's CONFIG) so GROUP F starts with a clean queue.
+  {
+    let sawE9Verbatim = false;
+    for (let i = 0; i < 5; i++) {
+      const pend = doPost(env, { action: 'EMERGENCY_PENDING', token: TOKEN, device_key: DEV });
+      const d = pend.data;
+      if (!d || !d.command_id) break;            // queue drained
+      if (d.command === 'CONFIG' && d.config && d.config.recoverySec === 30) {
+        sawE9Verbatim = (d.config.sensorFailPolicy === 0);
+      }
+      doPost(env, { action: 'EMERGENCY_ACK', token: TOKEN, device_key: DEV,
+        command_id: d.command_id, result: 'APPLIED', state: 'EMERGENCY' });
+    }
+    check('E10 explicit sensorFailPolicy=0 served verbatim to the device',
+          sawE9Verbatim === true);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +485,11 @@ console.log('\n[E] CONFIG validation:');
 // ---------------------------------------------------------------------------
 console.log('\n[F] TELEMETRY piggyback + v1.7 columns:');
 {
+  // F0 — queue a fresh CONFIG so the piggyback path has something to serve
+  // (Group E drains its own queue fixtures; groups are now self-contained).
+  doPost(env, { action: 'EMERGENCY_COMMAND', token: TOKEN, admin_token: ADMIN,
+    command: 'CONFIG', device_key: DEV, config: { vbatLowV: 44.0 } });
+
   // F1 — ingest with emergency fields + 2nd ACS712 channel.
   const f1 = doPost(env, { action: 'TELEMETRY', token: TOKEN, device_key: DEV,
     data: { sequence: 9001, v_bat: 51.2, i_bat_dc: -3.5, i_ac_load: 1.8, i_ac_gen: 4.2, ina219_ok: true,
@@ -474,9 +509,13 @@ console.log('\n[F] TELEMETRY piggyback + v1.7 columns:');
   check('F4 row stores emg_state RUN', row && row[32] === 'RUN', JSON.stringify(row && row.slice(31)));
   check('F5 row stores emg_trips', row && row[35] === 2, JSON.stringify(row && row.slice(31)));
 
-  // F6 — settle the CONFIG, then a clean ingest must answer pendingEmergency null.
+  // F6 — settle any leftover CONFIG, then a clean ingest must answer
+  // pendingEmergency null. (Group E may already have drained the queue —
+  // the ACK is conditional, an empty queue is the desired end state.)
   const pend = doPost(env, { action: 'EMERGENCY_PENDING', token: TOKEN, device_key: DEV });
-  doPost(env, { action: 'EMERGENCY_ACK', token: TOKEN, device_key: DEV, command_id: pend.data.command_id, result: 'APPLIED', state: 'RUN' });
+  if (pend.data && pend.data.command_id) {
+    doPost(env, { action: 'EMERGENCY_ACK', token: TOKEN, device_key: DEV, command_id: pend.data.command_id, result: 'APPLIED', state: 'RUN' });
+  }
   const f6 = doPost(env, { action: 'TELEMETRY', token: TOKEN, device_key: DEV,
     data: { sequence: 9002, v_bat: 51.3, i_bat_dc: -3.4, i_ac_load: 1.7, i_ac_gen: 4.0, ina219_ok: true, fw_version: '1.6.0',
             emg_state: 'RUN', emg_reason: '', emg_estop: false, emg_trips: 2 } });

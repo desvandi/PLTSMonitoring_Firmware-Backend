@@ -3,6 +3,28 @@
 // -----------------------------------------------------------------------------
 // 64-entry ring. 2-phase commit (write valid=0, flip to valid=1). Magic +
 // version + CRC32. Used by CommandCanonicalizer to detect DUPLICATE / CONFLICT.
+//
+// [P2-1 REMEDIATION 2026-09 — RETENTION CONTRACT (cross-layer invariant)]
+// The journal guarantees AT-MOST-64-COMMAND dedup memory, NOT a time window.
+// Once the ring wraps, an old requestId is forgotten and a byte-identical
+// replay of that command would be re-executed as NEW. The cross-layer
+// contract that closes this hole is COMMAND FRESHNESS, not journal size:
+//
+//   1. Every journaled command SHOULD carry `expiresAt` (unix-seconds);
+//      senders (PWA/MQTT bridge) set it to issuedAt + bounded window.
+//   2. Every ingress — REST (Config/Calibration/ExtraHandlers) and MQTT
+//      (MqttConfigReceiver, MqttOtaHandler) — rejects an expired command
+//      BEFORE the journal decides (CommandCanonicalizer::isCommandExpired).
+//      An expired command can be neither applied NOR safely deduplicated.
+//   3. Senders MUST choose a freshness window short enough that at most 64
+//      commands are issued within it (typical operator cadence: minutes,
+//      not days). A command older than its ring slot's lifetime is, by
+//      this contract, dead on arrival.
+//
+// Consequence for industrial command audit: a transactionId's replay
+// protection is guaranteed only up to min(expiresAt, ring eviction). The
+// OTA paths layer Ed25519/HMAC verification on top, so even a re-executed
+// OTA cannot flash an unsigned image.
 // =============================================================================
 #pragma once
 #ifndef PLTS_SERVICES_TRANSACTION_JOURNAL_H

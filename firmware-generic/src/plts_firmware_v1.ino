@@ -1,6 +1,35 @@
-/* PLTS Monitor Generic Firmware v1.5.4
+/* PLTS Monitor Generic Firmware v1.7.0
  * Flash once. Runtime WiFi/GAS credentials live in LittleFS /config.json.
  * Monitoring only: this firmware never controls an inverter, charger, or relay.
+ *
+ * v1.7.0 additions (P1-REMEDIATION / audit wave — sensor fail-closed):
+ *   - [P1-SC1] NEW CONFIG field `sensorFailPolicy` (0/1, default 1).
+ *     Policy 1 (default, fail-closed): the INA219 + ACS712 current sensors
+ *     are treated as MANDATORY SAFETY INPUTS, because the emergency layer
+ *     uses them as trip triggers (I_DC_OVER / I_AC_LOAD_OVER / I_AC_GEN_OVER).
+ *     ARM is REJECTED while any safety sensor is absent/invalid, and a
+ *     sensor that dies mid-run (I2C loss) TRIPS the system to ISOLATED
+ *     after the standard debounce window. Rationale: for a safety
+ *     interlock, "unmonitored" IS unsafe — the trip cannot fire on a
+ *     sensor that is not reporting.
+ *     Policy 0 (legacy, explicit operator opt-out for bench/commissioning):
+ *     old behavior — unmonitored ≠ unsafe. Documented as unsafe for
+ *     production. Mixed-version fleets: field absent → firmware default 1.
+ *   - [P1-SC2] ARM gate hardening: invalid iDc/iAc/iGen now block ARM when
+ *     policy=1 (previously only vBat was fail-closed).
+ *   - [P1-SC3] SENSOR_LOSS runtime trip (debounced, policy-gated): a running
+ *     system that loses a safety sensor isolates instead of silently
+ *     continuing without overcurrent protection.
+ *   - SCHEMA: EMERGENCY_CONFIG_FIELDS is now 13 fields (sensorFailPolicy
+ *     appended) — PWA + GAS updated in lockstep; GAS/PWA omit the field →
+ *     firmware default (1) applies.
+ *   - DEPLOY ORDER: redeploy Code.gs BEFORE publishing the v1.7.0 manifest
+ *     (GAS must accept the 13th field first).
+ *
+ * v1.6.0 additions (E-WAVE — emergency relay layer):
+ *   - Emergency relay (active-LOW opto), E-stop sense, 5 sensor trip
+ *     triggers, ARM/DISARM operator commands with local re-validation,
+ *     NVS trip counter + crash-chain detector, 2nd ACS712 channel.
  *
  * v1.5.4 additions (WAVE-6 / firmware audit completion):
  *   - [FW6-1] Every OTA failure path now reports OTA_STATUS DOWNLOAD_FAILED
@@ -91,7 +120,7 @@
 //   • Arus AC   : ACS712-30A (versi Modified 3.3V) di ADC GPIO 35
 //                 (AC_CURRENT_PIN), sampling RMS 2 siklus @ 50 Hz.
 // ============================================================================
-static const char*    FIRMWARE_VERSION   = "1.6.0";
+static const char*    FIRMWARE_VERSION   = "1.7.0";
 static const char*    CONFIG_PATH        = "/config.json";
 static const uint8_t  RESET_PIN          = 0;         // BOOT button
 static const uint8_t  LED_PIN            = 2;         // Built-in LED
@@ -233,6 +262,13 @@ struct EmergencyConfig {
   uint8_t  relayPin      = 27;      // GPIO of the relay IN line [12..39]
   int8_t   estopPin      = 14;      // E-stop sense GPIO, -1 = disabled [-1..39]
   uint8_t  estopEnabled  = 1;       // 1 = monitor the E-stop line [0..1]
+  // v1.7.0 [P1-SC1] — safety-sensor failure policy (13th schema field).
+  //   1 (default) = fail-closed: current sensors are MANDATORY safety inputs
+  //                 (they feed I_DC/I_AC_LOAD/I_AC_GEN trip triggers).
+  //                 ARM rejected + runtime SENSOR_LOSS trip while any safety
+  //                 sensor is absent/invalid.
+  //   0 = legacy opt-out (bench/commissioning only, documented unsafe).
+  uint8_t  sensorFailPolicy = 1;    // [0..1]
 };
 
 // v1.6.0 [E-WAVE] — Emergency relay runtime state.
@@ -277,11 +313,12 @@ bool     otaHealthyMarked = false;
 // v1.6.0 [E-WAVE] — emergency runtime state (state itself is RAM-only: every
 // boot re-enters EMERGENCY = fail-safe; the trip COUNTER is NVS-persisted).
 EmgState emgState         = EmgState::EMERGENCY;
-String   emgReason        = "BOOT";       // BOOT | VBAT_LOW | VBAT_HIGH | I_DC_OVER | I_AC_LOAD_OVER | I_AC_GEN_OVER | ESTOP | OPERATOR | CRASHLOOP
+String   emgReason        = "BOOT";       // BOOT | VBAT_LOW | VBAT_HIGH | I_DC_OVER | I_AC_LOAD_OVER | I_AC_GEN_OVER | SENSOR_LOSS | ESTOP | OPERATOR | CRASHLOOP
 uint32_t emgTripAtMs      = 0;            // when the current trip started
 uint32_t emgTrips         = 0;            // lifetime counter (NVS)
 bool     emgEstopOpen     = false;        // last raw E-stop sense reading
-uint8_t  emgDebounce[5]   = {0,0,0,0,0};  // consecutive-violation counters (vbatLo, vbatHi, iDc, iAc, iAcGen)
+// v1.7.0 [P1-SC3] — slot 5 = safety-sensor-loss (policy-gated).
+uint8_t  emgDebounce[6]   = {0,0,0,0,0,0};// consecutive-violation counters (vbatLo, vbatHi, iDc, iAc, iAcGen, sensorLoss)
 uint32_t emgClearAtMs     = 0;            // when ALL triggers became clear
 uint32_t lastEmgPoll      = 0;            // dedicated EMERGENCY_PENDING cadence
 uint32_t lastEmgEventAt   = 0;            // event POST rate limiting
@@ -455,6 +492,9 @@ bool loadConfig() {
       int rp = emg["relayPin"]   | -1; if (rp >= 12 && rp <= 39) config.emg.relayPin = (uint8_t)rp;
       int ep = emg["estopPin"]   | -99; if (ep >= -1 && ep <= 39) config.emg.estopPin = (int8_t)ep;
       int ee = emg["estopEnabled"] | -1; if (ee == 0 || ee == 1) config.emg.estopEnabled = (uint8_t)ee;
+      // v1.7.0 [P1-SC1] — absent field (old config.json / mixed fleet) keeps
+      // the fail-closed default 1.
+      int sp = emg["sensorFailPolicy"] | -1; if (sp == 0 || sp == 1) config.emg.sensorFailPolicy = (uint8_t)sp;
     }
   }
   // [FW-A2] Clamp persisted calibration on load too — a hand-edited or
@@ -494,6 +534,7 @@ bool saveConfig() {
   emg["relayPin"]      = config.emg.relayPin;
   emg["estopPin"]      = config.emg.estopPin;
   emg["estopEnabled"]  = config.emg.estopEnabled;
+  emg["sensorFailPolicy"] = config.emg.sensorFailPolicy;   // v1.7.0 [P1-SC1]
   File file = LittleFS.open(CONFIG_PATH, "w");
   if (!file) return false;
   bool ok = serializeJson(doc, file) > 0;
@@ -829,16 +870,47 @@ void emgEvaluateTriggers() {
   } else if (isfinite(iGen) && iGen < config.emg.iAcGenOverA) {
     emgDebounce[4] = 0;
   }
+  // --- v1.7.0 [P1-SC3] safety-sensor loss (fail-closed, policy-gated) ---
+  // The current sensors are emergency trip inputs: a sensor that stops
+  // reporting silently disarms its protection. Under sensorFailPolicy=1 a
+  // lost/unplausible safety input is itself a trip condition (debounced
+  // like every other trigger). NOTE: this check runs in every state; while
+  // EMERGENCY the trip is already latched so the counter just saturates —
+  // emgTrip() is idempotent.
+  if (config.emg.sensorFailPolicy) {
+    bool sensorLoss = !isfinite(vBat) || !isfinite(iDc) || !isfinite(iAc) || !isfinite(iGen);
+    if (sensorLoss) {
+      if (++emgDebounce[5] >= config.emg.debounceN) {
+        emgTrip("SENSOR_LOSS");
+        return;
+      }
+    } else {
+      emgDebounce[5] = 0;
+    }
+  } else {
+    emgDebounce[5] = 0;
+  }
 }
 
 // ARM gate: ALL triggers clear (with hysteresis) AND recovery window elapsed.
 // Returns "" when ARM is allowed, else the blocking reason.
+// v1.7.0 [P1-SC2]: under sensorFailPolicy=1 (default) the safety sensors are
+// MANDATORY — an absent/invalid sensor blocks ARM, because its overcurrent
+// trigger could never fire. Operator opt-out only via policy 0.
 String emgArmBlockReason() {
   float vBat = average(voltageSamples, SAMPLE_COUNT);
   float iDc  = average(dcCurrentSamples, SAMPLE_COUNT);
   float iAc  = average(acCurrentSamples, SAMPLE_COUNT);
   float iGen = average(acGenCurrentSamples, SAMPLE_COUNT);
   if (!isfinite(vBat)) return "sensor tegangan tidak valid";
+  if (config.emg.sensorFailPolicy) {
+    // Fail-closed: unmonitored IS unsafe for a safety interlock.
+    if (!ina219Present)
+      return "sensor INA219 tidak terdeteksi — proteksi arus DC nonaktif (sensorFailPolicy=1)";
+    if (!isfinite(iDc)) return "sensor arus DC tidak valid";
+    if (!isfinite(iAc)) return "sensor arus beban AC tidak valid";
+    if (!isfinite(iGen)) return "sensor arus genset tidak valid";
+  }
   if (vBat <= config.emg.vbatLowV + config.emg.vbatLowHystV)
     return String("VBAT masih rendah (") + vBat + "V)";
   if (vBat >= config.emg.vbatHighV - config.emg.vbatHighHystV)
@@ -969,6 +1041,8 @@ void emgApplyCommand(const String& commandId, const String& command,
     int rp = cfg["relayPin"]   | -1; if (rp >= 12 && rp <= 39) config.emg.relayPin = (uint8_t)rp;
     int ep = cfg["estopPin"]   | -99; if (ep >= -1 && ep <= 39) config.emg.estopPin = (int8_t)ep;
     int ee = cfg["estopEnabled"] | -1; if (ee == 0 || ee == 1) config.emg.estopEnabled = (uint8_t)ee;
+    // v1.7.0 [P1-SC1] — 13th schema field; absent → keep current (default 1).
+    int sp = cfg["sensorFailPolicy"] | -1; if (sp == 0 || sp == 1) config.emg.sensorFailPolicy = (uint8_t)sp;
     // Pin change → re-init GPIO immediately (fail-safe level first).
     pinMode(config.emg.relayPin, OUTPUT);
     emgRelayWrite(emgState == EmgState::RUN);

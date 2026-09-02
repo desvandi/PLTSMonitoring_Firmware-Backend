@@ -110,17 +110,16 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   }
 
   // --- 4. Expiry check (defense-in-depth) --------------------------------------
-  // expiresAt is unix-seconds. If present and in the past, reject.
-  if (doc.containsKey("expiresAt")) {
-    uint32_t expiresAt = doc["expiresAt"] | 0U;
-    if (expiresAt > 0) {
-      uint32_t now = ::time(nullptr);
-      if (now > 0 && expiresAt < now) {
-        _publishAck(tid.c_str(), false, "REJECTED",
-                    "command expired (issuedAt/expiresAt in the past)");
-        _rejected++;
-        return;
-      }
+  // [P2-1 REMEDIATION 2026-09] Now routed through the SHARED gate so every
+  // ingress (REST + MQTT) enforces identical freshness semantics — see
+  // CommandCanonicalizer::isCommandExpired + TransactionJournal.h for the
+  // full retention contract.
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {
+      _publishAck(tid.c_str(), false, "REJECTED", expiryErr);
+      _rejected++;
+      return;
     }
   }
 

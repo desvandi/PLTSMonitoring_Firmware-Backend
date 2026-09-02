@@ -5,6 +5,7 @@
 #include "../Core/Config.h"
 #include <cstring>
 #include <cctype>
+#include <ctime>
 
 namespace Services {
 
@@ -97,6 +98,25 @@ bool CommandCanonicalizer::validateProtocolVersion(int version, String& errOut) 
     return false;
   }
   return true;
+}
+
+// [P2-1 REMEDIATION 2026-09] — shared freshness gate (REST + MQTT parity).
+// expiresAt is unix-seconds, optional per envelope. Rejection requires BOTH
+// a non-zero expiresAt AND a usable device clock: a device without RTC sync
+// cannot evaluate freshness and must fail-open on THIS check only (the
+// journal + HMAC auth remain in force); this mirrors the pre-existing
+// MqttConfigReceiver semantics so both ingresses behave identically.
+bool CommandCanonicalizer::isCommandExpired(JsonDocument& doc, String& errOut) {
+  if (!doc.containsKey("expiresAt")) return false;
+  uint32_t expiresAt = doc["expiresAt"] | 0U;
+  if (expiresAt == 0) return false;
+  uint32_t now = (uint32_t)::time(nullptr);
+  if (now == 0) return false;   // no clock — cannot enforce freshness
+  if (expiresAt < now) {
+    errOut = "command expired (issuedAt/expiresAt in the past)";
+    return true;
+  }
+  return false;
 }
 
 static String lower(const String& s) {

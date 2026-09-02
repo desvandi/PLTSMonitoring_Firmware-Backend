@@ -17,6 +17,19 @@
 //   it to the SAME beginDownload() chain as ota.start (single trust boundary).
 //   It used to be an honest no-op reject — the polling implementation the
 //   operator was promised never existed. It does now.
+//
+// [P2-2 REMEDIATION 2026-09] OTA ACK/STATE CONTRACT (explicit state machine):
+//   ACK on the command channel is a JOB-level settle, not a flash result:
+//     phase ACCEPTED  = job accepted, download STARTED (this ACK is what the
+//                       journal replays idempotently)
+//     phase REJECTED  = job refused (policy/validation failure)
+//   The lifecycle continues OUT-OF-BAND via OTA_STATUS events (GAS OtaEvents
+//   sheet + device log), each mapping to an OtaState transition:
+//     ACCEPTED → DOWNLOADING → VERIFIED → FLASHED → ACTIVATED   (60 s healthy)
+//                                  ↘ DOWNLOAD_FAILED / VERIFICATION_FAILED
+//     FLASHED  → ROLLBACK      (3 unhealthy boots → previous partition)
+//   Senders MUST treat ACK==ACCEPTED as "started", never "flashed". The
+//   OtaState enum below is the single source for these transitions.
 // =============================================================================
 #pragma once
 #ifndef PLTS_SERVICES_OTA_MANAGER_H
