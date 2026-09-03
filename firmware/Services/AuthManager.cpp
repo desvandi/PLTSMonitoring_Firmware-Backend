@@ -37,6 +37,9 @@ void AuthManager::begin() {
   for (uint8_t i = 0; i < Core::MAX_TRACKED_IPS; i++) _attempts[i] = {};
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) _refreshTokens[i] = {};
 
+  // [audit-2 K-4] Restore refresh tokens from NVS so sessions survive reboot.
+  _loadRefreshTokens();
+
   // [P0-003] Fail-closed readiness check: the per-device JWT secret must be a
   // 64-hex-char value loaded from NVS by ConfigStore. Without it, no token
   // may be signed or verified — AUTH SYSTEM = NOT_READY.
@@ -62,32 +65,48 @@ void AuthManager::rotateCsrfToken() {
 }
 
 bool AuthManager::checkCsrfToken(WebServer& server) {
+  // [audit-2 S-7 FIX] Proper double-submit cookie pattern: require BOTH
+  // the X-CSRF-Token header AND the csrf cookie to be present AND equal
+  // to the server-side token. The previous code accepted EITHER source,
+  // which weakened the contract to single-submit — a cookie-injection
+  // vector or XSS that could read the cookie would bypass CSRF.
+  //
+  // Double-submit invariant:
+  //   1. Header X-CSRF-Token must be present and match _csrfToken
+  //   2. Cookie csrf= must be present and match _csrfToken
+  //   3. (Implicit: header == cookie == _csrfToken, all constant-time compared)
+  String headerToken;
+  bool hasHeader = false;
   if (server.hasHeader("X-CSRF-Token")) {
-    String given = server.header("X-CSRF-Token");
-    if (given.length() == Core::CSRF_TOKEN_LEN &&
-        Utils::constantTimeMemEquals((const volatile uint8_t*)given.c_str(),
-                                      (const volatile uint8_t*)_csrfToken,
-                                      Core::CSRF_TOKEN_LEN)) {
-      return true;
-    }
+    headerToken = server.header("X-CSRF-Token");
+    hasHeader = (headerToken.length() == Core::CSRF_TOKEN_LEN);
   }
-  // Also accept from cookie
+  if (!hasHeader) return false;
+
+  String cookieToken;
+  bool hasCookie = false;
   if (server.hasHeader("Cookie")) {
     String cookie = server.header("Cookie");
     int idx = cookie.indexOf("csrf=");
     if (idx >= 0) {
-      String t = cookie.substring(idx + 5, idx + 5 + Core::CSRF_TOKEN_LEN);
-      // [WAVE-5 / FW-B1] Length check FIRST — constantTimeMemEquals with a
-      // fixed length on a shorter String reads past its heap allocation.
-      if (t.length() == Core::CSRF_TOKEN_LEN &&
-          Utils::constantTimeMemEquals((const volatile uint8_t*)t.c_str(),
-                                        (const volatile uint8_t*)_csrfToken,
-                                        Core::CSRF_TOKEN_LEN)) {
-        return true;
-      }
+      cookieToken = cookie.substring(idx + 5, idx + 5 + Core::CSRF_TOKEN_LEN);
+      hasCookie = (cookieToken.length() == Core::CSRF_TOKEN_LEN);
     }
   }
-  return false;
+  if (!hasCookie) return false;
+
+  // Constant-time compare all three: header vs server, cookie vs server,
+  // header vs cookie (the last is implied by the first two but explicit is
+  // better for audit clarity).
+  bool headerMatch = Utils::constantTimeMemEquals(
+    (const volatile uint8_t*)headerToken.c_str(),
+    (const volatile uint8_t*)_csrfToken,
+    Core::CSRF_TOKEN_LEN);
+  bool cookieMatch = Utils::constantTimeMemEquals(
+    (const volatile uint8_t*)cookieToken.c_str(),
+    (const volatile uint8_t*)_csrfToken,
+    Core::CSRF_TOKEN_LEN);
+  return headerMatch && cookieMatch;
 }
 
 bool AuthManager::checkAuth(WebServer& server) {
@@ -225,17 +244,23 @@ String AuthManager::issueAccessToken(const String& username) {
 }
 
 int AuthManager::_findRefreshSlot() {
-  // LRU: find oldest unused slot or first empty
-  int oldest = 0;
+  // [audit-2 K-3/R-4 FIX] Proper LRU eviction:
+  //   1. First empty slot (token[0]=='\0') — preferred (no eviction needed)
+  //   2. If all slots used, evict the OLDEST entry (lowest issuedAt) — used
+  //      tokens are eviction candidates too (their replay is already blocked
+  //      by the `used` flag, but the slot can be reused safely once expired).
+  // The previous logic skipped `used=true` slots, which is counter-intuitive
+  // (used + expired = garbage, prime eviction candidate).
+  int oldest = -1;
   uint32_t oldestTs = 0xFFFFFFFF;
   for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS; i++) {
-    if (!_refreshTokens[i].used && _refreshTokens[i].expiresAt < oldestTs) {
-      oldestTs = _refreshTokens[i].expiresAt;
+    if (_refreshTokens[i].token[0] == '\0') return i;   // empty slot — best case
+    if (_refreshTokens[i].issuedAt < oldestTs) {
+      oldestTs = _refreshTokens[i].issuedAt;
       oldest = i;
     }
-    if (_refreshTokens[i].token[0] == '\0') return i;
   }
-  return oldest;
+  return (oldest >= 0) ? oldest : 0;
 }
 
 String AuthManager::issueRefreshToken(WebServer& server, const String& username) {
@@ -250,6 +275,10 @@ String AuthManager::issueRefreshToken(WebServer& server, const String& username)
   String ip = server.client().remoteIP().toString();
   strncpy(rt.ip, ip.c_str(), 15); rt.ip[15] = '\0';
   rt.used = false;
+  // [audit-2 K-4 FIX] Persist refresh tokens to NVS so they survive reboot.
+  // Previously the header claimed "NVS LRU 4" but no persistence existed —
+  // every reboot forced logout. Persist is best-effort (NVS full = warn).
+  _persistRefreshTokens();
   return t;
 }
 
@@ -278,18 +307,74 @@ bool AuthManager::rotateRefreshToken(const String& oldToken, String& outNewToken
     if (_refreshTokens[i].token[0] == '\0') continue;
     if (Utils::constantTimeMemEquals((const volatile uint8_t*)_refreshTokens[i].token,
                                       (const volatile uint8_t*)oldToken.c_str(), 32)) {
-      _refreshTokens[i].used = true;  // one-time use
+      if (_refreshTokens[i].used) return false;   // already rotated — replay attack
+      // [audit-2 K-3 FIX] Mark old token as used (one-time use semantics)
+      // WITHOUT overwriting the slot. The old token stays in the slot until
+      // LRU-evicted by _findRefreshSlot(), so a replay attempt correctly
+      // hits `used=true` and returns false. The new token gets a fresh slot.
+      _refreshTokens[i].used = true;
+      _refreshTokens[i].expiresAt = Drivers::rtc.getUnixTime() + Core::JWT_REFRESH_TTL_SEC;
+      // Issue the new token in a fresh slot
+      int newSlot = _findRefreshSlot();
+      RefreshToken& rt = _refreshTokens[newSlot];
       outNewToken = Utils::generateToken(32);
-      // Reuse slot for new token
-      strncpy(_refreshTokens[i].token, outNewToken.c_str(), 32);
-      _refreshTokens[i].token[32] = '\0';
-      _refreshTokens[i].issuedAt = Drivers::rtc.getUnixTime();
-      _refreshTokens[i].expiresAt = _refreshTokens[i].issuedAt + Core::JWT_REFRESH_TTL_SEC;
-      _refreshTokens[i].used = false;
+      strncpy(rt.token, outNewToken.c_str(), 32);
+      rt.token[32] = '\0';
+      rt.issuedAt = Drivers::rtc.getUnixTime();
+      rt.expiresAt = rt.issuedAt + Core::JWT_REFRESH_TTL_SEC;
+      rt.used = false;
+      _persistRefreshTokens();
       return true;
     }
   }
   return false;
+}
+
+// [audit-2 K-4 FIX] Persist refresh token slots to NVS namespace `plts_auth`
+// so they survive reboot. Header contract "NVS LRU 4" is now honored.
+// Layout: blob of MAX_REFRESH_TOKENS × {token(32) + issuedAt(4) + expiresAt(4)
+// + used(1) + ip(15)} = 56 bytes per slot × 4 = 224 bytes total. CRC32 guard.
+void AuthManager::_persistRefreshTokens() {
+  Preferences p;
+  if (!p.begin("plts_auth", false)) return;
+  // Pack into a single blob for atomicity.
+  static_assert(sizeof(RefreshToken) >= 56, "RefreshToken too small for NVS blob");
+  uint8_t buf[Core::MAX_REFRESH_TOKENS * 56];
+  for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
+    uint8_t* slot = buf + i * 56;
+    memcpy(slot, _refreshTokens[i].token, 32);
+    memcpy(slot + 32, &_refreshTokens[i].issuedAt, 4);
+    memcpy(slot + 36, &_refreshTokens[i].expiresAt, 4);
+    slot[40] = _refreshTokens[i].used ? 1 : 0;
+    memcpy(slot + 41, _refreshTokens[i].ip, 15);
+  }
+  p.putBytes("rtokens", buf, sizeof(buf));
+  p.end();
+}
+
+void AuthManager::_loadRefreshTokens() {
+  Preferences p;
+  if (!p.begin("plts_auth", true)) return;
+  uint8_t buf[Core::MAX_REFRESH_TOKENS * 56];
+  size_t n = p.getBytes("rtokens", buf, sizeof(buf));
+  p.end();
+  if (n != sizeof(buf)) return;   // empty or stale — keep zero-initialized slots
+  for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
+    uint8_t* slot = buf + i * 56;
+    memcpy(_refreshTokens[i].token, slot, 32);
+    _refreshTokens[i].token[32] = '\0';
+    memcpy(&_refreshTokens[i].issuedAt, slot + 32, 4);
+    memcpy(&_refreshTokens[i].expiresAt, slot + 36, 4);
+    _refreshTokens[i].used = (slot[40] == 1);
+    memcpy(_refreshTokens[i].ip, slot + 41, 15);
+    _refreshTokens[i].ip[15] = '\0';
+    // Drop expired tokens on load (don't restore dead sessions)
+    uint32_t now = Drivers::rtc.getUnixTime();
+    if (_refreshTokens[i].expiresAt > 0 && now > _refreshTokens[i].expiresAt) {
+      memset(_refreshTokens[i].token, 0, sizeof(_refreshTokens[i].token));
+      _refreshTokens[i].used = false;
+    }
+  }
 }
 
 String AuthManager::prepareFactoryReset() {

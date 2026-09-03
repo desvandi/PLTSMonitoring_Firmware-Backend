@@ -500,7 +500,12 @@ function doPost(e) {
       'EMERGENCY_COMMAND, EMERGENCY_PENDING, EMERGENCY_ACK, EMERGENCY_EVENT, ' +
       'EMERGENCY_LOG.', null));
   } catch (err) {
-    return json_(resp_(500, String(err && err.message ? err.message : err), null));
+    // [audit-2 S-6 FIX] Don't leak internal exception messages to client.
+    // GAS error messages can contain sheet names, internal paths, and stack
+    // fragments — useful for attacker reconnaissance. Log full detail
+    // server-side; return generic message to client.
+    console.error('[doPost] internal error: ' + (err && err.stack ? err.stack : err));
+    return json_(resp_(500, 'Internal server error — see GAS execution logs for detail.', null));
   }
 }
 
@@ -596,7 +601,20 @@ function verifyHmac_(auth, body, action) {
       canonical, secret, Utilities.Charset.UTF_8)
     .map(function (b) { return ('0' + (b & 0xFF).toString(16)).slice(-2); })
     .join('');
-  if (sig !== String(auth.signature).toLowerCase()) {
+  // [audit-2 K-5 FIX] Constant-time signature compare. The previous `!==`
+  // short-circuits on the first differing byte — timing attack could forge
+  // a signature byte-by-byte. Mirror the pattern already used by verifyToken_
+  // (line 1291) and verifyAdminToken_ (line 2297).
+  const sigExpected = String(sig).toLowerCase();
+  const sigReceived = String(auth.signature).toLowerCase();
+  if (sigExpected.length !== sigReceived.length) {
+    return { ok: false, reason: 'signature mismatch' };
+  }
+  let diff = 0;
+  for (let i = 0; i < sigExpected.length; i++) {
+    diff |= sigExpected.charCodeAt(i) ^ sigReceived.charCodeAt(i);
+  }
+  if (diff !== 0) {
     return { ok: false, reason: 'signature mismatch' };
   }
   // [W10-3 NOTE 2026-09 — ACCEPTED RESIDUAL RISK] The nonce check-then-put

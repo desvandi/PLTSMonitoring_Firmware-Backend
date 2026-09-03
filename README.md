@@ -18,6 +18,13 @@ Repositori ini adalah pusat backend & perangkat untuk sistem monitoring PLTS
 subsistem yang saling melengkapi**, keduanya sedang dalam tahap
 production-hardening lewat rangkaian audit berlapis:
 
+> **§0.1 — Arsitektur aktual (P2-2 AUDIT 2026-09):** firmware modular
+> sekarang mengendalikan satu aktuator safety (relay) via layer E-WAVE
+> (`PLTS_ENABLE_EMERGENCY=1` default sejak v1.7.0). Dokumentasi lama yang
+> menyebut "monitoring-only" sudah outdated. Lihat
+> `firmware/Services/EmergencySupervisor.h` untuk detail layer emergency
+> control.
+
 | Subsistem | Fungsi | Komponen utama di repo ini |
 | :--- | :--- | :--- |
 | **A — PLTS Monitor** (dasbor) | Telemetri lengkap (tegangan/arus/daya baterai, AC, lingkungan, BMS) → Google Apps Script → PWA Next.js; realtime MQTT opsional | `code.gs/`, `firmware/`, `firmware-generic/`, `scripts/` |

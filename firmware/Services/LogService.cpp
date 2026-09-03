@@ -7,6 +7,7 @@
 #include "../Core/Globals.h"
 #include "../Drivers/RtcDriver.h"
 #include <ArduinoJson.h>
+#include <Preferences.h>   // [audit-2 S-17] preserveAuditLogAcrossReset
 
 namespace Services {
 
@@ -169,5 +170,54 @@ String LogService::getAuditText(uint16_t maxBytes) const {
 
 uint16_t LogService::getActivityCount() const { return _count; }
 uint16_t LogService::getAuditBytes() const { return _auditBuf.length(); }
+
+// [audit-2 S-17] Preserve audit log across factory reset. Save the current
+// LittleFS PATH_AUDIT_LOG into NVS namespace "plts_audit" before format,
+// then restore after. NVS is not wiped by LittleFS.format(). The audit log
+// is capped at 4 KB (most recent) to fit in NVS.
+bool preserveAuditLogAcrossReset() {
+  File f = Storage::fs.raw().open(Core::PATH_AUDIT_LOG, "r");
+  if (!f) return false;
+  // Read last 4 KB (most recent entries)
+  static const size_t MAX_AUDIT_PRESERVE = 4096;
+  if (f.size() > MAX_AUDIT_PRESERVE) {
+    f.seek(f.size() - MAX_AUDIT_PRESERVE);
+  }
+  uint8_t buf[MAX_AUDIT_PRESERVE];
+  size_t n = f.read(buf, sizeof(buf));
+  f.close();
+  Preferences p;
+  if (!p.begin("plts_audit", false)) return false;
+  p.putBytes("log", buf, n);
+  p.putBool("valid", true);
+  p.end();
+  return true;
+}
+
+void restoreAuditLogAfterReset() {
+  Preferences p;
+  if (!p.begin("plts_audit", true)) return;
+  if (!p.getBool("valid", false)) { p.end(); return; }
+  size_t n = p.getBytesLength("log");
+  if (n == 0 || n > 4096) { p.end(); return; }
+  uint8_t* buf = (uint8_t*)malloc(n);
+  if (!buf) { p.end(); return; }
+  size_t got = p.getBytes("log", buf, n);
+  p.end();
+  if (got != n) { free(buf); return; }
+  Storage::fs.raw().mkdir("/log");
+  File f = Storage::fs.raw().open(Core::PATH_AUDIT_LOG, "w");
+  if (f) {
+    f.write(buf, got);
+    f.close();
+  }
+  free(buf);
+  // Clear the NVS backup so we don't restore twice
+  Preferences p2;
+  if (p2.begin("plts_audit", false)) {
+    p2.clear();
+    p2.end();
+  }
+}
 
 } // namespace Services

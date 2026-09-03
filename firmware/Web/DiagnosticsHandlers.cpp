@@ -39,12 +39,13 @@ void handleGet() {
   doc["bootLoopDetected"] = h.bootLoopDetected;
   doc["bootsInLast60s"] = h.bootsInLast60s;
   JsonObject tasks = doc.createNestedObject("taskHeartbeatAgeMs");
-  const char* names[] = {
-    "INA219_BATTERY","ACS712","ADC_VOLTAGE","SHT31",
-    "MQTT","TELEMETRY","OTA","HEALTH_MONITOR","PERSISTENCE"
-  };
+  // [audit-2 K-1 FIX] Previous code had a hardcoded `names[]` array with only
+  // 9 entries while TaskId enum has 12 (added BmsComm, Emergency, GasEmergency
+  // in v1.6/v1.7). Looping `i < TASK_COUNT` (=12) indexed names[9..11] out of
+  // bounds — undefined behavior, could crash or emit garbage JSON keys.
+  // Use the canonical Core::taskIdToStr() which is always in sync with the enum.
   for (uint8_t i = 0; i < Services::TASK_COUNT; i++) {
-    tasks[names[i]] = h.taskHeartbeatAgeMs[i];
+    tasks[Core::taskIdToStr(static_cast<Core::TaskId>(i))] = h.taskHeartbeatAgeMs[i];
   }
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);

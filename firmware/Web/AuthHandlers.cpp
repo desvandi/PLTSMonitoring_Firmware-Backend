@@ -69,13 +69,25 @@ void handleLogin() {
   String refreshToken = Services::auth.issueRefreshToken(http, user);
   // Rotate CSRF token after successful login
   Services::auth.rotateCsrfToken();
-  // Set cookies (httpOnly for JWT, regular for CSRF + refresh)
+  // [audit-2 S-8 FIX] Cookies now carry Secure + SameSite=Strict.
+  // Secure is conditionally emitted only when the device is behind HTTPS
+  // (signaled at build time via COOKIE_SECURE flag). SameSite=Strict
+  // blocks all cross-site cookie sends (CSRF defense-in-depth).
+  // The previous cookies had neither — MITM could read them over HTTP and
+  // cross-site forms could send them.
+#ifdef COOKIE_SECURE
+  static const char* COOKIE_ATTR = "; Secure; SameSite=Strict";
+#else
+  static const char* COOKIE_ATTR = "; SameSite=Strict";
+#endif
   String jwtCookie = "jwt=" + accessToken + "; HttpOnly; Path=/; Max-Age=" +
-                     String(Core::JWT_ACCESS_TTL_SEC);
+                     String(Core::JWT_ACCESS_TTL_SEC) + COOKIE_ATTR;
   String refreshCookie = "refresh=" + refreshToken + "; HttpOnly; Path=/api/refresh; Max-Age=" +
-                          String(Core::JWT_REFRESH_TTL_SEC);
+                          String(Core::JWT_REFRESH_TTL_SEC) + COOKIE_ATTR;
+  // CSRF cookie is NOT HttpOnly — JS must read it to send X-CSRF-Token header
+  // (double-submit pattern). SameSite=Strict still applies.
   String csrfCookie = "csrf=" + Services::auth.getCsrfToken() +
-                       "; Path=/; Max-Age=" + String(Core::JWT_ACCESS_TTL_SEC);
+                       "; Path=/; Max-Age=" + String(Core::JWT_ACCESS_TTL_SEC) + COOKIE_ATTR;
   sendSecurityHeaders();
   http.sendHeader("Set-Cookie", jwtCookie, false);
   http.sendHeader("Set-Cookie", refreshCookie, false);
@@ -105,6 +117,12 @@ void handleSession() {
 }
 
 void handleRefresh() {
+  // [audit-2 S-9 FIX] Refresh endpoint MUST verify CSRF. Without this, an
+  // attacker could trigger refresh from a cross-site form (SameSite=Strict
+  // helps but is not a complete defense — older browsers + redirects can
+  // still send cookies). CSRF check ensures only the JS that can read the
+  // csrf cookie (same-origin) can trigger refresh.
+  if (!requireCsrf()) return;
   String refreshCookie;
   if (http.hasHeader("Cookie")) {
     String cookie = http.header("Cookie");
@@ -128,13 +146,19 @@ void handleRefresh() {
   }
   String newAccess = Services::auth.issueAccessToken(user);
   Services::auth.rotateCsrfToken();
+  // [audit-2 S-8] Apply Secure + SameSite=Strict here too.
+#ifdef COOKIE_SECURE
+  static const char* COOKIE_ATTR = "; Secure; SameSite=Strict";
+#else
+  static const char* COOKIE_ATTR = "; SameSite=Strict";
+#endif
   String jwtCookie = "jwt=" + newAccess + "; HttpOnly; Path=/; Max-Age=" +
-                     String(Core::JWT_ACCESS_TTL_SEC);
+                     String(Core::JWT_ACCESS_TTL_SEC) + COOKIE_ATTR;
   String refreshCookieHdr = "refresh=" + newRefresh +
                              "; HttpOnly; Path=/api/refresh; Max-Age=" +
-                             String(Core::JWT_REFRESH_TTL_SEC);
+                             String(Core::JWT_REFRESH_TTL_SEC) + COOKIE_ATTR;
   String csrfCookie = "csrf=" + Services::auth.getCsrfToken() +
-                       "; Path=/; Max-Age=" + String(Core::JWT_ACCESS_TTL_SEC);
+                       "; Path=/; Max-Age=" + String(Core::JWT_ACCESS_TTL_SEC) + COOKIE_ATTR;
   sendSecurityHeaders();
   http.sendHeader("Set-Cookie", jwtCookie, false);
   http.sendHeader("Set-Cookie", refreshCookieHdr, false);

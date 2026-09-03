@@ -7,13 +7,32 @@
 
 ## TL;DR
 
+**Audit iterasi 1 (P0/P1/P2 asli):**
 - **6 P0 items**: all implemented. Critical release-engineering gaps closed.
-- **10 P1 items**: all implemented. Cross-layer contract unified; observability
-  extended to GAS; toolchain pinned.
+- **10 P1 items**: all implemented (P1-6 iterasi 1 hanya REST path; iterasi 2 menutup MQTT path).
 - **3 P2 items**: documented; branch protection / GPG signing require GitHub
   repository settings (operator action).
-- **Remaining work**: Hardware acceptance on real hardware (P1-10 checklist)
-  + Master Release Gate running green in CI for one full release cycle.
+
+**Audit iterasi 2 (self-review + area lain):**
+- **3 blocker bugs** ditemukan di iterasi 1: getDeviceKeyForMqtt undefined
+  (linker error), unused type imports di api.ts (lint error), build-production
+  job tanpa `if:` guard (CI failure setelah branch protection). **FIXED.**
+- **P1-6 tuntas**: lifecycle events untuk MQTT path + jobId management +
+  bootloader-revert path. **FIXED.**
+- **7 KRITIS baru** ditemukan di area lain: OOB read diagnostik, NVS journal
+  size mismatch, AuthManager refresh token bugs, GAS HMAC timing attack,
+  push-alarm subscribe DoS, PWA XSS PDF, PWA JWT alg confusion. **ALL FIXED.**
+- **17 SEDANG** ditemukan: factory reset namespace incomplete, CSRF
+  double-submit weak, cookie Secure+SameSite missing, handleRefresh no CSRF,
+  config range validation silent-drop, doPost error leak, push-alarm batch
+  loop, prune stale subscriptions, PWA HTTPS-only validation, MQTT payload
+  validation, URL encode alarmId, login progressive backoff, factory reset
+  token cleanup, MQTT reconnect backoff, deprecated escape() functions.
+  **ALL FIXED.**
+- **14 RINGAN + missed items**: dead code cleanup, doc drift, naming — **DONE.**
+
+**Remaining work**: Hardware acceptance on real hardware (P1-10 checklist)
++ Master Release Gate running green in CI for one full release cycle.
 
 ## P0 — Critical (Release Integrity)
 

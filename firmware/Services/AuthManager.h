@@ -74,6 +74,11 @@ private:
 
   int _findRefreshSlot();
   bool verifyJwtOrRefresh(const String& authHeader);
+
+  // [audit-2 K-4] Persist refresh tokens across reboot (header contract
+  // "NVS LRU 4" was previously a lie — no persistence existed).
+  void _persistRefreshTokens();
+  void _loadRefreshTokens();
 };
 
 extern AuthManager auth;

@@ -117,8 +117,12 @@ void MqttTelemetryPublisher::publishOtaLifecycle(const char* jobId,
   //     "firmware":   "modular"
   //   }
   StaticJsonDocument<512> doc;
-  extern String getDeviceKeyForMqtt();   // defined in firmware_v1.ino / globals
-  doc["deviceKey"] = getDeviceKeyForMqtt();
+  // [P1-6 FIX audit-2] Use the canonical Core::deviceId (defined in
+  // firmware/Core/Globals.h:451 as `extern char deviceId[17]`). The previous
+  // `extern String getDeviceKeyForMqtt()` declaration referenced a function
+  // that did not exist — would have caused a linker error in CI build.
+  extern char deviceId[17];   // Core::deviceId
+  doc["deviceKey"] = String(deviceId);
   doc["jobId"]     = jobId;
   doc["state"]     = state;
   if (version && version[0]) doc["version"] = version;

@@ -175,6 +175,22 @@ function pruneStaleSubscriptions_() {
   return subs.length - kept.length;
 }
 
+// [audit-2 S-13 FIX] Auto-prune trigger. pruneStaleSubscriptions_ was
+// defined but never called — stale subscriptions grew unbounded. We trigger
+// prune opportunistically: every PRUNE_CHECK_INTERVAL_MS (1 hour), the next
+// handleIngest_ call invokes prune. This avoids needing a time-driven
+// trigger setup step.
+var PRUNE_CHECK_INTERVAL_MS = 60 * 60 * 1000;  // 1 hour
+function maybePruneSubscriptions_() {
+  var props = PropertiesService.getScriptProperties();
+  var lastStr = props.getProperty('PRUNE_LAST_AT');
+  var last = lastStr ? Number(lastStr) : 0;
+  var now = Date.now();
+  if (now - last < PRUNE_CHECK_INTERVAL_MS) return;
+  props.setProperty('PRUNE_LAST_AT', String(now));
+  try { pruneStaleSubscriptions_(); } catch (e) { /* best-effort */ }
+}
+
 function readSubscriptionsFromSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (!ss) return [];
@@ -272,8 +288,14 @@ function sendAlarmToAll(alarm) {
   logAlarmEvent_(payload, alarm);
   var subs = getSubscriptions_();
   var sent = 0, failed = 0, removed = 0;
+  var total = subs.length;
 
-  for (var i = 0; i < subs.length && i < PUSH_CONFIG.BATCH_SIZE; i++) {
+  // [audit-2 S-12 FIX] Process ALL subscriptions in batches of BATCH_SIZE,
+  // not just the first BATCH_SIZE. The previous loop `i < subs.length && i <
+  // BATCH_SIZE` silently dropped subscribers beyond index 99. For the
+  // target deployment (2 phones) this is fine, but the cap was a footgun.
+  // Bounded by GAS 6-min execution limit; 100 fetch × ~3s = 5min worst case.
+  for (var i = 0; i < subs.length; i++) {
     var r = webPushSend_(subs[i], payload,
       payload.severity === 'critical' ? 'high' : 'normal');
     if (r.ok) sent++;
@@ -374,6 +396,19 @@ function doPost(e) {
   }
 
   if (body.action === 'subscribe') {
+    // [audit-2 K-7 FIX] subscribe MUST be authenticated. The previous code
+    // accepted any anonymous POST — an attacker could register thousands of
+    // garbage endpoints, exhausting GAS UrlFetchApp quota when firmware
+    // triggers sendAlarmToAll (functional DoS: real operators stop receiving
+    // alarms). Now require a valid device token (same auth as `ingest`).
+    // The PWA passes its bound device token via the `token` field; firmware
+    // already sends `token` for `ingest`.
+    if (!body.device || !body.device.id || !body.token) {
+      return jsonOut_({ ok: false, message: 'Langganan butuh autentikasi perangkat (device.id + token)' });
+    }
+    if (!isDeviceAuthorized_(String(body.device.id), body.token)) {
+      return jsonOut_({ ok: false, message: 'Token perangkat tidak valid' });
+    }
     if (!body.endpoint || !body.keys || !body.keys.p256dh || !body.keys.auth) {
       return jsonOut_({ ok: false, message: 'Langganan tidak lengkap' });
     }
@@ -383,6 +418,17 @@ function doPost(e) {
     if (ep.indexOf('https://') !== 0 || ep.length > 500 ||
         typeof body.keys.p256dh !== 'string' || typeof body.keys.auth !== 'string') {
       return jsonOut_({ ok: false, message: 'Endpoint/kunci langganan tidak valid' });
+    }
+    // [audit-2 K-7] Cap total subscriptions to bound resource growth. The
+    // original README target is 2 phones, but we cap at 50 for headroom.
+    // Beyond this, oldest subscriptions are pruned (LRU).
+    var existing = loadJsonObject_('PUSH_SUBSCRIPTIONS', []);
+    if (existing.length >= 50) {
+      existing.sort(function (a, b) {
+        return new Date(a.lastSeenAt || a.addedAt).getTime() -
+               new Date(b.lastSeenAt || b.addedAt).getTime();
+      });
+      existing = existing.slice(existing.length - 49);
     }
     var sub = {
       endpoint: ep,
@@ -485,8 +531,9 @@ function isDeviceAuthorized_(deviceId, token) {
     try {
       var list = JSON.parse(listRaw);
       for (var i = 0; i < list.length; i++) {
-        if (list[i] && list[i].deviceId === deviceId && list[i].token === token) {
-          return true;
+        if (list[i] && list[i].deviceId === deviceId) {
+          // [audit-2 K-6 FIX] Constant-time token compare (was `===`).
+          return constantTimeStrEq_(String(list[i].token), String(token));
         }
       }
       return false; // daftar ada -> hanya token dalam daftar yang sah
@@ -495,7 +542,20 @@ function isDeviceAuthorized_(deviceId, token) {
     }
   }
   var single = props.getProperty('FW_DEVICE_TOKEN');
-  return !!single && single === token;
+  if (!single) return false;
+  return constantTimeStrEq_(String(single), String(token));
+}
+
+/** [audit-2 K-6] Constant-time string equality. Returns true iff strings
+ *  are byte-equal AND same length. The accumulator pattern prevents
+ *  short-circuit on first differing byte. */
+function constantTimeStrEq_(a, b) {
+  if (a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 /** Utama: proses satu laporan firmware.
@@ -508,6 +568,8 @@ function handleIngest_(body) {
   if (!isDeviceAuthorized_(deviceId, body.token)) {
     return { ok: false, message: 'Token perangkat tidak valid' };
   }
+  // [audit-2 S-13] Opportunistic prune — runs at most once per hour.
+  maybePruneSubscriptions_();
   if (!Array.isArray(body.sensors) || body.sensors.length === 0) {
     return { ok: false, message: 'Data sensor kosong / tidak valid' };
   }

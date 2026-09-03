@@ -77,33 +77,48 @@ void handlePostConfig() {
     return;
   }
   // Apply config (validated fields only)
+  // [audit-2 S-2 FIX] Out-of-range values now return 400 with the field
+  // name and accepted range — previously silently dropped, leaving the
+  // operator thinking the value was applied. Now consistent with the MQTT
+  // path (MqttConfigReceiver) which already rejects with explicit errors.
   if (doc.containsKey("batteryCapacityAh")) {
     float v = doc["batteryCapacityAh"];
-    if (v >= 10 && v <= 1000) Core::cfgBatteryCapacityAh = v;
+    if (v < 10 || v > 1000) { sendError(400, "batteryCapacityAh must be 10..1000"); return; }
+    Core::cfgBatteryCapacityAh = v;
   }
   if (doc.containsKey("fullVoltage")) {
     float v = doc["fullVoltage"];
-    if (v >= 50 && v <= 56) Core::cfgFullVoltage = v;
+    if (v < 50 || v > 56) { sendError(400, "fullVoltage must be 50..56"); return; }
+    Core::cfgFullVoltage = v;
   }
   if (doc.containsKey("lowVoltage")) {
     float v = doc["lowVoltage"];
-    if (v >= 40 && v <= 50) Core::cfgLowVoltage = v;
+    if (v < 40 || v > 50) { sendError(400, "lowVoltage must be 40..50"); return; }
+    // Cross-field validation: lowVoltage must be < fullVoltage
+    if (v >= Core::cfgFullVoltage) {
+      sendError(400, "lowVoltage must be < fullVoltage"); return;
+    }
+    Core::cfgLowVoltage = v;
   }
   if (doc.containsKey("idleCurrentThreshold")) {
     float v = doc["idleCurrentThreshold"];
-    if (v >= 0.1f && v <= 5.0f) Core::cfgIdleCurrentThreshold = v;
+    if (v < 0.1f || v > 5.0f) { sendError(400, "idleCurrentThreshold must be 0.1..5.0"); return; }
+    Core::cfgIdleCurrentThreshold = v;
   }
   if (doc.containsKey("fullChargeCurrentThreshold")) {
     float v = doc["fullChargeCurrentThreshold"];
-    if (v >= 0.5f && v <= 10.0f) Core::cfgFullChargeCurrentThreshold = v;
+    if (v < 0.5f || v > 10.0f) { sendError(400, "fullChargeCurrentThreshold must be 0.5..10.0"); return; }
+    Core::cfgFullChargeCurrentThreshold = v;
   }
   if (doc.containsKey("fullChargePersistenceSec")) {
     uint32_t v = doc["fullChargePersistenceSec"];
-    if (v >= 60 && v <= 7200) Core::cfgFullChargePersistenceSec = v;
+    if (v < 60 || v > 7200) { sendError(400, "fullChargePersistenceSec must be 60..7200"); return; }
+    Core::cfgFullChargePersistenceSec = v;
   }
   if (doc.containsKey("telemetryIntervalSec")) {
     uint16_t v = doc["telemetryIntervalSec"];
-    if (v >= 1 && v <= 60) Core::cfgTelemetryIntervalSec = v;
+    if (v < 1 || v > 60) { sendError(400, "telemetryIntervalSec must be 1..60"); return; }
+    Core::cfgTelemetryIntervalSec = v;
   }
   // v1.6.0 — BMS/inverter comm fields (validated; unknown protocol rejected)
   bool bmsConfigChanged = false;

@@ -282,24 +282,12 @@ void handleImport() {
 }
 
 // ---------------------------------------------------------------------------
-// /api/alarms/{code}/acknowledge — per-alarm ACK (the handler existed but was
-// never routed).
+// [audit-2 R-2] The non-canonical POST /api/alarms/acknowledge handler
+// (handleAlarmAckGeneric) and the unused handleAlarmAck stub have been
+// REMOVED. Canonical alarm ACK is POST /api/alarms/{code}/acknowledge,
+// registered by AlarmHandlers::registerRoutes() as a sub-path catch-all at
+// "/api/alarms/". One endpoint, one contract (P1-3).
 // ---------------------------------------------------------------------------
-void handleAlarmAck() {
-  if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
-  if (!requireCsrf()) return;
-  String uri = http.uri();                       // /api/alarms/<code>/acknowledge
-  int first = uri.indexOf('/', 1);               // after "/api"
-  int second = uri.indexOf('/', first + 1);
-  int third = uri.indexOf('/', second + 1);
-  if (first < 0 || second < 0 || third < 0) { sendError(400, "Malformed path"); return; }
-  String code = uri.substring(second + 1, third);
-  if (code.length() == 0) { sendError(400, "Missing alarm code"); return; }
-  const Services::Alarm* a = Services::alarms.find(code.c_str());
-  if (!a) { sendError(404, "Alarm not found"); return; }
-  Services::alarms.acknowledge(code.c_str());
-  sendSuccess("Alarm acknowledged", "{}");
-}
 
 // ---------------------------------------------------------------------------
 // /api/bms — v1.6.0 multi-protocol BMS/inverter comm diagnostics.
@@ -377,21 +365,6 @@ void registerRoutes() {
   // which is registered by AlarmHandlers::registerRoutes() as a sub-path catch-all
   // at "/api/alarms/". The previous non-canonical POST /api/alarms/acknowledge
   // (with body {code}) is REMOVED — one endpoint, one contract.
-}
-
-void handleAlarmAckGeneric() {
-  if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
-  if (!requireCsrf()) return;
-  if (!requireBody(512)) return;
-  String raw = http.arg("plain");
-  StaticJsonDocument<256> doc;
-  if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
-  const char* code = doc["code"] | "";
-  if (strlen(code) == 0) { sendError(400, "Missing alarm code"); return; }
-  const Services::Alarm* a = Services::alarms.find(code);
-  if (!a) { sendError(404, "Alarm not found"); return; }
-  Services::alarms.acknowledge(code);
-  sendSuccess("Alarm acknowledged", "{}");
 }
 
 // ---------------------------------------------------------------------------

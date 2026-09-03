@@ -31,6 +31,7 @@
 #define PLTS_SERVICES_TRANSACTION_JOURNAL_H
 
 #include <Arduino.h>
+#include "../Core/Config.h"   // [audit-2 K-2] Core::JOURNAL_SIZE
 
 namespace Services {
 
@@ -56,7 +57,13 @@ public:
   uint8_t getJournalSize() const { return _size; }
 
 private:
-  static const uint8_t JOURNAL_SIZE = 64;
+  // [audit-2 K-2 FIX] Use Core::JOURNAL_SIZE (16, not 64). The previous
+  // shadowing declaration (64) caused NVS budget mismatch: 64 × 1200 B =
+  // ~75 KB does not fit in the 64 KB NVS partition (alongside plts, plts_health,
+  // plts_emg, plts_alarm, plts_spool, plts_batt, plts_soc, plts_ota, plts_time
+  // namespaces). Silent putBytes failure → dedup degradation → command replay.
+  // Config.h:295 already documents "Reduced to 16 slots (~19 KB)".
+  static const uint8_t JOURNAL_SIZE = Core::JOURNAL_SIZE;   // 16
   static const uint16_t BLOB_SIZE = 1200;
   // Blob layout: magic(2) + ver(1) + valid(1) + CRC(4) +
   //              idLen(1) + id + hashLen(1) + hash + ackLen(2) + ack

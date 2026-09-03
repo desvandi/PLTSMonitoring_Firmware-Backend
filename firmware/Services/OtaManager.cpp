@@ -129,16 +129,13 @@ bool OtaManager::_validateEd25519() {
     return true;  // dev: allow unsigned
 #endif
   }
-#ifndef OTA_ED25519_PUBLIC_KEY_HEX
-#define OTA_ED25519_PUBLIC_KEY_HEX ""
-#endif
+  // [audit-2 R-4] Removed duplicate #ifndef OTA_ED25519_PUBLIC_KEY_HEX block
+  // (the macro is already defined at top-of-file if not passed via -D). The
+  // duplicate was dead preprocessor code (condition always false).
   if (OTA_ED25519_PUBLIC_KEY_HEX[0] == '\0') {
     _lastError = "Ed25519 public key not configured";
     return false;
   }
-#ifndef OTA_ED25519_PUBLIC_KEY_HEX
-#define OTA_ED25519_PUBLIC_KEY_HEX ""
-#endif
   return Utils::ed25519VerifyHash(OTA_ED25519_PUBLIC_KEY_HEX,
                                     _signature.c_str(),
                                     _hashResult, 32);
@@ -202,6 +199,17 @@ void OtaManager::begin() {
                    "OTA ROLLBACK (bootloader revert): v" + lf +
                    " unconfirmed within its single boot — running v" +
                    String(Core::FIRMWARE_VERSION), 0);
+        // [P1-6 FIX audit-2 S-3/S-4] Emit ROLLBACK lifecycle event with the
+        // CORRECT version (lf = the version that failed; was reporting
+        // Core::FIRMWARE_VERSION = the running old image).
+        // Set _expectedVersion temporarily so _emitLifecycle reports lf, not
+        // the running version (which would mislead GAS into thinking v1.7.1
+        // rolled back when it was actually v1.7.2 that failed).
+        String savedExpected = _expectedVersion;
+        _expectedVersion = lf;
+        _emitLifecycle("ROLLBACK",
+          ("bootloader revert: v" + lf + " unconfirmed within single boot").c_str());
+        _expectedVersion = savedExpected;
       }
       // Consume the marker either way (single-shot semantics; a later
       // manual re-flash must not misfire a second report).
@@ -405,15 +413,25 @@ bool OtaManager::beginDownload(const char* url, const char* expectedVersion,
   _totalBytes = expectedSize;
   _expectedVersion = expectedVersion;
   _downloadUrl = url;                     // [FW-09] retained for tickDownload()
+  // [P1-6 FIX audit-2 S-2] Set jobId for MQTT path too. REST path sets it in
+  // beginUpload. Without this, ACTIVATED/ROLLBACK events after MQTT OTA used
+  // the sentinel "boot-verify" and GAS could not correlate to the MQTT job.
+  _jobId = String(Services::timeManager.getUnixTime()) + "-mqtt-" + String(expectedSize);
   _state = OtaState::Downloading;
   Log.append(Core::LogType::OtaStarted,
              "OTA download started: " + String(url) + " v=" + _expectedVersion, 0);
+  _emitLifecycle("ACCEPTED", "MQTT OTA accepted");
+  _emitLifecycle("DOWNLOADING", "MQTT OTA download in progress");
   return true;
 }
 
 void OtaManager::tickDownload() {
   if (_state != OtaState::Downloading) return;
-  if (_downloadUrl.length() == 0) { _state = OtaState::Failed; _lastError = "no download URL"; return; }
+  if (_downloadUrl.length() == 0) {
+    _state = OtaState::Failed; _lastError = "no download URL";
+    _emitLifecycle("FAILED", _lastError.c_str());
+    return;
+  }
 
   // [FW-09 REMEDIATION 2026-08] Previously an EMPTY STUB — beginDownload()
   // validated the manifest and then nothing ever fetched the image; MQTT OTA
@@ -449,6 +467,7 @@ void OtaManager::tickDownload() {
   if (!http.begin(tls, _downloadUrl)) {
     _lastError = "HTTP begin failed";
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
   http.setTimeout(Core::OTA_TIMEOUT_MS);
@@ -457,6 +476,7 @@ void OtaManager::tickDownload() {
     _lastError = "HTTP GET failed: " + String(code);
     http.end();
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
   int total = http.getSize();
@@ -464,6 +484,7 @@ void OtaManager::tickDownload() {
     _lastError = "image too large";
     http.end();
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
 
@@ -471,6 +492,7 @@ void OtaManager::tickDownload() {
     _lastError = "Update.begin failed";
     http.end();
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
   mbedtls_md_context_t sha;
@@ -482,6 +504,7 @@ void OtaManager::tickDownload() {
     http.end();
     Update.end();
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
 
@@ -526,6 +549,7 @@ void OtaManager::tickDownload() {
     _state = OtaState::Failed;
     Log.append(Core::LogType::OtaFailed,
                "OTA download failed: " + _lastError, 0);
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
 
@@ -533,17 +557,30 @@ void OtaManager::tickDownload() {
   mbedtls_md_free(&sha);
 
   // SAME verification chain as finalizeUpload (single trust boundary).
-  if (!_validateSha256()) { _state = OtaState::Failed; Update.end(); return; }
-  if (!_validateEd25519()) { _state = OtaState::Failed; Update.end(); return; }
+  if (!_validateSha256()) {
+    _state = OtaState::Failed; Update.end();
+    _emitLifecycle("FAILED", ("SHA-256 mismatch: " + _lastError).c_str());
+    return;
+  }
+  if (!_validateEd25519()) {
+    _state = OtaState::Failed; Update.end();
+    _emitLifecycle("FAILED", ("Ed25519: " + _lastError).c_str());
+    return;
+  }
+  _emitLifecycle("VERIFIED", "MQTT OTA SHA-256 + Ed25519 OK");
   if (!Update.end(true)) {
     _lastError = "Update.end failed: " + String(Update.getError());
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return;
   }
   _recordFlashedImage(_expectedVersion);   // [W14-2a/b] fresh ledger + marker
   _state = OtaState::Done;
   Log.append(Core::LogType::OtaSuccess,
              "OTA download verified + applied: v=" + _expectedVersion, 0);
+  _emitLifecycle("FLASHED", "MQTT OTA image written — pending boot verify");
+  // ACTIVATED is emitted by markBootHealthyIfPending() after the 60s healthy
+  // window; ROLLBACK is emitted by triggerRollback() if health checks fail.
 }
 
 bool OtaManager::beginManifestCheck(const char* manifestUrl) {
@@ -714,6 +751,10 @@ void OtaManager::tickManifestCheck() {
 // progress counters. Safe to call when no OTA is in progress (job id may
 // be empty after a reboot, in which case we still emit so GAS can correlate
 // via deviceKey + timestamp).
+//
+// [P1-6 FIX audit-2 S-2] Clear _jobId when emitting terminal states
+// (ACTIVATED, ROLLBACK, FAILED) so a subsequent OTA session starts clean.
+// Without this, jobId from session N leaks into session N+1's first event.
 void OtaManager::_emitLifecycle(const char* state, const char* detail) {
   if (!state) return;
   // _jobId may be empty on a fresh boot (no OTA in progress this session).
@@ -727,6 +768,12 @@ void OtaManager::_emitLifecycle(const char* state, const char* detail) {
     (uint32_t)_bytesProcessed,
     (uint32_t)_totalBytes
   );
+  // Terminal states — clear jobId so next session starts fresh.
+  if (strcmp(state, "ACTIVATED") == 0 ||
+      strcmp(state, "ROLLBACK")  == 0 ||
+      strcmp(state, "FAILED")    == 0) {
+    _jobId = "";
+  }
 }
 
 } // namespace Services
