@@ -401,7 +401,7 @@ console.log('\n[v1.6.0] Telemetry header migration:');
                              data: { v_bat: 51.1, i_bat_dc: -5.0, ina219_ok: true, sequence: 2 } });
   check('telemetry accepted after migration', r.status === 'SUCCESS', JSON.stringify(r));
   const hdr = sheet.rows[0];
-  check('header extended to 36 columns (v1.7)', hdr.length === 36, `got ${hdr.length}`);
+  check('header extended to 39 columns (v1.7 + W12 meter trio)', hdr.length === 39, `got ${hdr.length}`);
   check('header v1.6 columns appended in order',
         hdr[24] === 'soc_source' && hdr[25] === 'bms_protocol' && hdr[26] === 'bms_connected' &&
         hdr[30] === 'bms_fault_flags');
@@ -410,12 +410,19 @@ console.log('\n[v1.6.0] Telemetry header migration:');
         hdr[31] === 'i_ac_gen' && hdr[32] === 'emg_state' && hdr[33] === 'emg_reason' &&
         hdr[34] === 'emg_estop' && hdr[35] === 'emg_trips',
         JSON.stringify(hdr.slice(31)));
+  // [W12-2] PZEM meter trio appended after the emergency block.
+  check('header W12 meter columns appended in order',
+        hdr[36] === 'p_ac_meter' && hdr[37] === 'meter_v' && hdr[38] === 'meter_connected',
+        JSON.stringify(hdr.slice(36)));
   const oldRow = sheet.rows[1];
   check('pre-existing row keeps v1.5 length (old indices intact)',
         oldRow.length === 24, `got ${oldRow.length}`);
   const newRow = sheet.rows[2];
-  check('new row carries v1.7 columns (36 values)',
-        newRow && newRow.length === 36, `got ${newRow && newRow.length}`);
+  check('new row carries v1.7 columns (39 values)',
+        newRow && newRow.length === 39, `got ${newRow && newRow.length}`);
+  check('new row meter trio honest-empty for flat payload (no meter)',
+        newRow[36] === '' && newRow[37] === '' && String(newRow[38]).toUpperCase() === 'FALSE',
+        JSON.stringify(newRow.slice(36)));
   check('new row soc_source default UNKNOWN for flat payload', newRow[24] === 'UNKNOWN');
   check('new row emg_state default empty for flat payload without emergency',
         newRow[32] === '', `got ${JSON.stringify(newRow[32])}`);

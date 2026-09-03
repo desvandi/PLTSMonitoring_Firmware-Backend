@@ -1,6 +1,6 @@
 # PLTS Monitor & MonitorIoT Push-Alarm — Firmware, Backend GAS, Toolkit
 
-**Firmware produksi:** v1.6.3 · **Firmware generic:** v1.7.0 · **Firmware alarm:** v1.1.0 · **Backend GAS:** WAVE-7 (remediasi P1/P2 + wave audit 7-10) · **License:** MIT
+**Firmware produksi:** v1.7.1 · **Firmware generic:** v1.7.1 · **Firmware alarm:** v1.1.0 · **Backend GAS:** WAVE-7 (remediasi P1/P2 + wave audit 7-13 + bench W14) · **License:** MIT
 **Status:** LIVE (dua repositori GitHub + dua proyek Vercel aktif, seluruh rantai platform gratis Rp0 — tanpa kartu kredit)
 **Repositori kembar (frontend/dasbor):** [desvandi/PLTSMonitoring_PWA](https://github.com/desvandi/PLTSMonitoring_PWA)
 
@@ -148,7 +148,50 @@ mendadak karena tidak ada kartu kredit terpasang.
   via `release_firmware_generic.py`; terkunci oleh
   `test_wave13_ota_mixedfleet.py` (35 check: semantik rollback, kontrak
   target 6-skenario perilaku, vocabulary, integritas rilis) —
-  verdict **PRODUCTION GRADE**. Arsip laporan audit historis
+  verdict **PRODUCTION GRADE**; **wave 14 (verifikasi bench: uji flag PZEM +
+  pengembalian fisik OTA v1.7.1) 2026-09-03**: W14-1 protokol driver
+  PZEM-004T salah secara mekanis — request memakai FC 0x03 (area
+  holding/alarm, bukan area INPUT pengukuran FC 0x04) dan decoder membaca
+  mulai byte ke-2 (posisi byte-count 0x14 pada frame nyata
+  `[addr,0x04,0x14,data20,crc2]` = 25 B) → **driver tak akan pernah
+  menghasilkan pembacaan valid dari meter fisik** (ditemukan virtual bench
+  SEBELUM flag pernah dinyalakan; mirror W12 memakai bentuk frame salah
+  yang sama); fix: FC 0x04 + validasi byte-count 0x14 + decode dari
+  `&_buf[3]` + frame legacy-24B ditolak jujur (timeout, bukan decode
+  tergeser); virtual bench `test_bench_w14_pzem.js` 44 check
+  (driver → telemetri → GAS ingest → LATEST → PWA gasEnvelope, kejujuran di
+  bawah 6 mode gagal, flag tetap 0 sampai validasi fisik §3 dokumen bench)
+  — jalur data terbukti kontrak-benar end-to-end, yang tersisa untuk bench
+  fisik hanya AKURASI (bukan plumbing); W14-2 **verifikasi sumber
+  bootloader nyata** (sdkconfig arduino-esp32 2.0.17 + sumber IDF v4.4.7
+  `bootloader_utility.c`/`bootloader_common.c`): kebijakan efektif
+  perangkat keras = **satu boot tak-terkonfirmasi** — reset APA PUN
+  sebelum konfirmasi 60 s (termasuk blip daya) → ABORTED → bootloader
+  boot image lama diam-diam (jalur "3 percobaan" app tak terjangkau di
+  bootloader ini; percobaan #2 tak pernah terjadi), plus 3 lubang: (a)
+  ledger boot-tries tak di-reset saat penulisan image → terakumulasi
+  lintas generasi (2 update kena-blip-daya → image ke-3 yang sehat instan
+  self-rollback), (b) **revert bootloader tak pernah dilaporkan ke GAS**
+  (OtaEvents buta terhadap rollback nyata), (c) counter modular tak punya
+  jembatan GAS OTA_STATUS; fix generic: reset ledger + marker `lfver`
+  saat `Update.end(true)` sukses, deteksi revert saat boot image lama
+  (running < lastFlashed) → laporan `ROLLBACK` tertunda yang dikirim begitu
+  STA naik, marker dihapus hanya setelah HTTP 200 (bertahan lintas reboot;
+  aman di AP-mode), `reportOtaStatus()` mengembalikan kode HTTP; fix
+  modular: `_recordFlashedImage()` di kedua jalur `Update.end(true)` +
+  deteksi revert di `begin()` (log lokal jujur + getter
+  `getBootRollbackVersion()` untuk jembatan GAS masa depan — tetap jujur
+  bahwa jembatan itu masih terbuka); virtual bench
+  `test_bench_w14_ota_rollback.js` 44 check (mirror state-machine ota_data
+  bootloader 1:1 vs sumber IDF, happy path ACTIVATED end-to-end,
+  pengembalian fisik via power-cut 20 s → revert → ROLLBACK terlapor,
+  persistensi marker lintas reboot offline, semantik ledger per-image, 4
+  skenario refusal, kunci statik 3 sumber); W14-3 dua asersi basi di
+  `test_gas_contract.js` (masih mengharapkan 36 kolom telemetri; W12-2
+  sudah 39) — diperbarui + kunci posisi trio meter; total regresi penuh
+  hijau: W14 PZEM 44 + W14 OTA 44 + W12 26 + W13 35 + GAS 77 + PWA vitest
+  141 + suite lama (remediasi 65, darurat 85+50+57, wave-1 44, properti
+  7+10, dedup 6, versi 8, driver PZEM 25). Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
   terserap ke kode, README ini, dan panduan PDF.

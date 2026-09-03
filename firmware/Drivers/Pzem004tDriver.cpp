@@ -62,9 +62,13 @@ void Pzem004tDriver::tick() {
 void Pzem004tDriver::_sendRequest() {
   uint8_t frame[8];
   frame[0] = _addr;
-  frame[1] = 0x03;                       // FC 03 read holding-style registers
+  // [W14-1] FC 0x04 = read INPUT registers — the PZEM v3 measurement area
+  // (registers 0x0000..0x0009). FC 0x03 reads the ALARM/holding area on
+  // real hardware: a response arrives, CRC passes, but the payload is not
+  // the measurements — the plausibility gate then nulls every reading.
+  frame[1] = 0x04;                       // FC 04 read input registers
   frame[2] = 0x00; frame[3] = 0x00;      // start register 0x0000
-  frame[4] = 0x00; frame[5] = 0x0A;      // 10 registers (20 bytes)
+  frame[4] = 0x00; frame[5] = 0x0A;      // 10 registers (20 data bytes)
   uint16_t crc = crc16(frame, 6);
   frame[6] = (uint8_t)(crc & 0xFF);      // PZEM: LOW byte first (Modbus order)
   frame[7] = (uint8_t)(crc >> 8);
@@ -83,8 +87,12 @@ bool Pzem004tDriver::_pollResponse(uint32_t nowMs) {
   }
   if (_bufLen >= FRAME_LEN) {
     _awaiting = false;
-    // Frame validation: address echo + function code + CRC.
-    if (_buf[0] != _addr || _buf[1] != 0x03) {
+    // Frame validation: address echo + function code + byte count.
+    // [W14-1] A REAL PZEM v3 response is [addr, 0x04, 0x14, data20, crc2]
+    // = 25 bytes: the third byte is the Modbus byte-count (0x14 = 20), NOT
+    // data. Validating it explicitly turns a misframed/exception reply into
+    // an honest CrcError instead of a shifted decode.
+    if (_buf[0] != _addr || _buf[1] != 0x04 || _buf[2] != 0x14) {
       _reading.errorCount++;
       _resetReading();
       _reading.status = PzemStatus::CrcError;   // frame mismatch — treat as error
@@ -98,7 +106,8 @@ bool Pzem004tDriver::_pollResponse(uint32_t nowMs) {
       _reading.status = PzemStatus::CrcError;
       return false;
     }
-    PzemReading r = decodeRegisters(&_buf[2], nowMs);
+    // [W14-1] Data payload starts AFTER the byte-count byte: &_buf[3].
+    PzemReading r = decodeRegisters(&_buf[3], nowMs);
     r.errorCount = _reading.errorCount;          // keep the lifetime counter
     _reading = r;
     if (r.status == PzemStatus::Ok) {

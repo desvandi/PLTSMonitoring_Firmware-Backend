@@ -47,6 +47,20 @@
 //   - markBootHealthyIfPending() (called from the 1 s main loop) confirms the
 //     image after a 60 s stable window, exactly like firmware-generic's
 //     markOtaHealthyIfPending()
+//
+// [W14-2 REMEDIATION 2026-09 — bench wave] Verified against the REAL IDF
+// v4.4.7 bootloader sources: the stock arduino bootloader gives a fresh image
+// exactly ONE unconfirmed boot — ANY reset before the 60 s confirm (power
+// blip, panic, WDT) marks it ABORTED and reverts, so the >= 3 attempt path
+// is defense-in-depth, not the primary revert mechanism. Rollback
+// observability added:
+//   - [W14-2a] the boot-try ledger is RESET at image-write time (per-image,
+//     not accumulated across generations — 2 power-blipped updates used to
+//     leave boot_att=2, making a healthy 3rd image self-rollback instantly)
+//   - [W14-2b] a reverted (older) image DETECTS running < lf_ver at boot and
+//     logs an honest ROLLBACK entry (getBootRollbackVersion()); the GAS
+//     OTA_STATUS bridge for the modular tree remains OPEN — observability is
+//     local (device log) until it exists
 // =============================================================================
 #pragma once
 #ifndef PLTS_SERVICES_OTA_MANAGER_H
@@ -112,6 +126,10 @@ public:
   size_t   getTotalBytes() const { return _totalBytes; }
   String   getLastError() const { return _lastError; }
   uint32_t getBootAttempts() const { return _bootAttempts; }
+  // [W14-2b] Version of the OTA image the bootloader reverted at boot
+  // ("" = none this boot). Local observability — consumed by the device log;
+  // a future GAS OTA_STATUS bridge can emit it.
+  String   getBootRollbackVersion() const { return _bootRollbackVersion; }
 
 private:
   OtaState _state = OtaState::Idle;
@@ -128,6 +146,10 @@ private:
   uint32_t _bootStartedAt = 0;    // millis() at begin() — the 60 s window base
   bool     _markedValid   = false;   // one-shot: image confirmed this boot
   bool     _pendingVerify = false;   // running image awaits confirmation
+  String   _bootRollbackVersion;    // [W14-2b] bootloader-reverted version
+
+  // [W14-2a/b] Image-write bookkeeping: fresh ledger + revert marker.
+  void _recordFlashedImage(const String& version);
 
   // Streaming SHA-256 via mbedtls (incremental)
   void*    _shaCtx = nullptr;

@@ -2,6 +2,27 @@
  * Flash once. Runtime WiFi/GAS credentials live in LittleFS /config.json.
  * Monitoring only: this firmware never controls an inverter, charger, or relay.
  *
+ * v1.7.1 additions (W14 — bench wave: OTA rollback observability):
+ *   - [W14-2a] applyOta() resets the NVS boot-try ledger and stores the
+ *     flashed version ("lfver") at Update.end success. The old ledger
+ *     accumulated across image generations: two power-blipped updates left
+ *     tries=2 in NVS, so a perfectly healthy THIRD image would boot at
+ *     tries=2 → 3 and INSTANTLY self-rollback at setup. Reset-at-write
+ *     makes the counter per-image, as documented.
+ *   - [W14-2b] Bootloader-initiated reverts are now OBSERVABLE. Verified
+ *     against the real arduino-esp32 2.0.17 sdkconfig + IDF v4.4.7
+ *     bootloader sources: CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y gives a
+ *     fresh image exactly ONE unconfirmed boot — ANY reset before the 60 s
+ *     confirm (power blip included) makes the bootloader mark the image
+ *     ABORTED and revert to the previous one, SILENTLY (the ROLLBACK
+ *     branch below could never fire — attempt #2 of the new image never
+ *     happens). The reverted image now detects running < lastFlashed at
+ *     boot and reports an honest OTA_STATUS ROLLBACK to GAS once STA is
+ *     up; the NVS marker survives reboots and is consumed only after the
+ *     report is actually delivered (HTTP 200).
+ *   - [W14-2c] reportOtaStatus() returns the HTTP code so the deferred
+ *     ROLLBACK report can retry until delivered.
+ *
  * v1.7.1 additions (W13 — mixed-fleet OTA hardening):
  *   - [W13-2] OTA manifest target self-check: Code.gs now serves a `target`
  *     field ('' = fleet-wide, 'generic' | 'modular') with every manifest. A
@@ -175,6 +196,9 @@ static const uint8_t  OTA_MAX_BOOT_ATTEMPTS = 3;
 static const uint32_t OTA_HEALTHY_AFTER_MS  = 60000UL;
 static const char*    NVS_NAMESPACE      = "plts";
 static const char*    NVS_KEY_BOOT_TRIES = "boot_tries";
+// [W14-2b] Last OTA-flashed version (string) — lets a reverted (older)
+// image detect the bootloader rollback and report it to GAS.
+static const char*    NVS_KEY_LAST_FLASHED = "lfver";
 static const char*    NVS_KEY_AP_PASS    = "ap_pass";   // [FW-A3] WPA2 setup AP
 // v1.6.0 [E-WAVE] — emergency NVS keys: trip counter + crash-chain detector
 // ("did the previous boot reach 5 min of stable runtime?").
@@ -202,6 +226,12 @@ static const uint32_t TX_BACKOFF_CAP_MS    = 600000UL;  // 10 min
 
 // [FW6-8] Runtime reference for OTA boot-health marking (any mode).
 uint32_t runtimeStartedAt = 0;
+
+// [W14-2b] Deferred ROLLBACK report state — armed by checkBootloaderRevert()
+// at boot when the bootloader reverted an unconfirmed image; delivered by
+// the STA loop as soon as WiFi is up (marker cleared only on HTTP 200).
+bool   otaRollbackReportPending = false;
+String otaRollbackReportVersion = "";
 
 // Forward declaration — Arduino's prototype inserter places generated
 // prototypes above this point, BEFORE struct OtaManifest below; without
@@ -373,6 +403,29 @@ void nvsSetBootTries(uint8_t value) {
   nvs_close(handle);
 }
 
+// [W14-2b] Last OTA-flashed version marker ("" = none pending).
+String nvsGetLastFlashed() {
+  nvs_handle_t handle;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return "";
+  char buf[24] = {0};
+  size_t len = sizeof(buf);
+  if (nvs_get_str(handle, NVS_KEY_LAST_FLASHED, &len, buf) == ESP_OK) {
+    nvs_close(handle);
+    return String(buf);
+  }
+  nvs_close(handle);
+  return "";
+}
+
+void nvsSetLastFlashed(const String& value) {
+  nvs_handle_t handle;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
+  if (value.length() == 0) nvs_erase_key(handle, NVS_KEY_LAST_FLASHED);
+  else                     nvs_set_str(handle, NVS_KEY_LAST_FLASHED, value.c_str());
+  nvs_commit(handle);
+  nvs_close(handle);
+}
+
 // [WAVE-1 / GAS-2-A] Sequence high-water mark in NVS (u32).
 uint32_t nvsGetSeqBase() {
   nvs_handle_t handle;
@@ -411,7 +464,10 @@ void persistSequenceIfDue() {
 }
 
 // Forward declaration of GAS status reporter (used by OTA rollback path).
-void reportOtaStatus(const char* event, const String& version, const String& message);
+// [W14-2c] Returns the HTTP code (0 = not attempted) so callers can retry.
+int reportOtaStatus(const char* event, const String& version, const String& message);
+// [W14-2b] Bootloader-revert detection — defined next to handleOtaRollback().
+void checkBootloaderRevert();
 
 // ============================================================================
 // Config persistence
@@ -1619,6 +1675,15 @@ bool applyOta(const OtaManifest& m) {
                     String("Update.end: ") + Update.errorString());
     return false;
   }
+  // [W14-2a] Fresh ledger per image: the old counter accumulated across
+  // image generations — two power-blipped updates left tries=2 in NVS, so
+  // a perfectly healthy THIRD image would boot at tries=2 → 3 and
+  // instantly self-rollback at setup. Reset at write time makes the
+  // counter per-image, as documented.
+  nvsSetBootTries(0);
+  // [W14-2b] Revert marker: a next boot of an image OLDER than this
+  // version means the bootloader reverted the update — report it.
+  nvsSetLastFlashed(m.version);
   Serial.printf("[OTA] Success v%s (%u bytes). Rebooting...\n",
                 m.version.c_str(), (unsigned)written);
   delay(1000);
@@ -1749,9 +1814,10 @@ void checkCalibration() {
 // ============================================================================
 // OTA status reporter — posts activated / rollback / boot_failed to GAS
 // ============================================================================
-void reportOtaStatus(const char* event, const String& version, const String& message) {
-  if (config.gasUrl.length() == 0 || config.token.length() == 0) return;
-  if (WiFi.status() != WL_CONNECTED) return;
+// [W14-2c] Returns the HTTP code (0 = not attempted — no WiFi/config).
+int reportOtaStatus(const char* event, const String& version, const String& message) {
+  if (config.gasUrl.length() == 0 || config.token.length() == 0) return 0;
+  if (WiFi.status() != WL_CONNECTED) return 0;
 
   JsonDocument body;
   body["action"]     = "OTA_STATUS";
@@ -1771,14 +1837,16 @@ void reportOtaStatus(const char* event, const String& version, const String& mes
   client.setCACert(GAS_ROOT_CA);
   HTTPClient http;
   http.setTimeout(HTTP_TIMEOUT_MS);
+  int code = 0;
   if (http.begin(client, config.gasUrl)) {
     http.addHeader("Content-Type", "application/json");
-    int code = http.POST(encoded);
+    code = http.POST(encoded);
     Serial.printf("[OTA-STATUS] %s v%s -> HTTP=%d\n",
                   event, version.c_str(), code);
     http.end();
   }
   client.stop();
+  return code;
 }
 
 // ============================================================================
@@ -1800,12 +1868,46 @@ void handleOtaRollback() {
   if (tries >= OTA_MAX_BOOT_ATTEMPTS) {
     Serial.println("[OTA] max boot attempts reached — rolling back!");
     nvsSetBootTries(0);
+    // [W14-2b] this path reports ROLLBACK directly; consume the marker so
+    // the reverted image does not double-report on its next boot.
+    nvsSetLastFlashed("");
     // Try to report BEFORE rollback (may fail if WiFi not up yet — that's fine).
     reportOtaStatus("ROLLBACK", FIRMWARE_VERSION, "boot loop detected");
     esp_ota_mark_app_invalid_rollback_and_reboot();
     // Unreachable, board reboots.
   } else {
     nvsSetBootTries(tries);
+  }
+}
+
+// ============================================================================
+// [W14-2b] Bootloader-revert detection. Verified against the REAL IDF v4.4.7
+// bootloader sources + the arduino-esp32 2.0.17 sdkconfig
+// (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y): a fresh image gets exactly ONE
+// unconfirmed boot. ANY reset before the 60 s confirm (power blip, panic,
+// WDT — all equal) makes the bootloader mark it ABORTED and boot this
+// (older) image instead — silently, and with attempt #2 of the new image
+// never happening, so the >= 3 branch above cannot fire for this case.
+// Running an image OLDER than the stored lastFlashed marker can therefore
+// only mean the update was reverted: arm a deferred ROLLBACK report. The
+// NVS marker is kept until the report is actually delivered (HTTP 200) —
+// it survives reboots and AP-mode boots.
+// ============================================================================
+void checkBootloaderRevert() {
+  String lf = nvsGetLastFlashed();
+  if (lf.length() == 0) return;
+  if (lf == String(FIRMWARE_VERSION)) return;   // the new image itself is running
+  int cmp = semverCompare(lf, String(FIRMWARE_VERSION));
+  if (cmp == 1) {
+    Serial.printf("[OTA] update v%s was reverted by the bootloader — running v%s\n",
+                  lf.c_str(), FIRMWARE_VERSION);
+    otaRollbackReportPending = true;
+    otaRollbackReportVersion = lf;
+    // Marker deliberately KEPT until delivery — see the STA loop.
+  } else {
+    // Running NEWER than the marker (manual USB flash of a higher version) —
+    // no rollback happened; consume the marker so it cannot misfire later.
+    nvsSetLastFlashed("");
   }
 }
 
@@ -1827,6 +1929,11 @@ void markOtaHealthyIfPending() {
                     WiFi.status() == WL_CONNECTED
                       ? "healthy after boot"
                       : "healthy in setup/AP mode (no STA)");
+    // [W14-2b] the marker is consumed ONLY when this image actually
+    // confirmed (it was PENDING_VERIFY). On the reverted OLD image the
+    // marker must survive the 60 s mark — it is the retry persistence for
+    // the deferred ROLLBACK report (cleared on HTTP 200 in the STA loop).
+    nvsSetLastFlashed("");
   }
   nvsSetBootTries(0);
   otaHealthyMarked = true;
@@ -1898,11 +2005,13 @@ void setup() {
   if (!configured) {
     Serial.println("[BOOT] no config -> AP mode");
     handleOtaRollback();          // still count attempt so rollback works
+    checkBootloaderRevert();      // [W14-2b] revert → deferred ROLLBACK report
     startPortal();
     return;
   }
 
   handleOtaRollback();             // may reboot if boot-loop detected
+  checkBootloaderRevert();         // [W14-2b] detect bootloader revert → report
 
   // [WAVE-1 / GAS-2-A] Monotonic sequence init — must run before the first
   // sendTelemetry() so every POST carries a never-reused number.
@@ -1952,6 +2061,17 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       staWasConnected = true;   // [FW-A5] fresh window on the next drop
       markOtaHealthyIfPending();
+      // [W14-2b] Deliver the deferred ROLLBACK report (armed at boot when
+      // the bootloader reverted an unconfirmed image). Marker consumed
+      // only on HTTP 200 — retries on later boots if GAS was unreachable.
+      if (otaRollbackReportPending) {
+        int rc = reportOtaStatus("ROLLBACK", otaRollbackReportVersion,
+                                 "bootloader revert (image unconfirmed within its single boot)");
+        if (rc == 200) {
+          nvsSetLastFlashed("");
+          otaRollbackReportPending = false;
+        }
+      }
       if (millis() - lastTelemetry >= (uint32_t)config.interval * 1000UL) {
         sendTelemetry();
         lastTelemetry = millis();

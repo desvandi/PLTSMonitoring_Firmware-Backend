@@ -12,9 +12,15 @@
 // ac.meter block carries connected=false + null when absent).
 //
 // Protocol: PZEM-004T v3.0 (Peacefair) over isolated TTL UART, 9600 8N1 —
-// Modbus-style frames with CRC16-MODBUS. Read input registers 0x0000..0x0009
-// (FC 0x03): [addr, 0x03, 0x00, 0x00, 0x00, 0x0A, crcLo, crcHi] ->
-// [addr, 0x03, 20 data bytes, crcLo, crcHi].
+// Modbus-style frames with CRC16-MODBUS. Measurements live in the INPUT
+// register area (FC 0x04), registers 0x0000..0x0009 — canonical command
+// [addr, 0x04, 0x00, 0x00, 0x00, 0x0A, crcLo, crcHi] (01 04 00 00 00 0A 70 0D)
+// -> response [addr, 0x04, 0x14 byte-count, 20 data bytes, crcLo, crcHi]
+// = 25 bytes total. [W14-1 bench fix] the request used to send FC 0x03 (the
+// ALARM/holding area on real hardware) and the decoder read from the
+// byte-count position — the driver could never produce a valid reading from
+// a physical meter (found by the W14 virtual bench before the flag was ever
+// enabled; the W12 mirror test shared the same wrong 24-byte frame shape).
 //
 // STATUS: IMPLEMENTED, BENCH-VALIDATION PENDING — PLTS_ENABLE_PZEM_AC
 // defaults to 0. The driver compiles out entirely until an operator has
@@ -78,12 +84,14 @@ public:
   PzemReading getReading() const { return _reading; }
 
   // Shared decode (host-testable mirror target): 20 data bytes -> fields.
+  // [W14-1] NOTE: the data payload starts at response byte 3 (after addr,
+  // FC echo, and the 0x14 byte-count) — the caller passes &_buf[3].
   static PzemReading decodeRegisters(const uint8_t* data20, uint32_t nowMs);
   // CRC16-MODBUS (poly 0xA001, init 0xFFFF, low byte first) — same algorithm
   // as the Modbus RTU client.
   static uint16_t crc16(const uint8_t* buf, size_t len);
 
-  static constexpr size_t FRAME_LEN = 25;    // addr+fc+20+crc2
+  static constexpr size_t FRAME_LEN = 25;    // addr + fc + count + 20 data + crc2
 
 private:
   void _sendRequest();

@@ -174,6 +174,42 @@ void OtaManager::begin() {
     Serial.println(F("[OTA] Boot attempts exceeded — rolling back"));
     triggerRollback();
   }
+
+  // [W14-2b] Bootloader-revert detection. Verified against the real IDF
+  // v4.4.7 bootloader sources: the stock arduino bootloader gives a fresh
+  // image exactly ONE unconfirmed boot; any reset before the 60 s confirm
+  // (power blip, panic, WDT) marks it ABORTED and boots THIS older image
+  // instead — silently (attempt #2 never happens, so the >= 3 path above
+  // cannot fire for this case). Running an image OLDER than the stored
+  // lf_ver marker can only mean the update was reverted.
+  {
+    Preferences p;
+    String lf;
+    if (p.begin("plts_ota", true)) {
+      lf = p.getString("lf_ver", "");
+      p.end();
+    }
+    if (lf.length() > 0 && lf != String(Core::FIRMWARE_VERSION)) {
+      uint16_t lfM, lfm, lfp, cM, cm, cp;
+      bool newer = semverParse(lf, lfM, lfm, lfp) &&
+                   semverParse(String(Core::FIRMWARE_VERSION), cM, cm, cp) &&
+                   (lfM > cM || (lfM == cM && lfm > cm) ||
+                    (lfM == cM && lfm == cm && lfp > cp));
+      if (newer) {
+        _bootRollbackVersion = lf;
+        Log.append(Core::LogType::OtaFailed,
+                   "OTA ROLLBACK (bootloader revert): v" + lf +
+                   " unconfirmed within its single boot — running v" +
+                   String(Core::FIRMWARE_VERSION), 0);
+      }
+      // Consume the marker either way (single-shot semantics; a later
+      // manual re-flash must not misfire a second report).
+      if (p.begin("plts_ota", false)) {
+        p.remove("lf_ver");
+        p.end();
+      }
+    }
+  }
 }
 
 bool OtaManager::shouldRollback() {
@@ -183,6 +219,13 @@ bool OtaManager::shouldRollback() {
 void OtaManager::triggerRollback() {
   Log.append(Core::LogType::OtaFailed,
              "Boot health check failed — marking app invalid for rollback", 0);
+  // [W14-2b] this path reports the rollback itself; consume the marker so
+  // the reverted image's next boot does not double-report.
+  Preferences p;
+  if (p.begin("plts_ota", false)) {
+    p.remove("lf_ver");
+    p.end();
+  }
   esp_ota_mark_app_invalid_rollback_and_reboot();
 }
 
@@ -211,10 +254,27 @@ void OtaManager::markBootHealthy() {
   Preferences p;
   if (p.begin("plts_ota", false)) {
     p.putUInt("boot_att", 0);
+    p.remove("lf_ver");          // [W14-2b] image confirmed — revert detection off
     p.end();
   }
   _bootAttempts = 0;
   Log.append(Core::LogType::Boot, "Boot healthy — boot-attempt ledger reset", 0);
+}
+
+// [W14-2a/b] Image-write bookkeeping, called at Update.end(true) success:
+// a FRESH boot-try ledger per image (the old one accumulated across image
+// generations — two power-blipped updates left boot_att=2, so a perfectly
+// healthy THIRD image would boot at 2 → 3 and instantly self-rollback in
+// begin()) + the revert marker (a next boot of an image OLDER than this
+// version means the bootloader reverted the update).
+void OtaManager::_recordFlashedImage(const String& version) {
+  Preferences p;
+  if (p.begin("plts_ota", false)) {
+    p.putUInt("boot_att", 0);
+    p.putString("lf_ver", version);
+    p.end();
+  }
+  _bootAttempts = 0;
 }
 
 bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
@@ -291,6 +351,7 @@ bool OtaManager::finalizeUpload(const char* expectedSha256Hex,
     _state = OtaState::Failed;
     return false;
   }
+  _recordFlashedImage(_expectedVersion);   // [W14-2a/b] fresh ledger + marker
   _state = OtaState::Done;
   mbedtls_md_free((mbedtls_md_context_t*)_shaCtx);
   free(_shaCtx); _shaCtx = nullptr;
@@ -450,6 +511,7 @@ void OtaManager::tickDownload() {
     _state = OtaState::Failed;
     return;
   }
+  _recordFlashedImage(_expectedVersion);   // [W14-2a/b] fresh ledger + marker
   _state = OtaState::Done;
   Log.append(Core::LogType::OtaSuccess,
              "OTA download verified + applied: v=" + _expectedVersion, 0);
