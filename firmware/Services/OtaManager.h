@@ -23,13 +23,30 @@
 //     phase ACCEPTED  = job accepted, download STARTED (this ACK is what the
 //                       journal replays idempotently)
 //     phase REJECTED  = job refused (policy/validation failure)
-//   The lifecycle continues OUT-OF-BAND via OTA_STATUS events (GAS OtaEvents
-//   sheet + device log), each mapping to an OtaState transition:
+//   The lifecycle continues OUT-OF-BAND: DOWNLOAD_FAILED / VERIFICATION_
+//   FAILED / ROLLBACK / ACTIVATED land in the DEVICE LOG + MQTT ack channel
+//   (GAS OtaEvents is served by the generic firmware's OTA_STATUS reporter;
+//   the modular tree reports locally until a GAS OTA_STATUS bridge exists).
 //     ACCEPTED → DOWNLOADING → VERIFIED → FLASHED → ACTIVATED   (60 s healthy)
 //                                  ↘ DOWNLOAD_FAILED / VERIFICATION_FAILED
 //     FLASHED  → ROLLBACK      (3 unhealthy boots → previous partition)
 //   Senders MUST treat ACK==ACCEPTED as "started", never "flashed". The
 //   OtaState enum below is the single source for these transitions.
+//
+// [W13-1 REMEDIATION 2026-09] Boot-health semantics aligned with the
+// bootloader's rollback contract (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y in
+// the arduino-esp32 sdkconfig — verified): Update.end() leaves the new image
+// PENDING_VERIFY; the firmware MUST call esp_ota_mark_app_valid_cancel_
+// rollback() to confirm it, or the bootloader reverts on the next reset.
+// Previously markBootHealthy() cleared an NVS counter + logged "rollback
+// cancelled" WITHOUT ever calling the ESP-IDF confirm API — every modular OTA
+// silently reverted on the first post-update reset. Now:
+//   - begin() counts a boot attempt ONLY when the running image is actually
+//     PENDING_VERIFY (was: incremented once at upload time — dead code that
+//     could never reach the threshold)
+//   - markBootHealthyIfPending() (called from the 1 s main loop) confirms the
+//     image after a 60 s stable window, exactly like firmware-generic's
+//     markOtaHealthyIfPending()
 // =============================================================================
 #pragma once
 #ifndef PLTS_SERVICES_OTA_MANAGER_H
@@ -39,6 +56,7 @@
 #include <Update.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <esp_ota_ops.h>
 
 namespace Services {
 
@@ -55,6 +73,10 @@ enum class OtaState : uint8_t {
 class OtaManager {
 public:
   void begin();
+  // [W13-1] One-shot-per-boot: confirm a PENDING_VERIFY image after the
+  // 60 s stable window (calls esp_ota_mark_app_valid_cancel_rollback).
+  void markBootHealthyIfPending();
+  // Reset the NVS boot-attempt counter (called by markBootHealthyIfPending).
   void markBootHealthy();
   // Returns true if firmware should auto-rollback now.
   bool shouldRollback();
@@ -102,6 +124,10 @@ private:
   String   _downloadUrl;          // [FW-09] retained between beginDownload and tickDownload
   String   _manifestUrl;          // [WAVE-6 / FW6-4] retained between beginManifestCheck and tickManifestCheck
   uint32_t _bootAttempts = 0;
+  // [W13-1] boot-health bookkeeping
+  uint32_t _bootStartedAt = 0;    // millis() at begin() — the 60 s window base
+  bool     _markedValid   = false;   // one-shot: image confirmed this boot
+  bool     _pendingVerify = false;   // running image awaits confirmation
 
   // Streaming SHA-256 via mbedtls (incremental)
   void*    _shaCtx = nullptr;

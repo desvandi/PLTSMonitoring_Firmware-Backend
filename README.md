@@ -117,7 +117,37 @@ mendadak karena tidak ada kartu kredit terpasang.
   x2, dan **bug kelas urutan-include** (guard `#if PLTS_ENABLE_*` dievaluasi
   sebelum `Config.h` -> `Rs485Console.cpp` ter-compile kosong namun
   direferensikan — 5 header diketatkan); verifikasi compile PZEM-on
-  (`-DPLTS_ENABLE_PZEM_AC=1`) juga hijau — CI kembali hijau penuh) —
+  (`-DPLTS_ENABLE_PZEM_AC=1`) juga hijau — CI kembali hijau penuh;
+  **wave 13 (kompatibilitas armada campuran + OTA end-to-end) 2026-09-03**:
+  W13-1 proteksi rollback OTA modular **inert** — `markBootHealthy()` tidak
+  pernah memanggil `esp_ota_mark_app_valid_cancel_rollback()` padahal
+  `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` di sdkconfig arduino-esp32
+  (terverifikasi) → **setiap OTA modular diam-diam kembali ke versi lama saat
+  reset pertama pasca-update** (image PENDING_VERIFY tak pernah
+  dikonfirmasi), plus counter `boot_att` di-increment saat upload (bukan per
+  boot) + jalur download tak pernah menulisnya → threshold 3 tak terjangkau,
+  `triggerRollback()` dead code; fix: `markBootHealthyIfPending()` dari loop
+  1 s (jendela sehat 60 s, sejajar kriteria aktivasi firmware-generic,
+  `Core::OTA_HEALTHY_AFTER_MS`) + hitung per boot PENDING_VERIFY; W13-2
+  manifest OTA **tak punya diskriminasi pohon firmware** — satu manifest
+  aktif disajikan ke SEMUA perangkat; binari generic 1,098 MB muat di slot
+  OTA kedua pohon → cross-flash nyata lewat domain trust HMAC bersama;
+  fix: kolom 7 `target` di sheet Ota (`''`=fleet-wide|`generic`|`modular`,
+  whitelist fail-closed) + kolom 6 `firmware_type` di sheet Devices +
+  `latestManifestForTarget_` (perangkat tak-dideklarasikan hanya melihat
+  manifest fleet-wide) + self-check sisi perangkat generic
+  (`REFUSED` sebelum unduh) & modular (MQTT ota.start + ota.check) —
+  migrasi append-only `migrateAppendHeader_`; W13-3 sheet OtaEvents
+  write-only sejak WAVE-6 + kata kerja `VERIFICATION_FAILED` yang
+  didokumentasikan state-machine modular ditolak 400 oleh word list — fix:
+  aksi baca `OTA_LOG` (per-perangkat, terbaru-dulu, berbatas, auth+registrasi
+  digerbangi) + `VERIFICATION_FAILED` masuk word list + panel OTA PWA kini
+  membaca event nyata GAS (fallback mock) + opsi target di panel publish;
+  W13-4 komentar partisi generic salah ("1.5MB each" — default.csv = 1,25 MB
+  per slot OTA); **rilis v1.7.1** kedua pohon (parity) + binari sync ke PWA
+  via `release_firmware_generic.py`; terkunci oleh
+  `test_wave13_ota_mixedfleet.py` (35 check: semantik rollback, kontrak
+  target 6-skenario perilaku, vocabulary, integritas rilis) —
   verdict **PRODUCTION GRADE**. Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
@@ -425,6 +455,25 @@ Hasil akhir hanya dari event `OTA_STATUS` (ACCEPTED → DOWNLOADING →
 VERIFIED → APPLIED / ROLLBACK); state machine lengkap terdokumentasi di
 `OtaManager.h` + `MqttOtaHandler.cpp`. Operator tidak boleh menganggap
 ACCEPTED = terpasang.
+
+> **[W13-1] Aktivasi pasca-OTA (jalur modular):** image baru dikonfirmasi
+lewat `esp_ota_mark_app_valid_cancel_rollback()` SETELAH jendela sehat 60 s
+(dipanggil dari loop utama 1 s — `markBootHealthyIfPending`). Tanpa
+konfirmasi ini bootloader (rollback aktif di sdkconfig arduino-esp32)
+mengembalikan partisi lama pada reset berikutnya. Sejak v1.7.1 kriteria
+aktivasi kedua pohon identik: 60 s runtime stabil = sehat (mode AP pun
+dihitung sehat — kesehatan BOOT, bukan konektivitas).
+
+> **[W13-2] Target manifest untuk armada campuran.** Panel publish PWA kini
+menawarkan **Target Armada**: `Semua armada` (perilaku lama — setiap
+perangkat), `generic`, atau `modular`. GAS menyajikan manifest bertarget
+hanya ke perangkat yang kolom `firmware_type` di sheet **Devices**
+dideklarasikan sesuai; perangkat yang kolomnya kosong hanya menerima
+manifest fleet-wide (fail-closed — perangkat tak-dideklarasikan tidak akan
+pernah diflash image spesifik-pohon). Perangkat generic ≥ v1.7.1 dan
+modular juga menolak manifest yang targetnya tidak cocok (event `REFUSED`
+jujur). **URUTAN DEPLOY**: redeploy `Code.gs` SEBELUM publish manifest
+bertarget (GAS harus memancarkan field `target` lebih dulu).
 
 **Rilis versi generic baru:** CI mem-build binari hanya di repo ini; sinkron
 ke PWA lewat skrip resmi:

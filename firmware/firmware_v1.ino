@@ -386,8 +386,10 @@ void setup() {
   // [FW-20] Seed the in-RAM OTA history with this boot's record
   Web::ExtraHandlers::noteBootEvent();
 
-  // OTA mark healthy (brief §72 — auto-rollback)
-  Services::ota.markBootHealthy();
+  // [W13-1] OTA boot-health confirmation is driven from the 1 s main loop
+  // (markBootHealthyIfPending): a fresh PENDING_VERIFY image is confirmed via
+  // esp_ota_mark_app_valid_cancel_rollback() only after a 60 s stable window.
+  // Confirming here in setup() would mark a crash-looping image healthy.
 
   // Mutexes & queues
   telemetryMutex = xSemaphoreCreateMutex();
@@ -467,6 +469,9 @@ void setup() {
 //=============================================================================
 void loop() {
   esp_task_wdt_reset();
+  // [W13-1] OTA image confirmation: no-op (two compares) until the 60 s
+  // window elapses, then confirms PENDING_VERIFY images exactly once per boot.
+  Services::ota.markBootHealthyIfPending();
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
 

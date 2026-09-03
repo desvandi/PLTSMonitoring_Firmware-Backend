@@ -153,8 +153,20 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     size_t size = (size_t)(doc["size"] | (uint32_t)0);
     const char* sha256 = doc["sha256"] | "";
     const char* signature = doc["signature"] | "";
-
-    if (url[0] == '\0' || fwVersion[0] == '\0' || sha256[0] == '\0') {
+    // [W13-2] Mixed-fleet self-check: an ota.start command explicitly
+    // targeted at the OTHER firmware tree ('generic') must never flash here.
+    // '' / absent = fleet-wide (pre-W13 behavior). GAS filters by
+    // DEVICES!firmware_type too — this is the device-side second layer.
+    String target(doc["target"] | "");
+    target.trim();
+    target.toLowerCase();
+    if (target.length() > 0 && target != "modular") {
+      ok = false;
+      message = "manifest target '" + target + "' does not match this device (modular)";
+      _rejected++;
+      Services::Log.append(Core::LogType::OtaFailed,
+                            "MQTT OTA start refused: " + message, -1);
+    } else if (url[0] == '\0' || fwVersion[0] == '\0' || sha256[0] == '\0') {
       ok = false;
       message = "missing required fields (url, fwVersion, sha256)";
     } else {

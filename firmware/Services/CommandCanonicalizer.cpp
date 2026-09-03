@@ -37,7 +37,7 @@ static const CommandDef COMMAND_REGISTRY[] = {
   {"alarm", "acknowledgeAll",
     {nullptr}},
   {"ota", "start",
-    {"url","version","size","sha256","signature", nullptr}},
+    {"url","version","size","sha256","signature","target", nullptr}},
   {"ota", "check",
     {"url","version", nullptr}},
   {"system", "reboot",

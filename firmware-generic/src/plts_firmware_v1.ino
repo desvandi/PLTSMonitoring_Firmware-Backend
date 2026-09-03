@@ -1,6 +1,18 @@
-/* PLTS Monitor Generic Firmware v1.7.0
+/* PLTS Monitor Generic Firmware v1.7.1
  * Flash once. Runtime WiFi/GAS credentials live in LittleFS /config.json.
  * Monitoring only: this firmware never controls an inverter, charger, or relay.
+ *
+ * v1.7.1 additions (W13 — mixed-fleet OTA hardening):
+ *   - [W13-2] OTA manifest target self-check: Code.gs now serves a `target`
+ *     field ('' = fleet-wide, 'generic' | 'modular') with every manifest. A
+ *     manifest explicitly targeted at the other firmware tree is REFUSED
+ *     here (honest OTA_STATUS event) BEFORE any download — closing the
+ *     mixed-fleet cross-flash where a generic device would pull a modular
+ *     image (or vice versa) through the shared HMAC trust domain and retry
+ *     every hour. DEPLOY ORDER: redeploy Code.gs BEFORE publishing a
+ *     targeted manifest (GAS must emit the target field first).
+ *   - [W13-4] platformio.ini partition comment corrected (default.csv OTA
+ *     slots are 1.25 MB each, not 1.5 MB).
  *
  * v1.7.0 additions (P1-REMEDIATION / audit wave — sensor fail-closed):
  *   - [P1-SC1] NEW CONFIG field `sensorFailPolicy` (0/1, default 1).
@@ -120,7 +132,7 @@
 //   • Arus AC   : ACS712-30A (versi Modified 3.3V) di ADC GPIO 35
 //                 (AC_CURRENT_PIN), sampling RMS 2 siklus @ 50 Hz.
 // ============================================================================
-static const char*    FIRMWARE_VERSION   = "1.7.0";
+static const char*    FIRMWARE_VERSION   = "1.7.1";  // W13: OTA mixed-fleet target self-check (manifest 'target' → honest REFUSED)
 static const char*    CONFIG_PATH        = "/config.json";
 static const uint8_t  RESET_PIN          = 0;         // BOOT button
 static const uint8_t  LED_PIN            = 2;         // Built-in LED
@@ -239,6 +251,11 @@ struct OtaManifest {
   String sha256;
   String hmac;
   size_t size = 0;
+  // [W13-2] Manifest target ('' = fleet-wide, 'generic', 'modular').
+  // Echoed by Code.gs so the device can self-check even when the operator
+  // has not (yet) filled firmware_type in the DEVICES sheet — defense in
+  // depth against cross-flashing in a mixed fleet.
+  String target;
 };
 
 WebServer server(80);
@@ -1475,6 +1492,22 @@ OtaManifest fetchOtaManifest() {
   m.sha256  = data["sha256"].as<String>();
   m.hmac    = data["hmac"].as<String>();
   m.size    = data["size"] | 0;
+  m.target  = data["target"].as<String>();
+  m.target.trim();
+  m.target.toLowerCase();
+  // [W13-2] Mixed-fleet self-check: a manifest explicitly targeted at the
+  // OTHER firmware tree must never flash here. Code.gs already filters by
+  // the device's declared DEVICES!firmware_type — this is the second layer
+  // (an undeclared/legacy deployment still gets an honest REFUSED instead
+  // of a cross-flash). Fleet-wide manifests ('') pass as before.
+  if (m.target.length() > 0 && m.target != "generic") {
+    Serial.printf("[OTA] manifest targets '%s' tree — refusing\n", m.target.c_str());
+    reportOtaStatus("REFUSED", m.version,
+                    String("manifest target '") + m.target +
+                    "' does not match this device (generic)");
+    m.valid = false;
+    return m;
+  }
   m.valid   = m.version.length() && m.url.startsWith("https://") &&
               m.sha256.length() == 64 && m.hmac.length() == 64;
   return m;

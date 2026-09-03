@@ -61,6 +61,19 @@
  *            its existing ingest cadence (zero extra polls). Telemetry rows
  *            gain v1.7.0 columns (i_ac_gen + emergency state) appended at the
  *            end — old sheets migrate in place, old rows read as UNKNOWN.
+ *   [W13 2026-09] Mixed-fleet + OTA end-to-end hardening:
+ *            (a) OTA manifest targeting — the Ota sheet gains a 7th column
+ *            "target" ('generic'|'modular'|'' = fleet-wide) and the Devices
+ *            sheet a 6th column "firmware_type". otaGetManifest_ serves each
+ *            device the NEWEST manifest whose target matches its declared
+ *            tree; an undeclared device sees only fleet-wide manifests
+ *            (fail-closed — no cross-flashing between firmware trees).
+ *            (b) OTA_LOG — read action for the OtaEvents sheet (write-only
+ *            since WAVE-6): per-device, newest-first, bounded, auth-gated.
+ *            (c) OTA_STATUS accepts VERIFICATION_FAILED (documented by the
+ *            modular OTA state machine; the word list 400'd it before).
+ *            All three are append-only + backward compatible: pre-W13 rows
+ *            and sheets read as '' / fleet-wide / undeclared.
  *
  * Response envelope (uniform across ALL actions):
  *   { status: 'SUCCESS'|'ERROR', code: number, data?: object|null,
@@ -228,7 +241,11 @@ const TELEMETRY_HEADER_V1_7_LEN = 36;   // column count before the [W12-2] meter
 
 // last_nonce/last_ts are VESTIGIAL (schema-compat only, no longer written
 // since WAVE-4 / GAS-2-X — replay protection lives in the nonce cache).
-const DEVICES_HEADER = ['device_key', 'secret', 'label', 'last_nonce', 'last_ts'];
+// [W13-2] Column 6 "firmware_type" (optional, '' = undeclared): 'generic' |
+// 'modular'. Drives manifest targeting in a mixed fleet — see
+// otaGetManifest_. Appended so existing 5-column sheets keep valid indices;
+// migrateAppendHeader_ extends old sheets in place (missing column reads '').
+const DEVICES_HEADER = ['device_key', 'secret', 'label', 'last_nonce', 'last_ts', 'firmware_type'];
 const SEQ_LEDGER_HEADER = ['device_key', 'expected_next', 'highest_seq', 'dup_count', 'gap_count', 'gaps_json'];
 
 const PROTOCOL_VERSION = '2';
@@ -351,6 +368,20 @@ function doPost(e) {
         message: payload.message !== undefined ? payload.message : body.message
       }));
     }
+    // [W13-3] OTA_LOG — read back a device's OTA events (newest first). The
+    // OtaEvents sheet has been write-only since WAVE-6; this is the read side
+    // the operator panel was missing (auth + registration gated, like
+    // EMERGENCY_LOG). Token clients send limit top-level; HMAC clients ride
+    // it inside the signed `data` string.
+    if (action === 'OTA_LOG') {
+      const dk = resolveDeviceKey_(body, auth);
+      const gate = requireRegisteredDevice_(dk);
+      if (gate) return json_(gate);
+      const payload = bodyPayload_(body);
+      const limit = Math.min(Number(
+        (payload.limit !== undefined ? payload.limit : body.limit)) || 20, 100);
+      return json_(otaReadEvents_(dk, limit));
+    }
     if (action === 'CALIBRATION_PUBLISH') {
       const dk = resolveDeviceKey_(body, auth);
       const gate = requireRegisteredDevice_(dk);
@@ -443,9 +474,10 @@ function doPost(e) {
 
     return json_(resp_(400,
       'Unknown action. Supported: PING, TELEMETRY, LATEST, HISTORY, DAILY, ' +
-      'SEQ_STATUS, OTA_MANIFEST, OTA_PUBLISH, OTA_STATUS, CALIBRATION_PUBLISH, ' +
-      'CALIBRATION_PENDING, CALIBRATION_ACK, EMERGENCY_COMMAND, ' +
-      'EMERGENCY_PENDING, EMERGENCY_ACK, EMERGENCY_EVENT, EMERGENCY_LOG.', null));
+      'SEQ_STATUS, OTA_MANIFEST, OTA_PUBLISH, OTA_STATUS, OTA_LOG, ' +
+      'CALIBRATION_PUBLISH, CALIBRATION_PENDING, CALIBRATION_ACK, ' +
+      'EMERGENCY_COMMAND, EMERGENCY_PENDING, EMERGENCY_ACK, EMERGENCY_EVENT, ' +
+      'EMERGENCY_LOG.', null));
   } catch (err) {
     return json_(resp_(500, String(err && err.message ? err.message : err), null));
   }
@@ -1422,7 +1454,12 @@ function maybeSendTelegramAlert_(message, cooldownKey) {
 // ----------------------------------------------------------------------------
 
 const OTA_SHEET = 'Ota';
-const OTA_HEADER = ['version', 'url', 'sha256', 'hmac', 'size', 'published_at'];
+// [W13-2] Column 7 "target" (optional, '' = fleet-wide): 'generic' | 'modular'.
+// Appended — old 6-column sheets keep valid indices; missing column reads ''
+// (fleet-wide, the pre-W13 behavior). migrateAppendHeader_ extends in place.
+const OTA_HEADER = ['version', 'url', 'sha256', 'hmac', 'size', 'published_at', 'target'];
+// Valid manifest targets (fail-closed whitelist — anything else 400s).
+const OTA_TARGETS = ['', 'generic', 'modular'];
 // [WAVE-6 / FW6-9] First firmware version that verifies the manifest hmac
 // with the per-device derived key HMAC-SHA256(AUTH_TOKEN, device_key).
 const OTA_PER_DEVICE_KEY_MIN_FW = [1, 5, 4];
@@ -1477,7 +1514,25 @@ function otaGetManifest_(deviceKey, fwVersion) {
   if (rows.length < 2) {
     return resp_(404, 'No OTA manifest published yet', null);
   }
-  const row = rows[rows.length - 1];
+  // [W13-2] Mixed-fleet discrimination. The single active manifest is now
+  // "the newest manifest whose target matches the CALLING device":
+  //   manifest.target == ''                → visible to every device
+  //   manifest.target == 'generic'         → visible only to devices whose
+  //                                           DEVICES!firmware_type == 'generic'
+  //   manifest.target == 'modular'         → same, mirrored
+  //   device firmware_type == '' (unset)   → sees only fleet-wide manifests —
+  //                                           fail-closed: an undeclared device
+  //                                           never receives a tree-specific
+  //                                           image it cannot self-identify.
+  // This closes the mixed-fleet cross-flash: firmware-generic pulling a
+  // modular image (or vice versa) passes the HMAC chain today because the
+  // signing domain is shared — only the image size / partition layout limits
+  // the damage, and the update retries hourly forever.
+  const deviceType = String(deviceFirmwareType_(deviceKey) || '').toLowerCase().trim();
+  const row = latestManifestForTarget_(rows, deviceType);
+  if (!row) {
+    return resp_(404, 'No OTA manifest published for this device type yet', null);
+  }
   const version = String(row[0] || '');
   const url     = String(row[1] || '');
   const sha256  = String(row[2] || '');
@@ -1501,8 +1556,46 @@ function otaGetManifest_(deviceKey, fwVersion) {
     sha256: sha256,
     hmac: hmac,
     size: Number(row[4] || 0),
+    // [W13-2] echoed so capable firmware can self-check the target too.
+    target: String(row[6] || '').toLowerCase(),
     published_at: row[5] instanceof Date ? row[5].toISOString() : String(row[5] || '')
   });
+}
+
+/**
+ * [W13-2] Newest manifest row whose target is fleet-wide ('') or exactly the
+ * device's declared firmware type. Scans newest-first so a targeted publish
+ * outranks an older fleet-wide one for matching devices without hiding it
+ * from the rest of the fleet.
+ */
+function latestManifestForTarget_(rows, deviceType) {
+  for (let i = rows.length - 1; i >= 1; i--) {
+    const target = String(rows[i][6] || '').toLowerCase().trim();
+    if (target === '' || target === deviceType) return rows[i];
+  }
+  return null;
+}
+
+/**
+ * [W13-2] Optional DEVICES column 6 firmware_type ('generic'|'modular'|'').
+ * Missing sheet column / unregistered device / empty cell → '' (undeclared).
+ */
+function deviceFirmwareType_(deviceKey) {
+  if (!deviceKey) return '';
+  try {
+    const sheet = getOrCreateSheet_(DEVICES_SHEET, DEVICES_HEADER);
+    const last = sheet.getLastRow();
+    if (last < 2) return '';
+    const vals = sheet.getRange(2, 1, last - 1, 6).getValues();
+    for (let i = 0; i < vals.length; i++) {
+      if (String(vals[i][0]).trim() === String(deviceKey).trim()) {
+        return String(vals[i][5] || '').trim();
+      }
+    }
+  } catch (err) {
+    try { console.warn('deviceFirmwareType_ failed: ' + err); } catch (e2) {}
+  }
+  return '';
 }
 
 function otaPublishManifest_(manifest) {
@@ -1515,6 +1608,14 @@ function otaPublishManifest_(manifest) {
   if (!String(manifest.url).startsWith('https://')) {
     return resp_(400, 'OTA manifest URL must be HTTPS', null);
   }
+  // [W13-2] Optional firmware-tree target. '' / absent = fleet-wide (the
+  // pre-W13 behavior, fully backward compatible). Anything outside the
+  // whitelist 400s — a typo like 'genric' would otherwise silently publish a
+  // manifest NO device can ever see.
+  let target = String(manifest.target || '').toLowerCase().trim();
+  if (OTA_TARGETS.indexOf(target) === -1) {
+    return resp_(400, "manifest.target must be '' (fleet-wide), 'generic' or 'modular'", null);
+  }
   const sheet = otaSheet_();
   sheet.appendRow([
     String(manifest.version),
@@ -1522,11 +1623,13 @@ function otaPublishManifest_(manifest) {
     String(manifest.sha256).toLowerCase(),
     String(manifest.hmac).toLowerCase(),
     Number(manifest.size || 0),
-    new Date()
+    new Date(),
+    target
   ]);
   rotateOtaManifests_();   // [WAVE-4 / GAS-2-V] bound growth; newest (active) row always survives
   return resp_(200, 'OTA manifest published', {
     version: String(manifest.version),
+    target: target,
     published_at: new Date().toISOString()
   });
 }
@@ -1543,7 +1646,11 @@ function otaLogStatus_(payload) {
   // [WAVE-6 / FW6-1] REFUSED joins the set: anti-downgrade / non-semver
   // refusals previously produced zero server-side signal — the operator
   // pushed a manifest and waited forever.
-  const validEvents = ['ACTIVATED', 'ROLLBACK', 'BOOT_FAILED', 'DOWNLOAD_FAILED', 'REFUSED'];
+  // [W13-3] VERIFICATION_FAILED joins the set: the modular tree's OTA state
+  // machine documents it (SHA-256 / Ed25519 failure) — a documented event
+  // that the word list rejected with 400 would split the contract again.
+  const validEvents = ['ACTIVATED', 'ROLLBACK', 'BOOT_FAILED', 'DOWNLOAD_FAILED',
+                       'REFUSED', 'VERIFICATION_FAILED'];
   if (validEvents.indexOf(event) === -1) {
     return resp_(400, 'Invalid OTA event: ' + event, null);
   }
@@ -1557,6 +1664,34 @@ function otaLogStatus_(payload) {
   ]);
   rotateOtaEvents_();   // [WAVE-4 / GAS-2-V] bound growth
   return resp_(200, 'OTA event logged', null);
+}
+
+/**
+ * [W13-3] OTA_LOG — read back the OtaEvents sheet for ONE device, newest
+ * first, bounded. The sheet was write-only until now: firmware-generic has
+ * reported ACTIVATED / ROLLBACK / DOWNLOAD_FAILED / REFUSED here since
+ * WAVE-6, but no action could read them back — the operator had to open the
+ * spreadsheet by hand. Reads are auth-scoped exactly like EMERGENCY_LOG.
+ */
+function otaReadEvents_(deviceKey, limit) {
+  const sheet = otaEventsSheet_();
+  const last = sheet.getLastRow();
+  if (last < 2) {
+    return resp_(200, 'No OTA events yet', { deviceKey: deviceKey, events: [] });
+  }
+  const vals = sheet.getRange(2, 1, last - 1, OTA_EVENTS_HEADER.length).getValues();
+  const events = [];
+  for (let i = vals.length - 1; i >= 0 && events.length < limit; i--) {
+    const rowDk = String(vals[i][1] || safeConfig_('DEVICE_KEY'));
+    if (String(rowDk).trim() !== String(deviceKey).trim()) continue;
+    events.push({
+      timestamp: vals[i][0] instanceof Date ? vals[i][0].toISOString() : String(vals[i][0] || ''),
+      event: String(vals[i][2] || ''),
+      version: String(vals[i][3] || ''),
+      message: String(vals[i][4] || '')
+    });
+  }
+  return resp_(200, 'OTA events', { deviceKey: deviceKey, events: events });
 }
 
 // ----------------------------------------------------------------------------
@@ -2057,7 +2192,30 @@ function getOrCreateSheet_(name, header) {
   // v1.6.0 header migration: existing sheets with the pre-1.6 header get the
   // new columns APPENDED (old indices unchanged — rows keep their meaning).
   if (name === LOG_SHEET) migrateTelemetryHeader_(sheet, header);
+  // [W13-2] append-only migrations for the OTA manifest target column and the
+  // DEVICES firmware_type column. Old shapes are extended in place; rows that
+  // predate the column read '' (fleet-wide / undeclared) — honest defaults.
+  if (name === OTA_SHEET) migrateAppendHeader_(sheet, header, 6);
+  if (name === DEVICES_SHEET) migrateAppendHeader_(sheet, header, 5);
   return sheet;
+}
+
+/**
+ * [W13-2] Generic append-only header migration (same discipline as
+ * migrateTelemetryHeader_): only extend a sheet whose current width is at
+ * least minCols (a KNOWN prior shape) — anything narrower is an unexpected
+ * shape and must not be touched. Values in the new columns default to ''.
+ */
+function migrateAppendHeader_(sheet, header, minCols) {
+  try {
+    const lastCol = sheet.getLastColumn();
+    if (lastCol >= header.length) return;       // already migrated
+    if (lastCol < minCols) return;               // unexpected shape — do not touch
+    sheet.getRange(1, lastCol + 1, 1, header.length - lastCol)
+        .setValues([header.slice(lastCol)]);
+  } catch (err) {
+    try { console.warn('Header migration failed for ' + sheet.getName() + ': ' + err); } catch (e2) {}
+  }
 }
 
 /** Extend a pre-1.6 Telemetry sheet header with the v1.6.0 BMS columns. */

@@ -149,7 +149,27 @@ void OtaManager::begin() {
     _bootAttempts = p.getUInt("boot_att", 0);
     p.end();
   }
-  Serial.printf("[OTA] init: boot_attempts=%u\n", _bootAttempts);
+  _bootStartedAt = millis();
+  _markedValid   = false;
+
+  // [W13-1] A boot attempt counts ONLY when the running image is a fresh,
+  // unconfirmed OTA image (PENDING_VERIFY). The old code incremented the
+  // counter at UPLOAD time (once per upload, never per boot) — the threshold
+  // was unreachable and triggerRollback() was dead code. The download path
+  // never touched the counter at all.
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  _pendingVerify = (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+                    state == ESP_OTA_IMG_PENDING_VERIFY);
+  if (_pendingVerify) {
+    _bootAttempts++;
+    if (p.begin("plts_ota", false)) {
+      p.putUInt("boot_att", _bootAttempts);
+      p.end();
+    }
+    Serial.printf("[OTA] pending-verify boot try #%u\n", (unsigned)_bootAttempts);
+  }
+
   if (shouldRollback()) {
     Serial.println(F("[OTA] Boot attempts exceeded — rolling back"));
     triggerRollback();
@@ -166,6 +186,27 @@ void OtaManager::triggerRollback() {
   esp_ota_mark_app_invalid_rollback_and_reboot();
 }
 
+void OtaManager::markBootHealthyIfPending() {
+  // [W13-1] One-shot per boot. Called from the 1 s main loop — cheap until
+  // the window elapses (two integer compares), then settles.
+  if (_markedValid) return;
+  if (millis() - _bootStartedAt < Core::OTA_HEALTHY_AFTER_MS) return;
+
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
+      state == ESP_OTA_IMG_PENDING_VERIFY) {
+    // THE missing call: without it the image stays PENDING_VERIFY and the
+    // bootloader reverts it on the next reset — a "successful" OTA that
+    // silently goes back to the old version after any reboot/power blip.
+    esp_ota_mark_app_valid_cancel_rollback();
+    Log.append(Core::LogType::OtaSuccess,
+               "OTA image ACTIVATED — rollback cancelled after healthy window", 0);
+  }
+  markBootHealthy();          // reset the boot-attempt ledger
+  _markedValid = true;
+}
+
 void OtaManager::markBootHealthy() {
   Preferences p;
   if (p.begin("plts_ota", false)) {
@@ -173,7 +214,7 @@ void OtaManager::markBootHealthy() {
     p.end();
   }
   _bootAttempts = 0;
-  Log.append(Core::LogType::Boot, "Boot healthy — rollback cancelled", 0);
+  Log.append(Core::LogType::Boot, "Boot healthy — boot-attempt ledger reset", 0);
 }
 
 bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
@@ -204,13 +245,11 @@ bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
       return false;
     }
   }
-  // Increment boot_attempts — if this firmware fails to boot cleanly, rollback
-  Preferences p;
-  if (p.begin("plts_ota", false)) {
-    _bootAttempts = p.getUInt("boot_att", 0) + 1;
-    p.putUInt("boot_att", _bootAttempts);
-    p.end();
-  }
+  // [W13-1] The boot-attempt counter is NO LONGER incremented here. It is
+  // incremented in begin() when the running image is actually PENDING_VERIFY
+  // (once per boot of a fresh image) — see the [W13-1] note there. Incrementing
+  // at upload time wrote the counter exactly once per upload and could never
+  // reach OTA_MAX_BOOT_ATTEMPTS, making the auto-rollback path unreachable.
   _state = OtaState::Downloading;
   Log.append(Core::LogType::OtaStarted,
              "OTA upload started: v=" + _expectedVersion + " size=" + totalSize, 0);
@@ -526,6 +565,20 @@ void OtaManager::tickManifestCheck() {
     _state = OtaState::Failed;
     Log.append(Core::LogType::OtaFailed,
                "OTA check failed: " + _lastError, 0);
+    return;
+  }
+
+  // [W13-2] Mixed-fleet self-check: a manifest explicitly targeted at the
+  // other firmware tree must never flash here ('' = fleet-wide, passes).
+  String manifestTarget(doc["target"] | "");
+  manifestTarget.trim();
+  manifestTarget.toLowerCase();
+  if (manifestTarget.length() > 0 && manifestTarget != "modular") {
+    _lastError = "manifest target '" + manifestTarget +
+                 "' does not match this device (modular)";
+    _state = OtaState::Failed;
+    Log.append(Core::LogType::OtaFailed,
+               "OTA check refused: " + _lastError, 0);
     return;
   }
 

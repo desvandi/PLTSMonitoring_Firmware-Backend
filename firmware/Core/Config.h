@@ -84,7 +84,7 @@ namespace Core {
 // ---------------------------------------------------------------------------
 // Versioning (brief §74) — single source of truth
 // ---------------------------------------------------------------------------
-static constexpr const char* FIRMWARE_VERSION        = "1.7.0";  // modular line parity with firmware-generic 1.7.0: E-WAVE emergency layer ported (relay/E-stop/GAS HMAC command channel; sensorFailPolicy fail-closed; reserved genset current channel). Still carries every 1.6.3 audit-noise fix. Separate product line — see scripts/test_version_identity.py G7.
+static constexpr const char* FIRMWARE_VERSION        = "1.7.1";  // W13: OTA boot-health fix (PENDING_VERIFY confirm via esp_ota_mark_app_valid_cancel_rollback + 60 s window; boot-attempt counting per boot, not per upload) + mixed-fleet manifest target self-check. Parity line with firmware-generic 1.7.1. Separate product line — see scripts/test_version_identity.py G7.
 static constexpr const char* FIRMWARE_BUILD_DATE     = __DATE__ " " __TIME__;
 static constexpr const char* PROTOCOL_VERSION         = "1";     // protocol v1 (PLTS)
 static constexpr const char* CONFIG_SCHEMA_VERSION    = "1";
@@ -320,6 +320,10 @@ static constexpr uint8_t  GAS_MAX_POSTS_PER_HOUR = 10;
 static constexpr uint32_t OTA_MAX_SIZE          = 0x170000;  // 1.4375 MB
 static constexpr uint8_t  OTA_MAX_BOOT_ATTEMPTS = 3;
 static constexpr uint16_t OTA_TIMEOUT_MS        = 60000;
+// [W13-1] A fresh OTA image must run stably this long before it is confirmed
+// (esp_ota_mark_app_valid_cancel_rollback). Matches firmware-generic's
+// OTA_HEALTHY_AFTER_MS so both trees share one activation criterion.
+static constexpr uint32_t OTA_HEALTHY_AFTER_MS  = 60000;
 static constexpr const char* OTA_ALLOWED_HOSTS[] = {
   "github.com",
   "raw.githubusercontent.com",

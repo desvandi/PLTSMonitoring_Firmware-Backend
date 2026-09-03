@@ -1,6 +1,6 @@
 {
   "name": "PLTS Monitor Firmware",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "home_assistant_domain": "plts_monitor",
   "funding_url": "https://plts.alansa.com",
   "new_install_prompt_erase": true,
@@ -17,7 +17,7 @@
           "offset": 32768
         },
         {
-          "path": "bin/plts_firmware_v1.7.0.bin",
+          "path": "bin/plts_firmware_v1.7.1.bin",
           "offset": 65536
         }
       ]
