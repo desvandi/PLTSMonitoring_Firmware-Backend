@@ -110,7 +110,14 @@ mendadak karena tidak ada kartu kredit terpasang.
   `AcMeterMeasurement` + kartu TERUKUR di PWA; terkunci oleh
   `test_wave12_contract_regression.py` (26 check: 13-field 4-lapis,
   telemetri darurat nested+flat, PZEM end-to-end, genset, vocabulary,
-  integritas header, drift flat-path, `node --check` GAS)) —
+  integritas header, drift flat-path, `node --check` GAS); W12-3 build tree
+  modular rusak senyap sejak port E-WAVE (1780736 — job CI merah 3 run
+  beruntun, termasuk commit docs-only) — diperbaiki: include ArduinoJson di
+  `GasEmergencyChannel.h`, include `Services/TimeManager.h`, `raise().c_str()`
+  x2, dan **bug kelas urutan-include** (guard `#if PLTS_ENABLE_*` dievaluasi
+  sebelum `Config.h` -> `Rs485Console.cpp` ter-compile kosong namun
+  direferensikan — 5 header diketatkan); verifikasi compile PZEM-on
+  (`-DPLTS_ENABLE_PZEM_AC=1`) juga hijau — CI kembali hijau penuh) —
   verdict **PRODUCTION GRADE**. Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
