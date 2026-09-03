@@ -88,7 +88,14 @@ mendadak karena tidak ada kartu kredit terpasang.
   2026-08; **remediasi P1/P2 + wave audit 7-10 pada 2026-09-02**: sensor
   fail-closed `sensorFailPolicy` v1.7.0, identitas versi single-source (guard
   CI), ADMIN_TOKEN sesi di PWA, rotasi EmergencyQueue W10, guard TLS-only
-  MQTT W7-1) — verdict **PRODUCTION GRADE**. Arsip laporan audit historis
+  MQTT W7-1; **wave 11 (audit MQTT/TLS menyeluruh) 2026-09-03**: W11-1
+  kontrak deviceId lintas-lapis — PWA kini menerima `PLTS-XXXXXX` (6 hex,
+  bentuk nyata firmware modular) atau `PLTS-XXXXXXXX` (8 hex) — sebelumnya
+  PWA menuntut 8 hex = mode realtime MQTT tak pernah bisa tersambung; W11-6
+  peringatan broker publik dev di `platformio.ini`; verifikasi menyeluruh
+  sisi firmware: TLS fail-closed, pinning GAS GTS Root R4, OTA allowlist +
+  CA + Ed25519, LWT + subscription persisten, AP WPA2 CSPRNG — semua lulus) —
+  verdict **PRODUCTION GRADE**. Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
   terserap ke kode, README ini, dan panduan PDF.
@@ -162,6 +169,15 @@ C++ lokal. Total waktu ±30 menit.
 
 Untuk operasi berkelanjutan: realtime MQTT, alarm BMS, provenance SOC,
 auth per-device, OTA Ed25519.
+
+> **Kontrak identitas deviceId (W11-1, 2026-09-03):** firmware modular
+> membangkitkan identitas `PLTS-XXXXXX` (6 hex dari 24-bit bawah eFuse MAC,
+> `firmware_v1.ino`) — tidak dapat diubah operator; firmware-generic memakai
+> `device_key` operator (bebas bentuk, mis. `PLTS_MONITOR_01`); GAS menerima
+> string non-kosong yang ter-tanda-tangan HMAC. PWA (≥ 2026-09-03) menerima
+> **`PLTS-XXXXXX` (6 hex) atau `PLTS-XXXXXXXX` (8 hex)** untuk sambungan
+> realtime MQTT — charset tetap hex kapital sehingga wildcard MQTT
+> (`+`/`#`/`/`) mustahil masuk namespace topik.
 
 ```
   [3] ESP32 + firmware/ (production build)
@@ -299,7 +315,10 @@ pio run -e development    # atau staging
 pio run -e development -t upload
 ```
 
-- **development**: bebas secrets, broker publik uji.
+- **development**: bebas secrets, broker publik uji — **W11-6 (2026-09):
+  waspada** broker publik 1883 = plaintext + tanpa auth; telemetri sensor
+  nyata terbaca siapa pun di internet (detail + alternatif broker lokal:
+  komentar `[W11-6]` di `platformio.ini`).
 - **staging**: guard produksi aktif, kredensial contoh.
 - **production**: **fail-closed** — build menolak jalan tanpa MQTT TLS,
   kunci Ed25519, dan CORS bukan `*` (lihat §4.5).
@@ -1058,6 +1077,7 @@ bash push-alarm/tests/run-all.sh
 | `400 Unknown device_key` | Gerbang fail-closed aktif | Tambahkan baris di tab `Devices` (sama persis dengan `device_id` firmware/PWA) |
 | ARM ditolak dengan alasan `SENSOR_LOSS` | Sensor keselamatan (INA219/ACS712) hilang/tidak valid saat `sensorFailPolicy=1` (default v1.7.0) | Perilaku BENAR (fail-closed) — periksa wiring sensor (W.2/W.6, `P6`); kembalikan sensor sebelum ARM. Jangan set policy=0 di produksi |
 | PWA menolak koneksi MQTT `ws://` | Guard W7-1: hanya `wss://` di produksi | Gunakan URL broker `wss://` (port TLS 8884); `ws://` hanya `NODE_ENV=development` |
+| PWA menolak Device ID `PLTS-1A2B3C` | Sebelum W11-1: regex PWA menuntut 8 hex padahal firmware modular membangkitkan 6 hex | Update PWA ≥ 2026-09-03: kini diterima `PLTS-XXXXXX` (6 hex) **atau** `PLTS-XXXXXXXX` (8 hex) — masukkan persis ID dari Serial Monitor/`GET /api/status` |
 | Sheet `EmergencyQueue` tidak lagi memanjang | Rotasi W10-1: `EMERGENCY_QUEUE_MAX_ROWS` (default 200) memangkas baris settled oldest-first | Perilaku normal — baris PENDING/DELIVERED TIDAK PERNAH dihapus; riwayat lama tetap bisa diaudit dari `EmergencyEvents` |
 
 ---
