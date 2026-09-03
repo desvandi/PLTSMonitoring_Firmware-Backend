@@ -28,11 +28,18 @@
 #ifndef PLTS_COMM_RS485_CONSOLE_H
 #define PLTS_COMM_RS485_CONSOLE_H
 
+// [W12-fix] Config.h MUST come BEFORE the flag guard: this header is included
+// FIRST by Rs485Console.cpp, where no prior include has defined the flag —
+// an order-dependent guard silently compiled the whole console out (empty
+// translation unit) while other TUs (Config.h already loaded) kept the
+// references → undefined symbols at link. Include order can never decide
+// whether a feature exists.
+#include "../Core/Config.h"
+
 #if PLTS_ENABLE_RS485_CONSOLE
 
 #include <Arduino.h>
 #include <cstdint>
-#include "../Core/Config.h"
 
 namespace Comm {
 

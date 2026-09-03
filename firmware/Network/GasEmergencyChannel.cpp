@@ -18,6 +18,7 @@
 #include "../Core/Globals.h"
 #include "../Services/EmergencySupervisor.h"
 #include "../Services/LogService.h"
+#include "../Services/TimeManager.h"   // Services::timeManager (HMAC timestamp)
 #include "../Utils/Crypto.h"
 
 // Build-flag URL (empty = channel disabled — fail-closed). Same macro and

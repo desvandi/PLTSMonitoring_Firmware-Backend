@@ -29,11 +29,13 @@
 #ifndef PLTS_DRIVERS_PZEM004T_DRIVER_H
 #define PLTS_DRIVERS_PZEM004T_DRIVER_H
 
+// [W12-fix] Config.h comes BEFORE the feature guard: include order must never decide whether a feature exists (Rs485Console bug class — a TU including this header first compiled the whole feature out).
+#include "../Core/Config.h"
+
 #if PLTS_ENABLE_PZEM_AC
 
 #include <Arduino.h>
 #include <cstdint>
-#include "../Core/Config.h"
 
 namespace Drivers {
 

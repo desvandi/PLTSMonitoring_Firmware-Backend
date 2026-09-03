@@ -73,7 +73,7 @@ void EmergencySupervisor::begin() {
   }
 
   Services::alarms.raise(Core::AlarmCode::EMERGENCY_TRIP, Core::AlarmSeverity::Critical,
-       String("Emergency layer isolated at boot (") + _reason + ") — operator ARM required");
+       (String("Emergency layer isolated at boot (") + _reason + ") — operator ARM required").c_str());
   publishStatus();
 }
 
@@ -128,7 +128,7 @@ void EmergencySupervisor::_trip(const char* reason, const char* eventType,
   Drivers::emergencyRelay.setEnergized(false);   // ISOLATED — immediate, local GPIO
   _queueEventUnlocked(eventType, eventReason.length() > 0 ? eventReason : String(reason));
   Services::alarms.raise(Core::AlarmCode::EMERGENCY_TRIP, Core::AlarmSeverity::Critical,
-       String("EMERGENCY TRIP: ") + reason + " — relay isolated, operator ARM required");
+       (String("EMERGENCY TRIP: ") + reason + " — relay isolated, operator ARM required").c_str());
   Services::Log.append(Core::LogType::Info, String("EMERGENCY_TRIP reason=") + reason);
 }
 

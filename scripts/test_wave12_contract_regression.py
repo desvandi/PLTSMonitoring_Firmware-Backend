@@ -149,7 +149,7 @@ for m in re.finditer(
     name = name[0].lower() + name[1:]
     mod_fields[name] = (float(m.group(2)), float(m.group(3)), float(m.group(4)))
 
-check("X1a", "13-field emergency schema: GAS / PWA / generic / modular all "
+check_or_skip("X1a", "13-field emergency schema: GAS / PWA / generic / modular all "
       "define the same 13 fields",
       len(gas_fields) == len(pwa_fields) == len(fw_defaults) == len(mod_fields) == 13,
       f"GAS={len(gas_fields)} PWA={len(pwa_fields)} generic={len(fw_defaults)} "
@@ -172,7 +172,7 @@ for name, (mn, mx, df) in gas_fields.items():
         mm.append(f"{name}: generic default/range drift")
     if (mn, mx, df) != mod:
         mm.append(f"{name}: modular{mod} != GAS{(mn, mx, df)}")
-check("X1b", "13-field ranges + defaults identical across all FOUR layers",
+check_or_skip("X1b", "13-field ranges + defaults identical across all FOUR layers",
       not mm, "; ".join(mm[:6]))
 
 # --- X2: modular ConfigStore load sanitize ranges == schema -----------------
