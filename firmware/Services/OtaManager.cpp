@@ -6,6 +6,7 @@
 #include "../Core/Config.h"
 #include "../Core/Common.h"
 #include "../Utils/Crypto.h"
+#include "../Network/MqttTelemetryPublisher.h"
 #include "LogService.h"
 #include <Preferences.h>
 #include <esp_ota_ops.h>
@@ -219,6 +220,10 @@ bool OtaManager::shouldRollback() {
 void OtaManager::triggerRollback() {
   Log.append(Core::LogType::OtaFailed,
              "Boot health check failed — marking app invalid for rollback", 0);
+  // [P1-6] Emit ROLLBACK — the lifecycle's terminal failure state. The
+  // device is about to reboot into the previous image; this is the last
+  // event we can publish before reboot.
+  _emitLifecycle("ROLLBACK", "Boot health check failed — reverting to previous image");
   // [W14-2b] this path reports the rollback itself; consume the marker so
   // the reverted image's next boot does not double-report.
   Preferences p;
@@ -245,6 +250,10 @@ void OtaManager::markBootHealthyIfPending() {
     esp_ota_mark_app_valid_cancel_rollback();
     Log.append(Core::LogType::OtaSuccess,
                "OTA image ACTIVATED — rollback cancelled after healthy window", 0);
+    // [P1-6] Emit ACTIVATED — the lifecycle's terminal success state.
+    // _jobId may be empty if the device rebooted before reading NVS; in that
+    // case we still emit so GAS knows the running image is healthy.
+    _emitLifecycle("ACTIVATED", "Boot healthy window elapsed — image confirmed");
   }
   markBootHealthy();          // reset the boot-attempt ledger
   _markedValid = true;
@@ -294,6 +303,9 @@ bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
   _bytesProcessed = 0;
   _totalBytes = totalSize;
   _expectedVersion = expectedVersion;
+  // [P1-6] Start a new OTA job id — correlates lifecycle events on GAS.
+  // Format: "<unixTime>-<bytes>" (compact, sortable, unique per session).
+  _jobId = String(Services::timeManager.getUnixTime()) + "-" + String(totalSize);
   _shaCtx = malloc(sizeof(mbedtls_md_context_t));
   if (_shaCtx) {
     mbedtls_md_init((mbedtls_md_context_t*)_shaCtx);
@@ -313,6 +325,8 @@ bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
   _state = OtaState::Downloading;
   Log.append(Core::LogType::OtaStarted,
              "OTA upload started: v=" + _expectedVersion + " size=" + totalSize, 0);
+  _emitLifecycle("ACCEPTED", "REST OTA upload accepted");
+  _emitLifecycle("DOWNLOADING", "REST OTA upload in progress");
   return true;
 }
 
@@ -321,6 +335,7 @@ bool OtaManager::feedChunk(const uint8_t* data, size_t len) {
   if (Update.write((uint8_t*)data, len) != len) {
     _lastError = "Update.write failed";
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return false;
   }
   if (_shaCtx) {
@@ -341,14 +356,25 @@ bool OtaManager::finalizeUpload(const char* expectedSha256Hex,
     if (mbedtls_md_finish((mbedtls_md_context_t*)_shaCtx, _hashResult) != 0) {
       _lastError = "SHA-256 finish failed";
       _state = OtaState::Failed;
+      _emitLifecycle("FAILED", _lastError.c_str());
       return false;
     }
   }
-  if (!_validateSha256()) { _state = OtaState::Failed; return false; }
-  if (!_validateEd25519()) { _state = OtaState::Failed; return false; }
+  if (!_validateSha256()) {
+    _state = OtaState::Failed;
+    _emitLifecycle("FAILED", ("SHA-256 mismatch: " + _lastError).c_str());
+    return false;
+  }
+  if (!_validateEd25519()) {
+    _state = OtaState::Failed;
+    _emitLifecycle("FAILED", ("Ed25519: " + _lastError).c_str());
+    return false;
+  }
+  _emitLifecycle("VERIFIED", "SHA-256 + Ed25519 OK");
   if (!Update.end(true)) {
     _lastError = "Update.end failed: " + String(Update.getError());
     _state = OtaState::Failed;
+    _emitLifecycle("FAILED", _lastError.c_str());
     return false;
   }
   _recordFlashedImage(_expectedVersion);   // [W14-2a/b] fresh ledger + marker
@@ -357,6 +383,9 @@ bool OtaManager::finalizeUpload(const char* expectedSha256Hex,
   free(_shaCtx); _shaCtx = nullptr;
   Log.append(Core::LogType::OtaSuccess,
              "OTA upload verified + applied: v=" + _expectedVersion, 0);
+  _emitLifecycle("FLASHED", "Image written — pending boot verify");
+  // ACTIVATED is emitted by markBootHealthyIfPending() after the 60s healthy
+  // window; ROLLBACK is emitted by triggerRollback() if health checks fail.
   return true;
 }
 
@@ -678,6 +707,26 @@ void OtaManager::tickManifestCheck() {
   Log.append(Core::LogType::OtaStarted,
              "OTA check: newer version v" + String(ver) +
              " — download started", 0);
+}
+
+// [P1-6 AUDIT 2026-09] Publish an OTA lifecycle event to GAS via MQTT.
+// Wrapper that fills in the current job id (from the active session) and
+// progress counters. Safe to call when no OTA is in progress (job id may
+// be empty after a reboot, in which case we still emit so GAS can correlate
+// via deviceKey + timestamp).
+void OtaManager::_emitLifecycle(const char* state, const char* detail) {
+  if (!state) return;
+  // _jobId may be empty on a fresh boot (no OTA in progress this session).
+  // Use a sentinel so GAS can still group the event by device.
+  const char* jobId = _jobId.length() ? _jobId.c_str() : "boot-verify";
+  Network::mqttTelemetry.publishOtaLifecycle(
+    jobId,
+    state,
+    _expectedVersion.length() ? _expectedVersion.c_str() : Core::FIRMWARE_VERSION,
+    detail,
+    (uint32_t)_bytesProcessed,
+    (uint32_t)_totalBytes
+  );
 }
 
 } // namespace Services

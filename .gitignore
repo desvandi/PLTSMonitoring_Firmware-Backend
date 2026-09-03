@@ -27,8 +27,12 @@ firmware_signing_public.pem
 *.bin.ota.json
 *.elf
 *.map
-# Zero-Touch generic firmware ships pre-built binaries for ESP Web Tools
-!firmware-generic/bin/*.bin
+# [P0-4 AUDIT 2026-09] Binaries are NOT source — they are immutable build
+# artifacts distributed via GitHub Releases / Actions artifacts. The previous
+# `!firmware-generic/bin/*.bin` exception caused binary drift (audit-7: two
+# v1.7.1 binaries differed by 144 bytes between Firmware repo and PWA repo).
+# Removing the exception stops source repo from tracking binaries; CI now
+# builds + signs + uploads to GitHub Release on tag.
 
 # Logs
 *.log

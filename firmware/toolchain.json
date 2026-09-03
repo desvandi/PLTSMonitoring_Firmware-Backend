@@ -1,0 +1,11 @@
+{
+  "_comment": "Pinned toolchain versions for reproducible firmware builds (P1-7). Bump deliberately and re-verify build reproducibility before tagging.",
+  "platformio": "6.1.18",
+  "espressif32_platform": "6.7.0",
+  "arduino_esp32_framework": "2.0.18",
+  "arduinojson": "7.1.0",
+  "pubsubclient": "2.8",
+  "mbedtls": "idf-v4.4.7",
+  "python": "3.11",
+  "gcc": "riscv64-esp-elf-gcc 11.2.0 / xtensa-esp32-elf-gcc 11.2.0"
+}

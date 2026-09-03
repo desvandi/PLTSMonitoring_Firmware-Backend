@@ -161,8 +161,18 @@ private:
   bool _validateUrlAllowlist(const String& url);
   bool _validateCa();
 
+  // [P1-6 AUDIT 2026-09] Publish an OTA lifecycle event to GAS via MQTT.
+  // Wrapper around Network::mqttTelemetry.publishOtaLifecycle() that fills in
+  // the current job id (derived from the active OTA session) and progress
+  // counters. Safe to call when no OTA is in progress — it no-ops.
+  void _emitLifecycle(const char* state, const char* detail = nullptr);
+
   // Helpers
   static bool _semverParse(const String& s, uint16_t& maj, uint16_t& min, uint16_t& pat);
+
+  // [P1-6] Current OTA job id — set when an OTA session starts, cleared on
+  // Done/Failed. Used to correlate lifecycle events on the GAS side.
+  String   _jobId;
 };
 
 extern OtaManager ota;

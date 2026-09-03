@@ -1,13 +1,22 @@
 # PLTS Monitor & MonitorIoT Push-Alarm — Firmware, Backend GAS, Toolkit
 
 **Firmware produksi:** v1.7.1 · **Firmware generic:** v1.7.1 · **Firmware alarm:** v1.1.0 · **Backend GAS:** WAVE-7 (remediasi P1/P2 + wave audit 7-13 + bench W14) · **License:** MIT
-**Status:** LIVE (dua repositori GitHub + dua proyek Vercel aktif, seluruh rantai platform gratis Rp0 — tanpa kartu kredit)
+**Status:** **PRODUCTION-HARDENING IN PROGRESS** (see §0 below) · LIVE (dua repositori GitHub + dua proyek Vercel aktif, seluruh rantai platform gratis Rp0 — tanpa kartu kredit)
 **Repositori kembar (frontend/dasbor):** [desvandi/PLTSMonitoring_PWA](https://github.com/desvandi/PLTSMonitoring_PWA)
+
+> **§0 — Status honest (P2-2 AUDIT 2026-09):** repositori ini sebelumnya
+> berlabel "production-grade" di README. Setelah Audit 7 ditemukan beberapa
+> penghambat kritis pada Release Engineering (P0) dan Cross-layer Contract
+> (P1) — lihat `docs/AUDIT_2026_09_REMEDIATION.md`. Semua P0/P1 telah
+> diimplementasikan; status sekarang **production-hardening in progress**
+> hingga Master Release Gate (`scripts/release_gate.py`) dan Hardware
+> Acceptance (`docs/hardware-acceptance/README.md`) lulus untuk minimal satu
+> siklus rilis final.
 
 Repositori ini adalah pusat backend & perangkat untuk sistem monitoring PLTS
 (pembangkit listrik tenaga surya, baterai 48 V LiFePO4). Ia memuat **dua
-subsistem yang saling melengkapi**, keduanya sudah terverifikasi
-production-grade lewat rangkaian audit berlapis:
+subsistem yang saling melengkapi**, keduanya sedang dalam tahap
+production-hardening lewat rangkaian audit berlapis:
 
 | Subsistem | Fungsi | Komponen utama di repo ini |
 | :--- | :--- | :--- |

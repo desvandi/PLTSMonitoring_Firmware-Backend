@@ -162,7 +162,11 @@ const EMERGENCY_CONFIG_FIELDS = [
 
 // [P0-007] 48 V / 15S LiFePO4 — matches firmware Core::Config defaults.
 const DEFAULT_CONFIG = [
-  ['AUTH_TOKEN', 'plts_sec_CHANGE_ME'],
+  // [P1-8 AUDIT 2026-09] AUTH_TOKEN default is EMPTY (fail-closed).
+  // Previously 'plts_sec_CHANGE_ME' which is a leaked placeholder. The
+  // setupMasterTemplate() guard refuses to deploy if AUTH_TOKEN is empty
+  // or contains 'CHANGE_ME' — operators MUST set a real secret.
+  ['AUTH_TOKEN', ''],
   // [WAVE-3 / GAS-2-K] Operator-only secret gating OTA_PUBLISH. Empty by
   // design: OTA publishing stays DISABLED (fail-closed) until the operator
   // sets a real value in the Config sheet. NEVER burn this into firmware or
@@ -267,6 +271,23 @@ function doPost(e) {
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return json_(resp_(400, 'Request body must be a JSON object', null));
+  }
+  // [P1-8 AUDIT 2026-09] Fail-closed runtime guard: refuse every request
+  // until AUTH_TOKEN is properly configured. This complements the
+  // setupMasterTemplate() guard — even if an operator skips setup, the
+  // backend cannot leak data or accept unauthenticated telemetry.
+  try {
+    const authToken = String(getPltsConfig('AUTH_TOKEN') || '');
+    if (!authToken || authToken.indexOf('CHANGE_ME') !== -1 || authToken.length < 16) {
+      return json_(resp_(503,
+        'AUTH_TOKEN not configured — backend is fail-closed until a real secret is set in the Config sheet (P1-8).',
+        null));
+    }
+  } catch (cfgErr) {
+    // If Config sheet itself is missing, also fail-closed (don't leak).
+    return json_(resp_(503,
+      'Config sheet not initialized — run setupMasterTemplate() first (P1-8).',
+      null));
   }
   try {
     const action = String(body.action || '').toUpperCase();
@@ -2170,8 +2191,28 @@ function setupMasterTemplate() {
   calibSheet_();
 
   invalidatePltsCache();
+
+  // [P1-8 AUDIT 2026-09] Fail-closed: refuse to deploy if AUTH_TOKEN is
+  // empty or still contains 'CHANGE_ME'. The operator MUST set a real
+  // secret before the backend can be considered production-ready.
+  const authToken = String(getPltsConfig('AUTH_TOKEN') || '');
+  if (!authToken || authToken.indexOf('CHANGE_ME') !== -1 || authToken.length < 16) {
+    SpreadsheetApp.getUi().alert(
+      'FAIL-CLOSED — AUTH_TOKEN not configured\n\n' +
+      'The backend CANNOT operate safely until you set a real AUTH_TOKEN ' +
+      'in the Config sheet (min 16 chars, no "CHANGE_ME" placeholder).\n\n' +
+      'Telemetry ingest will reject every request with 401 until this is fixed.\n\n' +
+      'Steps:\n' +
+      '  1. Open the "Config" sheet.\n' +
+      '  2. Set cell B2 (AUTH_TOKEN) to a strong secret (e.g. plts_sec_<32 random hex>).\n' +
+      '  3. Run setupMasterTemplate() again to verify.\n' +
+      '  4. Distribute the same secret to the firmware (Core::Config::authToken) and PWA.'
+    );
+    throw new Error('AUTH_TOKEN not configured — backend deployment refused (P1-8 fail-closed).');
+  }
+
   SpreadsheetApp.getUi().alert(
-    'Master Template siap. Ganti nilai AUTH_TOKEN dan parameter lain di tab "Config". ' +
+    'Master Template siap. AUTH_TOKEN terkonfigurasi. ' +
     'Daftarkan per-device secret di tab "Devices" untuk autentikasi HMAC.'
   );
 }

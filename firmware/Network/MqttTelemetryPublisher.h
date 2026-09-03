@@ -35,6 +35,22 @@ public:
   //   3. retained in spool until delivery is confirmed
   void publishCriticalEvent(const char* type, const char* payload, size_t len);
 
+  // [P1-6 AUDIT 2026-09] Publish an OTA lifecycle event to the backend (GAS).
+  // Closes the audit-7 gap: modular OTA state transitions were local-only;
+  // operators could not monitor OTA from PWA/GAS without a serial console.
+  // The event is published at QoS 1 on plts/<deviceId>/ota/event so GAS can
+  // persist it in the OtaEvents sheet (mirroring the generic tree's
+  // OTA_STATUS reporter). Lifecycle states:
+  //   QUEUED → ACCEPTED → DOWNLOADING → VERIFIED → FLASHED → ACTIVATED
+  //                                                    ↘ ROLLBACK / FAILED
+  // Idempotent on (deviceId, jobId, state) — GAS dedupes on receipt.
+  void publishOtaLifecycle(const char* jobId,
+                            const char* state,
+                            const char* version,
+                            const char* detail,
+                            uint32_t    bytesProcessed = 0,
+                            uint32_t    totalBytes     = 0);
+
   // Replay spooled records (oldest-first, rate-limited by TelemetrySpool).
   // Call when the transport is fully operational.
   void replaySpool();

@@ -1,24 +1,18 @@
 name: build-firmware
 
-# CI-hygiene 2026-09-02 (follow-up to REMEDIATION 2026-08 FW-26 / WAVE-5 FW-C2):
-#   - explicit `permissions`: top-level contents:read; contents:write only
-#     for build-generic-tree (its auto-commit step pushes rebuilt binaries;
-#     on 2026-09-01 that push was denied while the repo default was
-#     read-only, and it only worked after the repo default changed - the
-#     requirement is now explicit and least-privilege).
-#   - CI-staged binaries now named plts_firmware_v<version>.bin (README 4.3
-#     version-sync contract) and manifest.json synced to the source
-#     FIRMWARE_VERSION 1.6.0, so CI builds are no longer misnamed 1.5.4.
-#   - trigger verified byte-level via the GitHub Git Blobs API: the push
-#     filter already matched main in every published revision (an earlier
-#     local "typo" audit flag turned out to be a tooling display artifact).
-# Earlier history: this workflow previously built ONLY firmware-generic
-# (the legacy tree) and never compiled the production firmware/. Now:
-#   1. builds firmware/ (modular production tree) for development + staging
-#   2. runs the Python unit tests in scripts/
-#   3. builds firmware-generic (legacy) for continuity
-# Production builds (env:production) require real secrets and are
-# triggered manually via workflow_dispatch with secrets passed via env.
+# ============================================================================
+# CI Release Engineering (P0-2, P0-4, P0-5 — Audit 2026-09)
+#   - Production env build is now REQUIRED (env:production) with secrets via
+#     GitHub Environment "production" (P0-2). Pre-build assert hook
+#     scripts/assert_production_secrets.py enforces the fail-closed contract.
+#   - Binary auto-commit to main REMOVED (P0-4). Binaries are uploaded as
+#     GitHub Actions artifacts (immutable) and, on tag, attached to a GitHub
+#     Release. Source repo stays source-only.
+#   - release.json + provenance.json + SHA256SUMS generated for every build
+#     (P0-5). Cross-repo consumers (PWA, GAS) MUST reference these manifests.
+#   - --skip-build in scripts/release_firmware_generic.py is hard-rejected in
+#     CI (P0-3) — every release artifact comes from a clean checkout.
+# ============================================================================
 
 on:
   push:
@@ -28,10 +22,17 @@ on:
       - 'firmware-generic/**'
       - 'scripts/**'
       - '.github/workflows/build-firmware.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      reason:
+        description: "Manual build reason"
+        required: false
+        default: "manual"
 
 permissions:
-  contents: read
+  contents: read        # no auto-commit — source repo stays read-only in CI
 
 jobs:
   test:
@@ -43,9 +44,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install cryptography (for Ed25519 interop test)
+        run: python -m pip install --upgrade pip cryptography
       - name: Run firmware logic tests
         run: |
-          python -m pip install --upgrade pip
           fail=0
           for t in scripts/test_*.py; do
             echo "=== $t ==="
@@ -53,9 +55,22 @@ jobs:
           done
           exit $fail
 
-  build-production-tree:
-    name: PlatformIO build (firmware/ development + staging)
+  # --------------------------------------------------------------------------
+  # P0-2: Production build is mandatory. Pre-build assert hook will fail the
+  # build if any required secret is missing or invalid. Secrets come from the
+  # GitHub Environment "production" (protected: required reviewers + branch
+  # lock). The job is gated so PRs from forks cannot access secrets.
+  # --------------------------------------------------------------------------
+  build-production:
+    name: PlatformIO build — env:production (modular)
     runs-on: ubuntu-latest
+    needs: test
+    environment:
+      name: production
+      url:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    env:
+      PIO_CORE: "6.1.18"          # P1-7 pinned PlatformIO core
+      ESP32_PLATFORM: "espressif32@6.7.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -64,16 +79,87 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache PlatformIO
+      - name: Cache PlatformIO (deterministic — keyed on platformio.ini hash)
         uses: actions/cache@v4
         with:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
-          restore-keys: |
-            pio-${{ runner.os }}-
+          key: pio-prod-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}-v1
+          # P2-3: no broad restore-keys — broad keys can restore stale packages
+          #       and break reproducibility.
+
+      - name: Install PlatformIO (pinned)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "platformio==${PIO_CORE}"
+
+      - name: Compile production env (modular)
+        working-directory: firmware
+        env:
+          MQTT_BROKER_HOST:           ${{ secrets.PIO_MQTT_BROKER_HOST }}
+          MQTT_BROKER_PORT:           ${{ secrets.PIO_MQTT_BROKER_PORT }}
+          MQTT_USERNAME:              ${{ secrets.PIO_MQTT_USERNAME }}
+          MQTT_PASSWORD:              ${{ secrets.PIO_MQTT_PASSWORD }}
+          MQTT_ROOT_CA:               ${{ secrets.PIO_MQTT_ROOT_CA }}
+          OTA_ED25519_PUBLIC_KEY_HEX: ${{ secrets.PIO_OTA_ED25519_PUBLIC_KEY_HEX }}
+          OTA_HTTPS_ROOT_CA:          ${{ secrets.PIO_OTA_HTTPS_ROOT_CA }}
+        run: |
+          pio run -e production
+        # assert_production_secrets.py (extra_scripts=pre:...) reads BUILD_FLAGS
+        # and refuses to compile if any secret is missing/placeholder/wildcard.
+
+      - name: Stage modular artifacts
+        working-directory: firmware
+        run: |
+          mkdir -p artifacts
+          cp .pio/build/production/bootloader.bin artifacts/bootloader.bin
+          cp .pio/build/production/partitions.bin artifacts/partitions.bin
+          cp .pio/build/production/firmware.bin   artifacts/firmware.bin
+
+      - name: Generate provenance
+        run: |
+          FIRMWARE_VERSION=$(grep -oE 'FIRMWARE_VERSION\s*=\s*"[0-9.]+"' firmware/firmware_v1.ino \
+                            | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          python3 scripts/generate_provenance.py \
+            --target modular \
+            --version "${FIRMWARE_VERSION}" \
+            --bin-dir firmware/artifacts \
+            --firmware-name firmware.bin \
+            --out-dir firmware/artifacts
+
+      - name: Upload artifact (immutable — no commit to source repo)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plts-firmware-modular-production
+          path: |
+            firmware/artifacts/*.bin
+            firmware/artifacts/release.json
+            firmware/artifacts/provenance.json
+            firmware/artifacts/SHA256SUMS
+          if-no-files-found: error
+
+  build-staging:
+    name: PlatformIO build — env:staging + env:development (modular)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO (deterministic)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-staging-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}-v1
 
       - name: Install PlatformIO
         run: |
@@ -88,18 +174,20 @@ jobs:
         working-directory: firmware
         run: pio run -e staging
 
-      - name: Upload firmware artifact
+      - name: Upload modular dev+staging artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: plts-firmware-modular
+          name: plts-firmware-modular-dev-staging
           path: |
             firmware/.pio/build/*/firmware.bin
 
+  # --------------------------------------------------------------------------
+  # Legacy generic tree. NO auto-commit (P0-4). Build artifacts only.
+  # --------------------------------------------------------------------------
   build-generic-tree:
-    name: PlatformIO build (firmware-generic/ legacy)
+    name: PlatformIO build — firmware-generic/ (legacy)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # auto-commit step pushes rebuilt binaries
+    needs: test
     steps:
       - uses: actions/checkout@v4
 
@@ -108,27 +196,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache PlatformIO
+      - name: Cache PlatformIO (deterministic)
         uses: actions/cache@v4
         with:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: pio-generic-${{ runner.os }}-${{ hashFiles('firmware-generic/platformio.ini') }}
-          restore-keys: |
-            pio-generic-${{ runner.os }}-
+          key: pio-generic-${{ runner.os }}-${{ hashFiles('firmware-generic/platformio.ini') }}-v1
 
       - name: Install PlatformIO
         run: |
           python -m pip install --upgrade pip
           pip install -U platformio
 
-      - name: Compile firmware
+      - name: Compile firmware-generic
         working-directory: firmware-generic
         run: pio run -e esp32dev
 
-      - name: Stage binaries into /bin
+      - name: Stage binaries + manifest into /bin
         working-directory: firmware-generic
         run: |
           mkdir -p bin
@@ -137,19 +223,51 @@ jobs:
           cp .pio/build/esp32dev/firmware.bin   "bin/plts_firmware_v$(python -c "import json;print(json.load(open('manifest.json'))['version'])").bin"
           ls -la bin/
 
-      - name: Upload firmware artifact
+      - name: Generate provenance
+        run: |
+          VERSION=$(python -c "import json;print(json.load(open('firmware-generic/manifest.json'))['version'])")
+          python3 scripts/generate_provenance.py \
+            --target generic \
+            --version "${VERSION}" \
+            --bin-dir firmware-generic/bin \
+            --out-dir firmware-generic/bin
+
+      - name: Upload artifact (immutable — no commit to source repo, P0-4)
         uses: actions/upload-artifact@v4
         with:
           name: plts-firmware-generic
           path: |
             firmware-generic/bin/*.bin
+            firmware-generic/bin/release.json
+            firmware-generic/bin/provenance.json
+            firmware-generic/bin/SHA256SUMS
             firmware-generic/manifest.json
+          if-no-files-found: error
 
-      - name: Auto-commit new binaries
-        if: github.event_name == 'push'
+  # --------------------------------------------------------------------------
+  # P1-9: Master release gate. Runs after all builds. Verifies that every
+  # required invariant passes. Blocks tag/release if any check fails.
+  # --------------------------------------------------------------------------
+  release-gate:
+    name: Master release gate
+    runs-on: ubuntu-latest
+    needs: [build-production, build-staging, build-generic-tree]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ci-artifacts
+
+      - name: Run release gate
         run: |
-          git config user.name  "plts-firmware-bot"
-          git config user.email "actions@github.com"
-          git add firmware-generic/bin
-          git diff --cached --quiet firmware-generic/bin || git commit -m "chore(firmware): rebuild ESP32 binaries [skip ci]"
-          git push || echo "no changes to push"
+          python3 scripts/release_gate.py \
+            --artifacts-dir ci-artifacts \
+            --target generic \
+            --target modular

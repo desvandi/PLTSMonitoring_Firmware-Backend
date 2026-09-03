@@ -48,8 +48,26 @@ def main() -> None:
     ap.add_argument("--pwa-path", type=str, default=None,
                     help="Path checkout repo PWA (untuk sinkron public/firmware/)")
     ap.add_argument("--skip-build", action="store_true",
-                    help="Lewati build PlatformIO (pakai .pio/build yang ada)")
+                    help="(DEPRECATED — only honored with --allow-skip-build) "
+                         "Lewati build PlatformIO (pakai .pio/build yang ada)")
+    ap.add_argument("--allow-skip-build", action="store_true",
+                    help="Explicit acknowledgement that --skip-build is dev-only "
+                         "and the resulting artifact is NOT a release.")
+    ap.add_argument("--production", action="store_true",
+                    help="Production release mode. Refuses --skip-build entirely.")
     args = ap.parse_args()
+
+    # --- P0-3 — Release integrity: --skip-build must NEVER produce a release.
+    if args.skip_build:
+        if args.production:
+            die("--skip-build cannot be used in --production mode (P0-3). "
+                "Every release artifact MUST come from a clean build.")
+        if not args.allow_skip_build:
+            die("--skip-build requires --allow-skip-build (P0-3). The resulting "
+                "binary is for LOCAL DEVELOPMENT ONLY and must NOT be tagged as a "
+                "release. CI builds from clean checkouts and rejects --skip-build.")
+        print("[RELEASE] WARNING — --skip-build acknowledged as DEV-ONLY. "
+              "The artifact produced here is NOT a release.")
 
     # --- 1. Build -----------------------------------------------------------
     if not args.skip_build:
@@ -125,7 +143,25 @@ def main() -> None:
     ]
     manifest["builds"] = [{"chipFamily": "ESP32", "parts": generic_parts}]
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"[RELEASE] manifest.json (generic) → v{version}, {len(generic_parts)} parts")
+    print(f"[RELEASE] manifest.json (generic) -> v{version}, {len(generic_parts)} parts")
+
+    # --- 5b. P0-5 — Generate immutable provenance for the generic tree --------
+    import hashlib
+    provenance_script = ROOT / "scripts" / "generate_provenance.py"
+    if provenance_script.is_file():
+        r = subprocess.run(
+            [sys.executable, str(provenance_script),
+             "--target", "generic",
+             "--version", str(version),
+             "--bin-dir", str(GENERIC / "bin"),
+             "--firmware-name", fw_name],
+            capture_output=True, text=True,
+        )
+        print(r.stdout)
+        if r.returncode != 0:
+            die(f"generate_provenance.py failed:\n{r.stderr}")
+    else:
+        print("[RELEASE] WARN — generate_provenance.py not found; skipping (P0-5 incomplete)")
 
     # --- 6. Sinkron ke PWA (opsional) ----------------------------------------
     if args.pwa_path:
@@ -133,9 +169,12 @@ def main() -> None:
         if not pwa_fw.parent.is_dir():
             die(f"folder PWA tidak ditemukan: {pwa_fw.parent} (--pwa-path salah?)")
         pwa_fw.mkdir(parents=True, exist_ok=True)
-        for name in ("bootloader.bin", "partitions.bin", fw_name):
-            shutil.copy2(GENERIC / "bin" / name, pwa_fw / name)
-            print(f"[RELEASE] PWA public/firmware/{name}  ({(pwa_fw / name).stat().st_size:,} B)")
+        for name in ("bootloader.bin", "partitions.bin", fw_name,
+                     "release.json", "provenance.json", "SHA256SUMS"):
+            src = GENERIC / "bin" / name
+            if src.is_file():
+                shutil.copy2(src, pwa_fw / name)
+                print(f"[RELEASE] PWA public/firmware/{name}  ({(pwa_fw / name).stat().st_size:,} B)")
         for old in pwa_fw.glob("plts_firmware_v*.bin"):
             if old.name != fw_name:
                 old.unlink()
@@ -152,16 +191,37 @@ def main() -> None:
         (pwa_fw / "manifest.json").write_text(
             json.dumps(pwa_manifest, indent=2) + "\n", encoding="utf-8"
         )
-        print(f"[RELEASE] PWA public/firmware/manifest.json → v{version} (path tanpa 'bin/')")
+        print(f"[RELEASE] PWA public/firmware/manifest.json -> v{version} (path tanpa 'bin/')")
+
+        # --- 6b. P0-6 — Cross-repo SHA verification --------------------------
+        # The SAME bootloader.bin, partitions.bin and firmware.bin must exist
+        # in BOTH the firmware repo and the PWA repo with identical SHA-256.
+        # Any drift = abort (the 144-byte drift in audit-7 must never recur).
+        for name in ("bootloader.bin", "partitions.bin", fw_name):
+            a = (GENERIC / "bin" / name)
+            b = (pwa_fw / name)
+            if not a.is_file() or not b.is_file():
+                die(f"P0-6 cross-repo check: missing file {name}")
+            ha = hashlib.sha256(a.read_bytes()).hexdigest()
+            hb = hashlib.sha256(b.read_bytes()).hexdigest()
+            if ha != hb:
+                die(f"P0-6 cross-repo SHA mismatch on {name}:\n"
+                    f"  firmware repo: {ha}\n"
+                    f"  PWA repo     : {hb}\n"
+                    f"Binary drift detected — never commit binaries that differ.")
+            print(f"[RELEASE] P0-6 cross-repo SHA OK: {name} = {ha[:16]}...")
 
     print(
         f"\n[RELEASE] SELESAI — firmware-generic v{version} "
         f"({'+ sinkron PWA' if args.pwa_path else 'TANPA sinkron PWA'})."
     )
-    print("[RELEASE] Commit yang perlu dijalankan:")
-    print(f'  firmware repo : git add firmware-generic && git commit -m "release: generic v{version}"')
     if args.pwa_path:
+        print("[RELEASE] Commit yang perlu dijalankan:")
+        print(f'  firmware repo : git add firmware-generic && git commit -m "release: generic v{version}"')
         print(f'  PWA repo      : git add public/firmware && git commit -m "feat(firmware): generic v{version}"')
+    else:
+        print("[RELEASE] NOTE: tanpa --pwa-path, PWA tidak diperbarui. "
+              "Cross-repo sync (P0-6) hanya aktif jika --pwa-path diberikan.")
 
 
 if __name__ == "__main__":

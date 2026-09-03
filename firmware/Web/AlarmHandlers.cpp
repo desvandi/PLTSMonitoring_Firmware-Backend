@@ -47,13 +47,36 @@ void handleAcknowledge() {
   int s2 = uri.indexOf("/acknowledge", s1);
   if (s2 < 0) { sendError(400, "Bad path"); return; }
   String code = uri.substring(s1, s2);
+  if (code.length() == 0) { sendError(400, "Empty alarm code"); return; }
+  // P1-3 canonical contract: 404 if alarm code not found (was: silently OK)
+  const Services::Alarm* a = Services::alarms.find(code.c_str());
+  if (!a) { sendError(404, "Alarm not found"); return; }
   Services::alarms.acknowledge(code.c_str());
   sendSuccess("Alarm acknowledged", "{}");
 }
 
+// P1-3 — pattern router for /api/alarms/{code}/acknowledge
+// The Arduino WebServer library does not support path parameters natively,
+// so we use a single catch-all handler mounted at "/api/alarms/" (note the
+// trailing slash) and dispatch by suffix.
+void handleAlarmWildcard() {
+  if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  String uri = http.uri();
+  // Only handle POST /api/alarms/{code}/acknowledge here. Other sub-paths
+  // fall through to 404 (the previous behavior).
+  if (http.method() == HTTP_POST && uri.endsWith("/acknowledge")) {
+    handleAcknowledge();
+    return;
+  }
+  sendError(404, "Not Found");
+}
+
 void registerRoutes() {
   http.on("/api/alarms", HTTP_GET, handleGetAlarms);
-  // Catch-all for /api/alarms/{code}/acknowledge
+  // P1-3 canonical contract: POST /api/alarms/{alarmId}/acknowledge
+  // Mounted as a sub-path catch-all (Arduino WebServer has no path params).
+  http.on("/api/alarms/", HTTP_POST, handleAlarmWildcard);
+  // Bulk acknowledge-all (not the canonical per-alarm path).
   http.on("/api/alarms/acknowledge-all", HTTP_POST, []() {
     if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
     if (!requireCsrf()) return;

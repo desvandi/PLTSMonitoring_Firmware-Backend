@@ -55,13 +55,21 @@ def sign_binary(binary_path):
         sys.exit(1)
     with open(binary_path, 'rb') as f:
         data = f.read()
-    # Compute SHA-256 hash of binary
-    hash_hex = hashlib.sha256(data).hexdigest()
+    # [P0-1 AUDIT 2026-09] Compute SHA-256 RAW DIGEST (32 bytes) and sign
+    # THAT, not its hex-string encoding. The firmware verifier
+    # (Utils::ed25519VerifyHash in firmware/Utils/Crypto.cpp) calls
+    # psa_verify_message() with the 32-byte raw digest as the "message" —
+    # signing 64 ASCII bytes of hex (the previous behavior) made every
+    # OTA signature fail on the device.
+    #   old (broken): signature = key.sign(hash_hex.encode("ascii"))
+    #   new (correct): signature = key.sign(hash_digest_bytes)
+    hash_digest = hashlib.sha256(data).digest()      # 32 raw bytes
+    hash_hex    = hash_digest.hex()                  # for *.sha256 side-file
     # Load private key
     with open('firmware_signing_private.pem', 'rb') as f:
         key = serialization.load_pem_private_key(f.read(), password=None)
-    # Sign the hash (not the binary — ESP32 RAM constraint)
-    signature = key.sign(hash_hex.encode())
+    # Sign the RAW 32-byte SHA-256 digest (matches firmware verifier)
+    signature = key.sign(hash_digest)
     sig_hex = signature.hex()
     # Write outputs
     with open(binary_path + '.sha256', 'w') as f:
@@ -72,7 +80,8 @@ def sign_binary(binary_path):
         'binary': os.path.basename(binary_path),
         'sha256': hash_hex,
         'signature': sig_hex,
-        'algorithm': 'ed25519-sha256',
+        'algorithm': 'ed25519-sha256-raw-digest',
+        'signedMessage': 'raw-sha256-digest-32-bytes',
         'signedAt': int(__import__('datetime').datetime.now().timestamp())
     }
     with open(binary_path + '.ota.json', 'w') as f:
@@ -80,6 +89,7 @@ def sign_binary(binary_path):
     print(f"Signed {binary_path}")
     print(f"  SHA-256: {hash_hex}")
     print(f"  Ed25519 signature: {sig_hex}")
+    print(f"  Signed payload: 32-byte raw SHA-256 digest (matches firmware Crypto.cpp)")
     print(f"  Metadata: {binary_path}.ota.json")
 
 def verify_signature(sig_path, binary_path):
@@ -91,17 +101,20 @@ def verify_signature(sig_path, binary_path):
         sys.exit(1)
     with open(binary_path, 'rb') as f:
         data = f.read()
-    hash_hex = hashlib.sha256(data).hexdigest()
+    # [P0-1] Verify against RAW 32-byte SHA-256 digest — same form signed.
+    hash_digest = hashlib.sha256(data).digest()
+    hash_hex    = hash_digest.hex()
     with open(sig_path, 'r') as f:
         sig_hex = f.read().strip()
     with open('firmware_signing_public.pem', 'rb') as f:
         pub = serialization.load_pem_public_key(f.read())
     try:
-        pub.verify(bytes.fromhex(sig_hex), hash_hex.encode())
-        print(f"✓ Signature VALID — {binary_path}")
+        pub.verify(bytes.fromhex(sig_hex), hash_digest)
+        print(f"OK Signature VALID — {binary_path}")
         print(f"  SHA-256: {hash_hex}")
+        print(f"  Verified payload: 32-byte raw SHA-256 digest")
     except Exception as e:
-        print(f"✗ Signature INVALID — {e}")
+        print(f"FAIL Signature INVALID — {e}")
         sys.exit(1)
 
 if __name__ == '__main__':

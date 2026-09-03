@@ -373,9 +373,10 @@ void registerRoutes() {
   // v1.7.0 — passive RS485 vendor-frame capture (bench; protocol=rs485_console)
   http.on("/api/rs485/frames", HTTP_GET, handleRs485Frames);
 #endif
-  // Per-alarm ACK: pattern-routed via the wildcard handler registered by
-  // AlarmHandlers (onNotFound) — simplified: exact-match common codes path.
-  http.on("/api/alarms/acknowledge", HTTP_POST, handleAlarmAckGeneric);
+  // Per-alarm ACK: P1-3 canonical contract is POST /api/alarms/{alarmId}/acknowledge
+  // which is registered by AlarmHandlers::registerRoutes() as a sub-path catch-all
+  // at "/api/alarms/". The previous non-canonical POST /api/alarms/acknowledge
+  // (with body {code}) is REMOVED — one endpoint, one contract.
 }
 
 void handleAlarmAckGeneric() {
