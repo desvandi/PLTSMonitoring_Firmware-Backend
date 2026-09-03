@@ -94,7 +94,23 @@ mendadak karena tidak ada kartu kredit terpasang.
   PWA menuntut 8 hex = mode realtime MQTT tak pernah bisa tersambung; W11-6
   peringatan broker publik dev di `platformio.ini`; verifikasi menyeluruh
   sisi firmware: TLS fail-closed, pinning GAS GTS Root R4, OTA allowlist +
-  CA + Ed25519, LWT + subscription persisten, AP WPA2 CSPRNG — semua lulus) —
+  CA + Ed25519, LWT + subscription persisten, AP WPA2 CSPRNG — semua lulus;
+  **wave 12 (regresi kontrak lintas-lapis penuh) 2026-09-03**: W12-1
+  kontrak telemetri darurat jalur-nested putus — serializer modular
+  memancarkan `estopOpen`/`trips` sementara ingest GAS membaca
+  `estopLine`/`tripCount` → status E-stop + hitungan trip hilang senyap
+  untuk perangkat modular (PWA menampilkan "tertutup" padahal terbuka);
+  fix: kunci kanonik `estopLineOpen`/`tripCount` (= nama
+  `SystemStatus.emergency` PWA) di `BatteryStatusSerializer.h` + rantai
+  fallback `estopLineOpen|estopLine|estopOpen` / `tripCount|trips` di ingest
+  GAS (armada versi-campur aman); W12-2 PZEM-004T v1.7.0 dead-end — blok
+  `ac.meter` firmware tidak pernah diingesti: kini 3 kolom `p_ac_meter`/
+  `meter_v`/`meter_connected` (indeks 36-38, migrasi append-only
+  `TELEMETRY_HEADER_V1_7_LEN`) + blok `ac.meter` di LATEST/HISTORY + slot
+  `AcMeterMeasurement` + kartu TERUKUR di PWA; terkunci oleh
+  `test_wave12_contract_regression.py` (26 check: 13-field 4-lapis,
+  telemetri darurat nested+flat, PZEM end-to-end, genset, vocabulary,
+  integritas header, drift flat-path, `node --check` GAS)) —
   verdict **PRODUCTION GRADE**. Arsip laporan audit historis
   tersedia di **riwayat git** (folder `docs/remediation-2026-08/` di commit
   sebelum restukturisasi 2026-09-01); temuan-temuan pentingnya sudah
@@ -1142,15 +1158,19 @@ bash push-alarm/tests/run-all.sh
    operator sebelum daya tinggi dihubungkan** —
    `docs/bench/PROTOKOL_BENCH_DARURAT.md` (pemetaan ke skenario S6–S11
    panduan PDF disertakan).
-9. **[JALUR UPGRADE TERIMPLEMENTASI — validasi bench pending]** Daya AC
+9. **[KONTRAK TERPASANG LENGKAP — validasi bench pending]** Daya AC
    tetap estimasi (ACS712 arus + asumsi 220 V/PF 0.9) SELAMA PZEM belum
    tervalidasi. *Driver PZEM-004T v3 lengkap terpasang* (UART1 9600 8N1
    RX18/TX19; decode V/A/W/Wh/Hz/PF + plausibilitas; 25 asersi termasuk CRC
    terhadap frame kanonik vendor), flag `PLTS_ENABLE_PZEM_AC` **default 0**
    sampai satu unit fisik lulus prosedur 24 jam
-   (`docs/bench/PANDUAN_VALIDASI.md` §3). Setelah tervalidasi: blok
-   `ac.meter` MEASURED menggantikan estimasi dalam pelaporan (estimasi
-   tetap sebagai jalur mundur berlabel); energi PZEM adalah pencacah meter
+   (`docs/bench/PANDUAN_VALIDASI.md` §3). **[W12-2]** jalur pelaporan
+   end-to-end kini benar-benar tersambung (sebelum wave 12 blok `ac.meter`
+   berakhir buntu: GAS tidak pernah mengingesti): kolom `p_ac_meter`/
+   `meter_v`/`meter_connected` + blok `ac.meter` LATEST/HISTORY + slot
+   `AcMeterMeasurement` + kartu MEASURED di PWA — setelah flag dinyalakan,
+   daya terukur langsung tampil tanpa perubahan lagi; estimasi tetap
+   sebagai jalur mundur berlabel; energi PZEM adalah pencacah meter
    (reset saat meter mati) dan tidak diintegrasikan ke pencacah energi DC.
 
 ---

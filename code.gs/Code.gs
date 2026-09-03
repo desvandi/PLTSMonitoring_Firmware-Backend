@@ -216,10 +216,15 @@ const TELEMETRY_HEADER = [
   // 31..35, 0-based). APPENDED so every existing deployment keeps valid
   // indices; migrateTelemetryHeader_ extends old sheets in place and old
   // rows read back as UNKNOWN / null (honest, never fabricated).
-  'i_ac_gen', 'emg_state', 'emg_reason', 'emg_estop', 'emg_trips'
+  'i_ac_gen', 'emg_state', 'emg_reason', 'emg_estop', 'emg_trips',
+  // v1.7.0 [W12-2] — PZEM-004T real AC meter, optional (indices 36..38,
+  // 0-based; modular firmware with PLTS_ENABLE_PZEM_AC). Same append-only
+  // migration: pre-W12 rows read back as meter absent → null (honest).
+  'p_ac_meter', 'meter_v', 'meter_connected'
 ];
 const TELEMETRY_HEADER_V1_5_LEN = 24;   // column count before the v1.6.0 extension
 const TELEMETRY_HEADER_V1_6_LEN = 31;   // column count before the v1.7.0 extension
+const TELEMETRY_HEADER_V1_7_LEN = 36;   // column count before the [W12-2] meter extension
 
 // last_nonce/last_ts are VESTIGIAL (schema-compat only, no longer written
 // since WAVE-4 / GAS-2-X — replay protection lives in the nonce cache).
@@ -699,7 +704,9 @@ function recordTelemetryLocked_(norm, deviceKey) {
       norm.socSource, norm.bmsProtocol, norm.bmsConnected,
       norm.bmsCellVMin, norm.bmsCellVMax, norm.bmsTempC, norm.bmsFaultFlags,
       // v1.7.0 [WAVE-7] — 2nd ACS712 channel + emergency relay state
-      norm.iAcGen, norm.emgState, norm.emgReason, norm.emgEstop, norm.emgTrips
+      norm.iAcGen, norm.emgState, norm.emgReason, norm.emgEstop, norm.emgTrips,
+      // v1.7.0 [W12-2] — PZEM real AC meter (optional)
+      norm.pAcMeter, norm.meterV, norm.meterConnected
     ]);
     rotateLogs_(sheet);
     upsertLedger_(ledger, lrow, deviceKey, expectedNext, highestSeq, dupCount, gapCount, gaps);
@@ -767,7 +774,11 @@ function normalizeEnvelope_(data, deviceKey) {
     bmsProtocol: '', bmsConnected: false,
     bmsCellVMin: '', bmsCellVMax: '', bmsTempC: '', bmsFaultFlags: '',
     // v1.7.0 [WAVE-7] — 2nd ACS712 (genset→inverter) + emergency relay state
-    iAcGen: '', emgState: '', emgReason: '', emgEstop: false, emgTrips: ''
+    iAcGen: '', emgState: '', emgReason: '', emgEstop: false, emgTrips: '',
+    // [W12-2] v1.7.0 — PZEM-004T real AC meter (optional, modular firmware,
+    // PLTS_ENABLE_PZEM_AC). Absent on generic firmware → '' / false (honest:
+    // no meter — p_ac_est stays the headline, never a fabricated reading).
+    pAcMeter: '', meterV: '', meterConnected: false
   };
   if (data.battery || data.protocolVersion) {
     // Canonical nested envelope
@@ -803,14 +814,29 @@ function normalizeEnvelope_(data, deviceKey) {
     n.pAc = ac.estimatedPower ? measVal_(ac.estimatedPower) : '';
     // v1.7.0 [WAVE-7] — 2nd ACS712 channel (genset→inverter feed)
     n.iAcGen = measVal_(ac.gensetRmsCurrent);
-    // v1.7.0 [WAVE-7] — emergency relay block (state/reason/estop/trips)
+    // v1.7.0 [W12-2] — PZEM-004T real AC meter (optional). Only a meter that
+    // says connected=true with finite readings produces stored values;
+    // anything else stays '' (LATEST renders null, never 0).
+    const meter = ac.meter || null;
+    if (meter) {
+      n.meterConnected = meter.connected === true;
+      n.pAcMeter = n.meterConnected ? numOrEmpty_(meter.power) : '';
+      n.meterV = n.meterConnected ? numOrEmpty_(meter.voltage) : '';
+    }
+    // v1.7.0 [WAVE-7] — emergency relay block (state/reason/estop/trips).
+    // [W12-1] Canonical key first (estopLineOpen / tripCount — the PWA
+    // SystemStatus.emergency names emitted by the modular serializer);
+    // legacy aliases (estopLine / estopOpen / trips) keep mixed-version
+    // fleets readable. Unknown spellings degrade to false — never fabricate.
     const emg = data.emergency || null;
     if (emg) {
       n.emgState = String(emg.state || '').toUpperCase();
       n.emgReason = String(emg.reason || '');
-      n.emgEstop = (emg.estopLine === true || String(emg.estopLine).toUpperCase() === 'TRUE'
-        || String(emg.estopLine).toUpperCase() === 'OPEN');
-      n.emgTrips = numOrEmpty_(emg.tripCount);
+      const estopRaw = (emg.estopLineOpen != null) ? emg.estopLineOpen
+        : (emg.estopLine != null) ? emg.estopLine : emg.estopOpen;
+      n.emgEstop = (estopRaw === true || String(estopRaw).toUpperCase() === 'TRUE'
+        || String(estopRaw).toUpperCase() === 'OPEN');
+      n.emgTrips = numOrEmpty_(emg.tripCount != null ? emg.tripCount : emg.trips);
     }
     const env = data.environment || {};
     n.temp = measVal_(env.temperature); n.humidity = measVal_(env.humidity);
@@ -1098,7 +1124,16 @@ function rowToEnvelope_(row) {
       // rows → null (honest, never 0).
       gensetRmsCurrent: row.length > 31
         ? { value: num(row[31]), unit: 'A', quality: cq(num(row[31]), 'VALID') }
-        : undefined
+        : undefined,
+      // v1.7.0 [W12-2] — PZEM-004T real AC meter (optional). Absent on
+      // pre-W12 rows + generic firmware → undefined (honest: no meter — the
+      // estimate above stays the headline). connected=false with null
+      // values — never fabricated zeros.
+      meter: row.length > 36 ? {
+        connected: row[38] === true || String(row[38]).toUpperCase() === 'TRUE',
+        voltage: num(row[37]),
+        power: num(row[36])
+      } : undefined
     },
     environment: {
       temperature: { value: num(row[12]), unit: '°C', quality: cq(num(row[12]), 'VALID') },

@@ -222,12 +222,17 @@ inline String serialize(const Core::SystemStatus& s) {
 #if PLTS_ENABLE_EMERGENCY
   // v1.7.0 — E-WAVE emergency layer block (additive; <= v1.6.3 consumers
   // treat absent as DISABLED — the PWA/GAS contract is neutral-frontend).
+  // [W12-1] Canonical JSON keys are the PWA SystemStatus.emergency names
+  // (estopLineOpen / tripCount) — REST /api/status and MQTT /status are cast
+  // straight into SystemStatus on the PWA, and GAS ingest accepts these names
+  // first (legacy aliases estopOpen/trips remain readable there for older
+  // builds). relayEnergized/tripAtMs/crashChain are informational extras.
   JsonObject emg = doc.createNestedObject("emergency");
   emg["state"]          = s.emergency.state ? s.emergency.state : "DISABLED";
   emg["reason"]         = s.emergency.reason ? s.emergency.reason : "";
-  emg["estopOpen"]      = s.emergency.estopOpen;
+  emg["estopLineOpen"]  = s.emergency.estopOpen;
+  emg["tripCount"]      = s.emergency.trips;
   emg["relayEnergized"] = s.emergency.relayEnergized;
-  emg["trips"]          = s.emergency.trips;
   emg["tripAtMs"]       = s.emergency.tripAtMs;
   emg["crashChain"]     = s.emergency.crashChain;
 #endif

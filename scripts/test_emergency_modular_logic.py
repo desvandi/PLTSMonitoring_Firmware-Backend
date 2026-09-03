@@ -645,8 +645,11 @@ def group_static():
           "EMERGENCY_HTTP_TIMEOUT_MS  = 7000" in chh)
 
     # E12 — telemetry emergency block (additive, PWA-neutral).
+    # [W12-1] canonical keys = PWA SystemStatus.emergency names
+    # (estopLineOpen / tripCount); relayEnergized stays an informational extra.
     check("E12 serializer emits the emergency block with state/estop/relay",
-          '"emergency"' in ser and '"estopOpen"' in ser and '"relayEnergized"' in ser)
+          '"emergency"' in ser and '"estopLineOpen"' in ser
+          and '"tripCount"' in ser and '"relayEnergized"' in ser)
 
     # E13 — idempotency contract (documented, asserted).
     check("E13a ARM idempotency message present", '"already RUN"' in sup)
