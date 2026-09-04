@@ -445,6 +445,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') && needs.verify-tag-signature.result == 'success'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          # [Audit 2026-09-04 P1-2] fetch-depth: 0 needed so the verifier
+          # can resolve the parent commit (source commit) via git rev-parse.
+          # Shallow clone (default fetch-depth=1) only has the tag commit,
+          # so parent lookup returns 'unknown' and the parent-child check
+          # fails even when the relationship is valid.
+          fetch-depth: 0
 
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
@@ -532,7 +539,7 @@ jobs:
           cp plts-firmware-generic/provenance.json                 ../release-assets/generic-provenance.json
           cp plts-firmware-generic/SHA256SUMS                      ../release-assets/generic-SHA256SUMS
           cp plts-firmware-generic/manifest-canonical.json         ../release-assets/generic-manifest-canonical.json
-          cp plts-firmware-generic/manifest.json                   ../release-assets/generic-manifest-espwebtools.json
+          cp plts-firmware-generic/manifest-espwebtools.json       ../release-assets/generic-manifest-espwebtools.json
 
           # Hardware acceptance evidence (verified by previous job)
           cd ..
