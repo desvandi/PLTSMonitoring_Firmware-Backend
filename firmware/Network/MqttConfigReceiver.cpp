@@ -483,7 +483,7 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     String code = (result == Services::RelayCommandResult::Applied) ? "EXECUTED" :
                   (result == Services::RelayCommandResult::Blocked) ? "BLOCKED" :
                   (result == Services::RelayCommandResult::Rejected) ? "REJECTED" : "FAILED";
-    return { ok, code, messageOut };
+    return ApplyResult{ ok, code.c_str(), messageOut };
   }
   #endif
 

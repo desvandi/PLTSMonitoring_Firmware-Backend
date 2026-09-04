@@ -118,35 +118,32 @@ static void handleRelayCommand() {
     return;
   }
 
-  // Apply command via RelayController (single mutation path)
-  String messageOut;
-  Services::RelayCommandResult result = Services::relaysController.applyCommand(
+  // [P1-004] Queue command for single-threaded execution in relayTask.
+  // If queue is full, return 503 (not 200 — no false ACK).
+  String sourceStr = source;
+  bool queued = Services::relaysController.queueCommand(
     action, (uint8_t)channel, action == "on" || action == "pulse",
-    pulseMs, source, messageOut);
+    pulseMs, sourceStr);
+  if (!queued) {
+    sendError(503, "Relay command queue full — retry after a brief delay");
+    return;
+  }
 
-  // Build ACK
+  // Build ACK — command queued for execution
   String ack;
   StaticJsonDocument<512> ackDoc;
-  ackDoc["ok"] = (result == Services::RelayCommandResult::Applied);
-  ackDoc["result"] = (result == Services::RelayCommandResult::Applied) ? "EXECUTED" :
-                     (result == Services::RelayCommandResult::Blocked) ? "BLOCKED" :
-                     (result == Services::RelayCommandResult::Rejected) ? "REJECTED" : "FAILED";
+  ackDoc["ok"] = true;
+  ackDoc["result"] = "QUEUED";
   ackDoc["channel"] = (uint8_t)channel;
-  ackDoc["message"] = messageOut;
+  ackDoc["message"] = "Command queued for execution";
   ackDoc["transactionId"] = canon.transactionId;
   serializeJson(ackDoc, ack);
 
   // Store transaction
   Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack);
 
-  // Respond
-  if (result == Services::RelayCommandResult::Applied) {
-    sendSuccess(messageOut, ack);
-  } else if (result == Services::RelayCommandResult::Blocked) {
-    sendError(403, messageOut);
-  } else {
-    sendError(400, messageOut);
-  }
+  // Respond — command queued successfully
+  sendSuccess("Command queued", ack);
 }
 
 // POST /api/relays/all_off

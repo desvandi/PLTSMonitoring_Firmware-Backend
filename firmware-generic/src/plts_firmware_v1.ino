@@ -409,7 +409,7 @@ String nvsGetLastFlashed() {
   if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return "";
   char buf[24] = {0};
   size_t len = sizeof(buf);
-  if (nvs_get_str(handle, NVS_KEY_LAST_FLASHED, &len, buf) == ESP_OK) {
+  if (nvs_get_str(handle, NVS_KEY_LAST_FLASHED, buf, &len) == ESP_OK) {
     nvs_close(handle);
     return String(buf);
   }
