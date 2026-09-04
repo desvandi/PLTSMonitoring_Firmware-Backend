@@ -59,7 +59,12 @@ def run() -> int:
     # 1. Tag must be annotated + signed.
     # ------------------------------------------------------------------
     # `git cat-file -t <tag>` returns "tag" for annotated tags, "commit" for lightweight tags.
-    tag_type = git("cat-file", "-t", args.tag)
+    # [CI fix] Use refs/tags/ prefix to ensure git resolves the tag OBJECT,
+    # not the commit it points to. Without the prefix, some git configurations
+    # resolve the tag name to the commit (especially in shallow clones or
+    # CI checkouts where refs are set up differently).
+    tag_ref = args.tag if args.tag.startswith("refs/tags/") else f"refs/tags/{args.tag}"
+    tag_type = git("cat-file", "-t", tag_ref)
     if tag_type != "tag":
         blockers.append(
             f"tag {args.tag} is '{tag_type}', not 'tag' — "
@@ -75,7 +80,7 @@ def run() -> int:
     # ------------------------------------------------------------------
     if tag_type == "tag":
         verify_result = subprocess.run(
-            ["git", "tag", "-v", args.tag],
+            ["git", "tag", "-v", tag_ref],
             capture_output=True, text=True, check=False,
         )
         # git tag -v exits 0 if signature is valid, non-zero otherwise.
@@ -174,7 +179,7 @@ def run() -> int:
     # ------------------------------------------------------------------
     # 4. Tag's target commit MUST equal GITHUB_SHA.
     # ------------------------------------------------------------------
-    tag_commit = git("rev-list", "-n", "1", args.tag)
+    tag_commit = git("rev-list", "-n", "1", tag_ref)
     if not tag_commit:
         blockers.append(f"could not resolve tag {args.tag} to a commit")
         print(f"[FAIL] tag-commit: could not resolve")
