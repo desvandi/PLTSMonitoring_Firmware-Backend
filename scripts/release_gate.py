@@ -372,7 +372,8 @@ def check_target(
             fw_art = cm_artifacts.get("firmware", {})
             fw_sig = fw_art.get("signature")
             fw_sig_alg = fw_art.get("signatureAlgorithm")
-            if is_prod:
+            if is_prod and strict:
+                # [P0-A] Strict mode (tag push): signature REQUIRED in canonical manifest
                 if not fw_sig or fw_sig == "null":
                     gate.fail(f"target[{target}]: canonical.firmware.signature",
                               "PRODUCTION requires signature in canonical manifest")
@@ -382,6 +383,14 @@ def check_target(
                 else:
                     gate.ok(f"target[{target}]: canonical.firmware.signature",
                             f"present ({fw_sig_alg})")
+            elif is_prod and not strict:
+                # Non-strict (branch push): signature is good but not enforced
+                if fw_sig and fw_sig != "null":
+                    gate.ok(f"target[{target}]: canonical.firmware.signature",
+                            f"present ({fw_sig_alg}) — non-strict")
+                else:
+                    gate.warn(f"target[{target}]: canonical.firmware.signature",
+                              "absent (non-strict — required at tag time)")
             else:
                 if fw_sig and fw_sig != "null":
                     gate.ok(f"target[{target}]: canonical.firmware.signature",
@@ -635,10 +644,12 @@ def main() -> int:
     if args.strict:
         is_prod_release = True
 
-    # [P0-A] For production, --public-key is REQUIRED upfront.
-    if is_prod_release and not args.public_key:
+    # [P0-A] For production (strict mode only — tag push), --public-key is REQUIRED.
+    # In non-strict mode (branch push), we don't enforce — the strict gate at
+    # tag time will catch it.
+    if is_prod_release and args.strict and not args.public_key:
         gate.fail("production public key",
-                  "PRODUCTION release requires --public-key (Ed25519 signing key)")
+                  "PRODUCTION release requires --public-key (Ed25519 signing key) in strict mode")
 
     for target in args.target:
         td = find_target_dir(args.artifacts_dir, target)
@@ -649,8 +660,9 @@ def main() -> int:
 
     check_no_duplicate_versions(gate, args.artifacts_dir)
 
-    # [P0-B] Cross-repo check is MANDATORY for production.
-    check_cross_repo(gate, args.pwa_path, args.firmware_repo_path, is_prod_release)
+    # [P0-B] Cross-repo check is MANDATORY for production (strict mode only).
+    # In non-strict mode (branch push), cross-repo is WARN (not BLOCK).
+    check_cross_repo(gate, args.pwa_path, args.firmware_repo_path, is_prod_release and args.strict)
 
     print(gate.summary())
     return 1 if gate.blockers else 0
