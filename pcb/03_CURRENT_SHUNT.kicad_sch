@@ -1,0 +1,2002 @@
+(kicad_sch
+	(version 20231120)
+	(generator "eeschema")
+	(generator_version "8.0")
+	(uuid "9cc59051-f5ae-4568-84bc-8a2499c4126d")
+	(paper "A3")
+	(title_block
+		(title "Pengukuran Arus — Shunt FL-2 100A/75mV + INA219 (Kelvin 4-wire)")
+		(date "2026-09-04")
+		(rev "1.0")
+		(company "PLTS Monitoring Project")
+		(comment 1 "Sheet 03_CURRENT_SHUNT — S3: integritas Kelvin; star point BAT-; net-tie NT0/NT1; polaritas INA219 (tabel) + design-notes")
+	)
+	(lib_symbols
+(symbol "plts-custom:RSH1_FL2"
+		(pin_names
+			(offset 1.016)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "RSH"
+			(at 0 10.16 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "FL-2 100A/75mV"
+			(at 0 -10.16 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "plts-custom:Shunt_FL2_100A"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://shopee.co.id/product/85446693/24520345601"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Shunt FL-2 100A/75mV (0,75 mOhm, manganin+brass; 104 mm total, blok terminal 22 mm, post 7,7 mm). Pin 1 = baut M5 blok BATTERY- (star point PGND, D6/OPEN-007); pin 2 = baut M5 blok SYSTEM- (return beban 100 A); pin 3 = terminal Kelvin M3 K+ (blok BAT-); pin 4 = terminal Kelvin M3 K- (blok SYS-). Posisi pad = VERIFIKASI UNIT FISIK (OPEN-001R). Pour 100 A dua sisi + via stitching + clearance termal >=10 mm saat layout S9."
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "shunt current sense resistor kelvin FL-2 100A"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "Shunt_FL2*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "RSH1_FL2_0_1"
+			(rectangle
+				(start -12.7 7.62)
+				(end 12.7 -7.62)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(polyline
+				(pts
+					(xy -6.35 7.62)
+					(xy -6.35 -7.62)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 6.35 7.62)
+					(xy 6.35 -7.62)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -6.35 0)
+					(xy 6.35 0)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "RSH1_FL2_1_1"
+			(pin passive line
+				(at -17.78 2.54 0)
+				(length 5.08)
+				(name "BAT-"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -17.78 -2.54 0)
+				(length 5.08)
+				(name "K+"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 17.78 2.54 180)
+				(length 5.08)
+				(name "SYS-"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 17.78 -2.54 180)
+				(length 5.08)
+				(name "K-"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Sensor_Energy:INA219AxDCN"
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "U"
+			(at -6.35 8.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "INA219AxDCN"
+			(at 6.35 8.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23-8"
+			(at 16.51 -8.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/ina219.pdf"
+			(at 8.89 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Zero-Drift, Bidirectional Current/Power Monitor (0-26V) With I2C Interface, SOT-23-8"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "ADC I2C 16-Bit Oversampling Current Shunt"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "SOT?23*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "INA219AxDCN_0_1"
+			(rectangle
+				(start -7.62 7.62)
+				(end 7.62 -7.62)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+		)
+		(symbol "INA219AxDCN_1_1"
+			(pin input line
+				(at -10.16 2.54 0)
+				(length 2.54)
+				(name "IN+"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin input line
+				(at -10.16 -2.54 0)
+				(length 2.54)
+				(name "IN-"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin power_in line
+				(at 0 10.16 270)
+				(length 2.54)
+				(name "VS"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin power_in line
+				(at 0 -10.16 90)
+				(length 2.54)
+				(name "GND"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin bidirectional line
+				(at 10.16 5.08 180)
+				(length 2.54)
+				(name "SDA"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "6"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin input line
+				(at 10.16 2.54 180)
+				(length 2.54)
+				(name "SCL"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "5"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin input line
+				(at 10.16 -2.54 180)
+				(length 2.54)
+				(name "A1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "8"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin input line
+				(at 10.16 -5.08 180)
+				(length 2.54)
+				(name "A0"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "7"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Device:C"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0.254)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "C"
+			(at 0.635 2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "C"
+			(at 0.635 -2.54 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 0.9652 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Unpolarized capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "cap capacitor"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "C_*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "C_0_1"
+			(polyline
+				(pts
+					(xy -2.032 0.762) (xy 2.032 0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -2.032 -0.762) (xy 2.032 -0.762)
+				)
+				(stroke
+					(width 0.508)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "C_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.794)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Device:NetTie_2"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(property "Reference" "NT"
+			(at 0 1.27 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "NetTie_2"
+			(at 0 -1.27 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Net tie, 2 pins"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "net tie short"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "Net*Tie*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "NetTie_2_0_1"
+			(polyline
+				(pts
+					(xy -1.27 0) (xy 1.27 0)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "NetTie_2_1_1"
+			(pin passive line
+				(at -2.54 0 0)
+				(length 2.54)
+				(name "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 2.54 0 180)
+				(length 2.54)
+				(name "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "plts-custom:BAT-"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "BAT-"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Baterai negatif — sisi baterai shunt = star point"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "BAT-_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "BAT-_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "plts-custom:SYS-"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "SYS-"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Sistem negatif — sisi beban shunt (100 A)"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "SYS-_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "SYS-_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "power:+3V3"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3V3"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3V3\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "+3V3_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "+3V3_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "plts-custom:AGND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "AGND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Analog ground — net-tie NT1 ke PGND (S3/S9)"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "AGND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "AGND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "plts-custom:PGND"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -6.35 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "PGND"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power ground DC/DC — star di BATTERY- (sheet 03)"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "PGND_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 -1.27) (xy 1.27 -1.27) (xy 0 -2.54) (xy -1.27 -1.27) (xy 0 -1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "PGND_1_1"
+			(pin power_in line
+				(at 0 0 270)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "power:PWR_FLAG"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#FLG"
+			(at 0 1.905 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 0 3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Special symbol for telling ERC where power comes from"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "flag power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "PWR_FLAG_0_0"
+			(pin power_out line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(symbol "PWR_FLAG_0_1"
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 1.27) (xy -1.016 1.905) (xy 0 2.54) (xy 1.016 1.905) (xy 0 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+	(junction (at 66.04 124.46) (diameter 0) (color 0 0 0 0) (uuid "663844a6-8946-40e8-8426-a427782d70a9"))
+	(junction (at 165.1 111.76) (diameter 0) (color 0 0 0 0) (uuid "313aee12-474f-478c-a757-3c42983edb1d"))
+	(junction (at 180.34 132.08) (diameter 0) (color 0 0 0 0) (uuid "53926696-7010-4290-a091-c14942472e36"))
+	(wire (pts (xy 71.12 124.46) (xy 66.04 124.46)) (stroke (width 0) (type default)) (uuid "ffd21523-dc94-4dd5-8191-476d74b6540f"))
+	(wire (pts (xy 66.04 124.46) (xy 66.04 134.62)) (stroke (width 0) (type default)) (uuid "c43e1d56-b1ec-46f7-891c-cc7b02ea2b5c"))
+	(wire (pts (xy 66.04 134.62) (xy 63.5 134.62)) (stroke (width 0) (type default)) (uuid "6aeb8791-15cd-4543-9edf-a9591626eea0"))
+	(wire (pts (xy 106.68 124.46) (xy 111.76 124.46)) (stroke (width 0) (type default)) (uuid "61d09b13-1d7b-4a0a-810a-5b6342b4765e"))
+	(wire (pts (xy 111.76 124.46) (xy 111.76 119.38)) (stroke (width 0) (type default)) (uuid "5bf333fd-c443-47c1-8740-e5ee6138b0bb"))
+	(wire (pts (xy 165.1 116.84) (xy 165.1 111.76)) (stroke (width 0) (type default)) (uuid "1b9529bf-6fa5-40e0-a0f6-d638232df238"))
+	(wire (pts (xy 165.1 111.76) (xy 185.42 111.76)) (stroke (width 0) (type default)) (uuid "115f9527-fd21-4516-aca2-a2ef5e9ba844"))
+	(wire (pts (xy 185.42 119.38) (xy 185.42 123.19)) (stroke (width 0) (type default)) (uuid "32f2c8c3-6ae1-43dc-8455-034d76ee9ccd"))
+	(wire (pts (xy 175.26 129.54) (xy 180.34 129.54)) (stroke (width 0) (type default)) (uuid "e48c012b-ac8e-4c66-b410-1dd07621c04a"))
+	(wire (pts (xy 175.26 132.08) (xy 180.34 132.08)) (stroke (width 0) (type default)) (uuid "d4d856d4-8b59-43f7-bc5f-01439d97cc45"))
+	(wire (pts (xy 180.34 129.54) (xy 180.34 132.08)) (stroke (width 0) (type default)) (uuid "d1d68883-0be9-472f-ae1c-0c0517fc688b"))
+	(wire (pts (xy 180.34 132.08) (xy 180.34 134.62)) (stroke (width 0) (type default)) (uuid "7622dcd7-4dbf-4f77-a2a9-11773098d4ed"))
+	(wire (pts (xy 58.42 134.62) (xy 58.42 139.7)) (stroke (width 0) (type default)) (uuid "9dd398d3-74d9-4ca3-9c68-b4a4f450c638"))
+	(wire (pts (xy 208.28 139.7) (xy 208.28 144.78)) (stroke (width 0) (type default)) (uuid "ae3fa07a-4523-4578-bf39-d4e284a39624"))
+	(wire (pts (xy 213.36 139.7) (xy 213.36 144.78)) (stroke (width 0) (type default)) (uuid "ba75622b-2288-4d3a-a3c8-34291b094dfb"))
+	(wire (pts (xy 165.1 137.16) (xy 172.72 137.16)) (stroke (width 0) (type default)) (uuid "8d016943-cc09-436b-885b-37d43def6654"))
+	(global_label "SHUNT_K+"
+		(shape input)
+		(at 71.12 129.54 180)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify right)
+		)
+		(uuid "10e36519-27e7-4da2-a244-0998c04383b0")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 71.12 129.54 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(global_label "SHUNT_K-"
+		(shape input)
+		(at 106.68 129.54 0)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left)
+		)
+		(uuid "6ffc3702-34b9-4113-97b8-11a111f5d3f1")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 106.68 129.54 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(global_label "SHUNT_K+"
+		(shape input)
+		(at 154.94 124.46 180)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify right)
+		)
+		(uuid "729911a8-6684-4b18-a86a-c6d24762a365")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 154.94 124.46 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(global_label "SHUNT_K-"
+		(shape input)
+		(at 154.94 129.54 180)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify right)
+		)
+		(uuid "2dd5cfd4-79b3-41a2-8504-033cf6edc8ed")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 154.94 129.54 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(global_label "I2C_SDA"
+		(shape input)
+		(at 175.26 121.92 0)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left)
+		)
+		(uuid "48d8132a-e6e5-4663-a773-f2b70bb2a329")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 175.26 121.92 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(global_label "I2C_SCL"
+		(shape input)
+		(at 175.26 124.46 0)
+		(fields_autoplaced yes)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left)
+		)
+		(uuid "83e1f3ab-0fba-49fe-af18-e9b1ad657375")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 175.26 124.46 0)
+			(effects
+				(font (size 1.27 1.27))
+				(hide yes)
+			)
+		)
+	)
+	(text "TABEL POLARITAS KELVIN (gate S3 — cross-check kontrak firmware):\nK+ (blok BAT-) -> INA219 IN+ (pin 1); K- (blok SYS-) -> INA219 IN- (pin 2).\nDISCHARGE (baterai -> beban): arus konvensional SYS- -> BAT- melalui elemen shunt\n-> V(IN+) - V(IN-) = V(BAT-) - V(SYS-) < 0 -> pembacaan INA219 NEGATIF.\nCHARGE (PV -> baterai): arus BAT- -> SYS- -> V(IN+) - V(IN-) > 0 -> POSITIF.\nFirmware WAJIB memetakan tanda ini (deviasi #2 audit — konfirmasi tim firmware).\nFSR shunt +/-80 mV -> clip +/-106,7 A (80 mV / 0,75 mOhm) — di atas rating 100 A."
+		(exclude_from_sim no)
+		(at 20 124 0)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left bottom)
+		)
+		(uuid "e0fdd69b-8724-4079-8365-2f248c90f085")	)
+	(text "STAR POINT (D6/OPEN-007): node BAT- = blok terminal shunt sisi baterai.\nNT0 (PGND<->BAT-, Pad2.0mm) ditempatkan DI STAR — satu-satunya titik temu return\nelektronik (~38 mA) dengan jalur force; arus elektronik TIDAK melewati elemen shunt\n-> INA219 membaca murni arus baterai. J_BAT.2 (sheet 01) ter-tie ke net BAT- ini.\nNT1 (AGND<->PGND, Pad0.5mm) di area INA219 (DN-S0-03); NT2 (DGND<->PGND, area\nESP32) ditunda ke S9. Finalisasi net-tie vs single-GND = keputusan S9 (DN-S0-03)."
+		(exclude_from_sim no)
+		(at 140 124 0)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left bottom)
+		)
+		(uuid "5ec61d2e-0755-4c9a-a2b0-59d01e14c3e8")	)
+	(text "U3 INA219AIDCNR (SOT-23-8, I2C 0x40 = A0:A1:GND:GND): IN+ pin 1 <- SHUNT_K+,\nIN- pin 2 <- SHUNT_K- (penomoran TERVERIFIKASI simbol resmi Sensor_Energy).\nFSR shunt programmable +/-40/80/160/320 mV — rencana +/-80 mV. Bus-voltage INA219\nTIDAK dipakai sbg pengukur V-bat (rule #3 task spec; V-bat = divider sheet 04).\nCommon-mode IN maks +/-75 mV vs AGND — jauh dalam batas -0,3...26 V datasheet.\nC20 100nF pin-adjacent VS. Jalur Kelvin = pasangan diferensial rapat & pendek\n(kelas KELVIN 0,25 mm; jauh dari pour high-current & modul M1 — S9)."
+		(exclude_from_sim no)
+		(at 20 148 0)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left bottom)
+		)
+		(uuid "90365322-9bd9-4c12-a3f5-09450d8ceb33")	)
+	(text "OPEN-001R: posisi terminal Kelvin & lubang baut FL-2 = VERIFIKASI UNIT FISIK\nsebelum fab. Footprint parametrik: outline 104x22 mm; baut M5 x=+/-41 (pad 12 mm,\ndrill 5,5); Kelvin M3 x=+/-33 y=+7,5 (pad 6,5, drill 3,4) — estimasi foto produk.\nTP_SHUNT_K+ / TP_SHUNT_K- (S7) mengetuk net Kelvin di sheet 11.\nLayout S9: pour 100 A dua sisi + via stitching + clearance termal >=10 mm\nsekeliling RSH1; tanpa komponen di bawah shunt."
+		(exclude_from_sim no)
+		(at 140 148 0)
+		(effects
+			(font (size 1.27 1.27))
+			(justify left bottom)
+		)
+		(uuid "1849d9f3-ea99-46b8-97c2-ae1e00a38436")	)
+	(text_box "03_CURRENT_SHUNT — pengukuran arus baterai presisi (S3).\nRSH1 FL-2 100A/75mV (0,75 mOhm): pin 1 baut M5 blok BATTERY- = star point PGND (D6);\n  pin 2 baut M5 blok SYSTEM- (return beban 100 A); pin 3 K+ (Kelvin blok BAT-);\n  pin 4 K- (Kelvin blok SYS-). Jalur force 100 A = copper zone dua sisi + pad baut\n  + via stitching (S9) — BUKAN trace. Posisi pad = OPEN-001R (verifikasi unit fisik).\nU3 INA219AIDCNR (SOT-23-8, I2C 0x40): IN+ (pin 1) <- SHUNT_K+; IN- (pin 2) <- SHUNT_K-;\n  GND -> AGND; A0=A1=AGND (0x40); VS -> +3V3 + C20 100nF pin-adjacent; SDA/SCL -> bus.\nNT0 = net-tie PGND<->BAT- DI STAR (DN-S3-01); NT1 = net-tie AGND<->PGND area analog\n  (DN-S0-03); NT2 (DGND<->PGND) area ESP32 — ditunda S9.\nGATE: INA219 tidak menyentuh 54 V (netlist proof di validasi skrip)."
+		(exclude_from_sim no)
+		(at 20 20 0)
+		(size 180 48)
+		(stroke (width 0) (type default))
+		(fill (type none))
+		(effects (font (size 1.27 1.27)) (justify left top))
+		(uuid "9b717496-6260-4593-831c-d3aa95c5a540")
+	)
+	(symbol
+		(lib_id "plts-custom:RSH1_FL2")
+		(at 88.9 127.0 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "e5db3dd7-0764-41d5-a4b2-502f69fb3830")
+		(property "Reference" "RSH1"
+			(at 76.2 127.0 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "FL-2 100A/75mV"
+			(at 101.6 127.0 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "plts-custom:Shunt_FL2_100A"
+			(at 88.9 127.0 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "https://shopee.co.id/product/85446693/24520345601"
+			(at 88.9 127.0 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "ab1d97b4-1758-4c21-8223-78b39541c49d"))
+			(pin "2" (uuid "402c6d0e-2a4b-42e6-a28d-dd23992526ae"))
+			(pin "3" (uuid "8237741b-28ca-44aa-9271-c458dc001104"))
+			(pin "4" (uuid "a4f4159f-6792-47a7-add1-06a7e31c2ce9"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "RSH1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Sensor_Energy:INA219AxDCN")
+		(at 165.1 127.0 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "10ab95e6-5f23-44b4-9af2-d3852027214e")
+		(property "Reference" "U3"
+			(at 152.4 127.0 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "INA219AIDCNR"
+			(at 177.8 127.0 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23-8"
+			(at 165.1 127.0 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina219.pdf"
+			(at 165.1 127.0 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "68f18280-f354-4958-b58f-940056065084"))
+			(pin "2" (uuid "9304fbd8-8e8a-4b77-bbb7-10a6edd6bf01"))
+			(pin "3" (uuid "854c633c-d4d7-41e2-9d9a-d9ed8c512239"))
+			(pin "4" (uuid "47a3bd14-9adf-4a1f-a1b0-b87a7f4391f3"))
+			(pin "5" (uuid "1bbaeb6b-c8af-4f35-ae4f-278d821e5254"))
+			(pin "6" (uuid "4e3dcfa2-91a7-4749-a131-753ee25726d9"))
+			(pin "7" (uuid "2774dc6b-cb9c-42a8-b0af-98b20c0e80e5"))
+			(pin "8" (uuid "e364294c-df43-4fba-9061-df4b22400006"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "U3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 185.42 115.57 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "35379b97-9d2d-4e8d-9f5e-2a0001dbb4e6")
+		(property "Reference" "C20"
+			(at 172.72 115.57 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "100nF 25V X7R"
+			(at 198.12 115.57 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 185.42 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 185.42 115.57 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "4fd770d0-8381-4f0d-91a5-37a56d44df09"))
+			(pin "2" (uuid "a61011dd-ad6b-4faa-8b93-f34dada38e37"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "C20")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:NetTie_2")
+		(at 60.96 134.62 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "40c11bdb-c985-4d2d-bd70-52d1db66bc3b")
+		(property "Reference" "NT0"
+			(at 48.26 134.62 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "NET-TIE PGND-BAT- (STAR)"
+			(at 73.66 134.62 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "NetTie:NetTie-2_SMD_Pad2.0mm"
+			(at 60.96 134.62 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 60.96 134.62 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "c2b7454d-5879-48ae-bf67-5ce5d697f9bf"))
+			(pin "2" (uuid "56be86b3-8bb4-4a06-b51a-6056402fa16b"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "NT0")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:NetTie_2")
+		(at 210.82 139.7 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "6ee2de3c-287d-4a1a-9438-e21d46ff9179")
+		(property "Reference" "NT1"
+			(at 198.12 139.7 0)
+			(effects (font (size 1.27 1.27)) (justify right))
+		)
+		(property "Value" "NET-TIE AGND-PGND"
+			(at 223.52 139.7 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "NetTie:NetTie-2_SMD_Pad0.5mm"
+			(at 210.82 139.7 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 210.82 139.7 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "aff8a0ce-a16b-4b17-b26a-2ec0b49dd388"))
+			(pin "2" (uuid "7a72d89b-9099-4ddc-93d0-cf22576a662b"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "NT1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:BAT-")
+		(at 66.04 124.46 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a8d463f3-f1a9-4f60-a039-939dfb2a5b6f")
+		(property "Reference" "#PWR0301"
+			(at 66.04 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "BAT-"
+			(at 66.04 120.65 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "5328e669-2281-48a1-b44c-3f7a21d0c019"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0301")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:SYS-")
+		(at 111.76 124.46 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "c0e62eae-d28e-4ae6-be75-030c63b69f84")
+		(property "Reference" "#PWR0302"
+			(at 111.76 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "SYS-"
+			(at 111.76 120.65 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "31fa1cb6-ed88-4586-b129-5fffe17ad04a"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0302")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 165.1 111.76 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "2c4bd1e3-3e31-4805-81be-4b9d54a2885c")
+		(property "Reference" "#PWR0303"
+			(at 165.1 105.41 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 165.1 107.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "8df92d8c-a6c0-4e13-9a49-29ccf4a7fc7e"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0303")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:AGND")
+		(at 165.1 137.16 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "2a26a821-b0ad-4cc3-b569-a9af2ea1cdf0")
+		(property "Reference" "#PWR0304"
+			(at 165.1 130.81 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "AGND"
+			(at 165.1 133.35 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "6518282f-9921-4dfa-ae53-bf4c621e9518"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0304")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:AGND")
+		(at 185.42 123.19 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "b62bde5b-4290-4906-b942-880dd266adf7")
+		(property "Reference" "#PWR0305"
+			(at 185.42 116.84 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "AGND"
+			(at 185.42 119.38 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "0687b5ea-ef36-423a-ba86-5e8c17a0f8b7"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0305")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:AGND")
+		(at 180.34 134.62 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a4ab3ec5-d501-485e-9e3f-1cf4eb7ef16f")
+		(property "Reference" "#PWR0306"
+			(at 180.34 128.27 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "AGND"
+			(at 180.34 130.81 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "1184e15d-0182-4eae-80f9-ad67cddd2c6d"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0306")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:AGND")
+		(at 208.28 144.78 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "c33091a2-b543-4d1d-927a-8f152f2dc376")
+		(property "Reference" "#PWR0307"
+			(at 208.28 138.43 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "AGND"
+			(at 208.28 140.97 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "e4c5c3bd-3162-48f1-9ca8-3521fe47e3ef"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0307")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:PGND")
+		(at 58.42 139.7 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "f0aed049-93db-4bfb-bd93-74ff3cb16980")
+		(property "Reference" "#PWR0308"
+			(at 58.42 133.35 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "PGND"
+			(at 58.42 135.89 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "3441732b-4c6d-4d41-992c-5b963a3fa9b3"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0308")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:PGND")
+		(at 213.36 144.78 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "f493fd57-5225-4a56-978a-0c0cf825cf7d")
+		(property "Reference" "#PWR0309"
+			(at 213.36 138.43 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "PGND"
+			(at 213.36 140.97 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "fac9af89-6413-4002-a3f0-d84f0e457d68"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#PWR0309")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 172.72 137.16 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "21c7c186-f6f1-4982-8b2c-89ea21416629")
+		(property "Reference" "#FLG0301"
+			(at 172.72 130.81 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "PWR_FLAG"
+			(at 172.72 133.35 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "c74f8d6a-c89d-4431-b82d-00ca5bb7ffb6"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#FLG0301")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 111.76 119.38 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "fab577f0-9c40-4321-905a-07701e26d68a")
+		(property "Reference" "#FLG0302"
+			(at 111.76 113.03 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "PWR_FLAG"
+			(at 111.76 115.57 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "72d9a2eb-7d99-4781-ae22-55e143255dd1"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/9cc59051-f5ae-4568-84bc-8a2499c4126d"
+					(reference "#FLG0302")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/00000000-0000-4000-8000-000000000001"
+			(page "4")
+		)
+	)
+	(embedded_fonts no)
+)

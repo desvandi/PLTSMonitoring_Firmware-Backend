@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "plts-custom")(type "KiCad")(uri "${KIPRJMOD}/plts-custom.pretty")(options "")(descr "Footprint kustom PLTS: RSH1 FL-2 parametrik, M_PZEM socket, dsb. (diisi tahap S1-S11)"))
+)

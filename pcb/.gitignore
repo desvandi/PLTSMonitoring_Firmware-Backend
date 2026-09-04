@@ -1,0 +1,13 @@
+# KiCad backup/cache/regenerable artifacts
+fp-info-cache
+*.kicad_prl
+*-backups/
+*.bak
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*.kicad_pro-bak
+*.rpt
+*.net
+*.dsn
+fab/
+gerbers/
