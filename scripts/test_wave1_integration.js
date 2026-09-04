@@ -347,7 +347,7 @@ console.log('\n=== WAVE-1 INTEGRATION TEST (real Code.gs + real crypto) ===\n');
 const env = createGasContext();
 env.sandbox.setupMasterTemplate();
 
-const TOKEN = 'plts_sec_CHANGE_ME';        // Config default set by template
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';        // Config default set by template
 const GENERIC_DEVICE = 'PLTS_MONITOR_01';
 const GAS_DEVICE = 'PLTS_GAS_001';
 const GAS_SECRET = 'gas_secret_unit_test_0123456789abcdef';

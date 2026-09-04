@@ -162,7 +162,7 @@ console.log('[A] FW6-9 per-device OTA manifest hmac (GAS):');
 const env = createGasContext();
 env.sandbox.setupMasterTemplate();
 
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const DEVICE = 'PLTS_MONITOR_01';
 const FLEET_HMAC = hmacHex('1.5.4|https://example.com/fw.bin|' + 'ab'.repeat(32), TOKEN);
 

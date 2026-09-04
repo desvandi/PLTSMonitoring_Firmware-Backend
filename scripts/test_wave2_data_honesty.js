@@ -182,7 +182,7 @@ function doPost(env, body) {
   return JSON.parse(out.text);
 }
 
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 
 /** Nested canonical envelope with per-test overrides. */
 function envelope(seq, ts, opts = {}) {

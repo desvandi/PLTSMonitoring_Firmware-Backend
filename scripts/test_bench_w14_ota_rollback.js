@@ -109,7 +109,7 @@ const VIRTUAL_BINARIES = {
   '1.7.1': Buffer.from('PLTS-BENCH-VIRTUAL-BINARY-v1.7.1-' + '1'.repeat(300), 'utf8'),
 };
 
-const TOKEN = 'plts_sec_CHANGE_ME';        // Config!AUTH_TOKEN default
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';        // Config!AUTH_TOKEN default
 const ADMIN = 'plts_admin_bench_w14';      // set into Config!ADMIN_TOKEN below
 const DEVICE_KEY = 'PLTS-BENCH-OTA';
 

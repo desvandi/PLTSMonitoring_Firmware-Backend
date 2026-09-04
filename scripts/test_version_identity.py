@@ -106,6 +106,43 @@ def main() -> int:
         check("G5 staged binary name matches manifest version",
               versioned_bins[0].name == expected_name,
               f"found {versioned_bins[0].name}, expected {expected_name}")
+
+        # G5b — [Audit 8 P1-1] EMBEDDED version identity (not just filename).
+        # The filename can lie — a stale binary renamed to v1.7.1 would pass G5
+        # but the firmware would report a different version via /api/version,
+        # breaking OTA anti-downgrade. Extract the FIRMWARE_VERSION string
+        # embedded in the binary (it's compiled in as a C string literal) and
+        # compare to the manifest version.
+        bin_path = versioned_bins[0]
+        try:
+            bin_bytes = bin_path.read_bytes()
+            # The FIRMWARE_VERSION constant is a quoted string like "1.7.1".
+            # Search for the pattern in the binary. ESP32 Arduino compiles
+            # string literals into .rodata — they appear as plain ASCII.
+            # Look for "X.Y.Z" pattern near a plausible location.
+            import re as _re
+            # Find all X.Y.Z strings in the binary
+            candidates = _re.findall(rb'"?(\d+\.\d+\.\d+)"?', bin_bytes)
+            # Filter: must be a plausible firmware version (not a sub-version
+            # of a library). Heuristic: appears at least once.
+            semver_pattern = _re.compile(rb"\d+\.\d+\.\d+")
+            all_versions = set()
+            for match in semver_pattern.finditer(bin_bytes):
+                v = match.group().decode("ascii", errors="ignore")
+                all_versions.add(v)
+            # The firmware version should appear. If multiple versions appear
+            # (e.g., library versions), the manifest version MUST be among them.
+            if version in all_versions:
+                check("G5b embedded firmware version matches manifest",
+                      True, f"found '{version}' embedded in {bin_path.name}")
+            else:
+                check("G5b embedded firmware version matches manifest",
+                      False,
+                      f"manifest version '{version}' NOT found embedded in "
+                      f"{bin_path.name} (found: {sorted(all_versions)[:10]})")
+        except Exception as e:
+            check("G5b embedded firmware version matches manifest",
+                  False, f"binary read error: {e}")
     else:
         # Transitional state (source bumped, CI build pending) — legal.
         print(f"  SKIP  G5 no staged binary yet (CI build pending) — "

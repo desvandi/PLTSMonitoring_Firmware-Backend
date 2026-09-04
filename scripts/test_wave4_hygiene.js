@@ -173,9 +173,9 @@ console.log('\n=== WAVE-4 HYGIENE TEST (real Code.gs + real crypto) ===\n');
 const env = createGasContext();
 env.sandbox.setupMasterTemplate();
 
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const DEVICE = 'PLTS_MONITOR_01';
-const ADMIN = 'plts_sec_CHANGE_ME';   // template default? no — empty. Set explicitly below.
+const ADMIN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';   // template default? no — empty. Set explicitly below.
 
 function genericTelemetry(seq, vBat) {
   return {

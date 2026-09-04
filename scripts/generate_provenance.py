@@ -157,6 +157,7 @@ def main() -> None:
         "buildTimestamp":   build_ts,
         "firmwareSha256":   artifact_meta["firmware"]["sha256"],
         "firmwareSize":     artifact_meta["firmware"]["size"],
+        "firmwareFilename": artifact_meta["firmware"]["filename"],   # [P1-4] canonical filename for exact artifact selection
         "bootloaderSha256": artifact_meta["bootloader"]["sha256"],
         "partitionsSha256": artifact_meta["partitions"]["sha256"],
         "canonicalSource":  "GitHub Release (immutable)",

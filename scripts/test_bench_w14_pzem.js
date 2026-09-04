@@ -481,7 +481,7 @@ console.log('\n[PZ-4] Energy counter semantics (meter power loss):');
 
 // ---- PZ-6 (GAS ingest runs before static so we can reuse the env) --------------
 console.log('\n[PZ-6] GAS ingest — REAL Code.gs in vm sandbox:');
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 {
   const g = createGasContext();
   g.sandbox.setupMasterTemplate();

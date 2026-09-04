@@ -218,7 +218,7 @@ console.log('[P0-007] Config defaults:');
 // --- T2: PING with token ----------------------------------------------------
 console.log('\n[P0-001] API surface:');
 {
-  const r = doPost(env, { action: 'PING', token: 'plts_sec_CHANGE_ME' });
+  const r = doPost(env, { action: 'PING', token: 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE' });
   check('PING → SUCCESS/PONG', r.status === 'SUCCESS' && r.message === 'PONG');
   check('PING envelope has code+timestamp', typeof r.code === 'number' && typeof r.timestamp === 'string');
 }
@@ -227,13 +227,13 @@ console.log('\n[P0-001] API surface:');
   check('PING bad token → 401', r.code === 401 && r.status === 'ERROR');
 }
 {
-  const r = doPost(env, { action: 'NOPE', token: 'plts_sec_CHANGE_ME' });
+  const r = doPost(env, { action: 'NOPE', token: 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE' });
   check('Unknown action → 400', r.code === 400);
 }
 
 // --- T3: P1-001/P1-002 — telemetry identity + duplicate ----------------------
 console.log('\n[P1-001/P1-002] Identity + duplicate handling:');
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 {
   const r1 = doPost(env, { action: 'TELEMETRY', token: TOKEN, device_key: 'PLTS-TEST01', data: envelope(100, '2026-08-27T10:00:00Z') });
   check('seq 100 → ACCEPTED', r1.status === 'SUCCESS' && r1.data.decision === 'ACCEPTED', JSON.stringify(r1));

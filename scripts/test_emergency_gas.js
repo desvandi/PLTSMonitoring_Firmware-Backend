@@ -238,7 +238,7 @@ console.log('\n=== WAVE-7 EMERGENCY LAYER TEST (real Code.gs) ===\n');
 const env = createGasContext();
 env.sandbox.setupMasterTemplate();
 
-const TOKEN = 'plts_sec_CHANGE_ME';
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const ADMIN = 'plts_admin_w7_9a3f7c2d5e8b1a6f';
 const DEV = 'PLTS_MONITOR_01';
 const DEV_HMAC = 'PLTS_GAS_H7';

@@ -1,28 +1,37 @@
 #!/usr/bin/env python3
 """
-release_gate.py — P1-9 Master Release Gate.
+release_gate.py — Master Release Gate (Audit 8 remediation).
 
 Single point of authority that decides RELEASE = PASS | BLOCKED. Runs every
-invariant check defined in the audit brief §7 (Master Release Gate):
+invariant check defined in the audit brief §7 (Master Release Gate) and
+enforces the Audit 8 P0 invariants:
 
-  1. Build generic present         (artifacts/plts-firmware-generic/)
-  2. Build modular present         (artifacts/plts-firmware-modular-production/)
-  3. Production env present        (P0-2 — must be in CI artifacts)
-  4. release.json + provenance.json + SHA256SUMS present per target
-  5. SHA256SUMS hashes verify      (re-hash every binary, compare to manifest)
-  6. Ed25519 signature valid       (if .sig present, verify against public key)
-  7. Cross-repo artifact SHA       (if PWA repo path provided, compare SHAs)
-  8. No duplicate versions         (exactly one plts_firmware_v<X.Y.Z>.bin per target)
-  9. provenance.gitCommit non-empty (source identity recorded)
- 10. provenance.toolchain pinned   (PlatformIO version not "unknown")
+  P0-A — Production signature is REQUIRED, not optional.
+         Unsigned production artifact => FAIL (was "not signed (dev build)" => PASS).
+  P0-B — Cross-repo verification is MANDATORY for production.
+         Missing PWA path / firmware repo path => FAIL (was "skipped" => PASS).
+  P1-3 — Full artifact inventory: expected set is fixed; extra/missing => FAIL.
+  P1-4 — Exact artifact selection: firmware binary identified by release.json
+         firmwareSha256, NOT by glob firmware*.bin[0]. Multiple matches => FAIL.
+  P1-5 — Provenance binding: provenance.release.gitCommit MUST equal --ci-sha
+         (passed from GITHUB_SHA in CI). Mismatch => FAIL.
+
+Per-target checks (target tag in release.json):
+  - target == "modular"     → production invariants apply (signature, cross-repo)
+  - target == "generic"     → production invariants apply IF release.json.target
+                              says "production" or --strict is set
+  - dev/staging artifacts   → signature optional, cross-repo optional
 
 Usage:
   python3 scripts/release_gate.py \\
       --artifacts-dir ci-artifacts \\
       --target generic \\
       --target modular \\
-      [--pwa-path ../PLTSMonitoring_PWA] \\
-      [--public-key firmware_signing_public.pem]
+      --public-key firmware_signing_public.pem \\
+      --pwa-path ../PLTSMonitoring_PWA \\
+      --firmware-repo-path . \\
+      --ci-sha ${GITHUB_SHA} \\
+      [--strict]
 
 Exit:  0 = RELEASE = PASS
        1 = RELEASE = BLOCKED (with detailed reason list)
@@ -32,6 +41,19 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+
+
+# [P1-3] Canonical artifact inventory. The gate fails if ANY of these is
+# missing OR if any UNEXPECTED executable artifact (.bin/.elf/.hex) is present.
+CANONICAL_ARTIFACTS = {
+    "bootloader.bin",
+    "partitions.bin",
+    # firmware.bin OR plts_firmware_v<X.Y.Z>.bin — identified by release.json
+    "release.json",
+    "provenance.json",
+    "SHA256SUMS",
+}
+EXECUTABLE_EXTS = (".bin", ".elf", ".hex", ".map")
 
 
 def sha256_of(p: Path) -> str:
@@ -54,10 +76,14 @@ class Gate:
         self.checks.append((name, "FAIL", detail))
         self.blockers.append(f"{name}: {detail}")
 
+    def warn(self, name: str, detail: str) -> None:
+        # Warning = recorded but does NOT block. Used for dev/staging only.
+        self.checks.append((name, "WARN", detail))
+
     def summary(self) -> str:
         lines = ["=" * 72, "MASTER RELEASE GATE", "=" * 72]
         for name, status, detail in self.checks:
-            tag = "[PASS]" if status == "PASS" else "[FAIL]"
+            tag = {"PASS": "[PASS]", "FAIL": "[FAIL]", "WARN": "[WARN]"}[status]
             lines.append(f"  {tag} {name}")
             if detail:
                 lines.append(f"        {detail}")
@@ -93,52 +119,166 @@ def find_target_dir(artifacts_dir: Path, target: str) -> Path | None:
     return None
 
 
-def check_target(gate: Gate, target: str, target_dir: Path, public_key: Path | None) -> None:
+def is_production_target(target: str, target_dir: Path) -> bool:
+    """
+    Determine if this target dir represents a production artifact.
+
+    Production invariants (signature required, cross-repo required) apply when:
+      - target == "modular" AND directory name contains "production"
+      - target == "generic" (generic tree is the OTA distribution tree)
+      - release.json.target == "production" (explicit)
+      - --strict is set on CLI (handled by caller)
+    """
+    if "production" in target_dir.name:
+        return True
+    if target == "generic":
+        # The generic tree IS the production OTA distribution tree.
+        return True
+    # Check release.json for explicit production tag
+    rel_path = target_dir / "release.json"
+    if rel_path.is_file():
+        try:
+            rel = json.loads(rel_path.read_text())
+            if rel.get("target") == "production":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def check_target(
+    gate: Gate,
+    target: str,
+    target_dir: Path,
+    public_key: Path | None,
+    ci_sha: str | None,
+    strict: bool,
+) -> None:
     name = f"target[{target}]: artifacts present"
     if not target_dir.is_dir():
         gate.fail(name, f"directory not found: {target_dir}")
         return
     gate.ok(name, str(target_dir))
 
-    # Required files
-    required = ["bootloader.bin", "partitions.bin"]
-    # find firmware.bin or plts_firmware_v*.bin
-    fw_files = list(target_dir.glob("firmware.bin")) + \
-               list(target_dir.glob("plts_firmware_v*.bin"))
-    if not fw_files:
-        gate.fail(f"target[{target}]: firmware binary", "no firmware.bin or plts_firmware_v*.bin")
-        return
-    fw_path = fw_files[0]
-    required.append(fw_path.name)
+    is_prod = is_production_target(target, target_dir) or strict
 
-    for f in required:
+    # ------------------------------------------------------------------
+    # [P1-3] Full artifact inventory: required files MUST exist, no extra
+    # executable artifacts allowed.
+    # ------------------------------------------------------------------
+    required_files = list(CANONICAL_ARTIFACTS)
+    for f in required_files:
         p = target_dir / f
         if not p.is_file():
-            gate.fail(f"target[{target}]: {f} present", "missing")
+            gate.fail(f"target[{target}]: required artifact {f}", "missing")
         else:
-            gate.ok(f"target[{target}]: {f} present", f"{p.stat().st_size:,} B")
+            gate.ok(f"target[{target}]: required artifact {f}", "present")
 
-    # Manifests
-    for m in ("release.json", "provenance.json", "SHA256SUMS"):
-        p = target_dir / m
+    # Detect unexpected executable artifacts (.bin/.elf/.hex/.map)
+    # bootloader.bin and partitions.bin are expected; firmware is identified below.
+    unexpected_exec = []
+    for p in target_dir.iterdir():
         if not p.is_file():
-            gate.fail(f"target[{target}]: {m}", "missing")
-        else:
-            gate.ok(f"target[{target}]: {m}", "present")
+            continue
+        if p.suffix.lower() not in EXECUTABLE_EXTS:
+            continue
+        # Allowed executables: bootloader.bin, partitions.bin, firmware*.bin, *.sig
+        if p.name in ("bootloader.bin", "partitions.bin"):
+            continue
+        if p.name == "firmware.bin" or p.name.startswith("plts_firmware_v"):
+            continue
+        if p.name.endswith(".bin.sig") or p.name.endswith(".bin.sha256") or p.name.endswith(".bin.ota.json"):
+            continue
+        unexpected_exec.append(p.name)
+    if unexpected_exec:
+        gate.fail(
+            f"target[{target}]: unexpected executable artifacts",
+            f"found: {unexpected_exec} (only bootloader.bin, partitions.bin, firmware.bin/plts_firmware_v*.bin allowed)",
+        )
+    else:
+        gate.ok(f"target[{target}]: no unexpected executables", "clean")
 
-    # Verify SHA256SUMS
+    # ------------------------------------------------------------------
+    # [P1-4] Exact artifact selection: identify firmware binary by release.json
+    # firmwareSha256, NOT by glob. Multiple firmware binaries => FAIL.
+    # ------------------------------------------------------------------
+    rel_path = target_dir / "release.json"
+    if not rel_path.is_file():
+        gate.fail(f"target[{target}]: firmware identity", "release.json missing — cannot identify canonical firmware")
+        return
+    try:
+        rel = json.loads(rel_path.read_text())
+    except Exception as e:
+        gate.fail(f"target[{target}]: firmware identity", f"release.json unparseable: {e}")
+        return
+
+    expected_fw_sha = rel.get("firmwareSha256", "")
+    expected_fw_name = rel.get("firmwareFilename") or rel.get("artifacts", {}).get("firmware", {}).get("filename", "")
+
+    # Find firmware binaries present
+    fw_candidates = [p for p in target_dir.iterdir()
+                     if p.is_file() and (p.name == "firmware.bin" or p.name.startswith("plts_firmware_v"))]
+    if len(fw_candidates) == 0:
+        gate.fail(f"target[{target}]: firmware binary", "no firmware.bin or plts_firmware_v*.bin found")
+        return
+    if len(fw_candidates) > 1:
+        names = [p.name for p in fw_candidates]
+        gate.fail(f"target[{target}]: firmware binary",
+                  f"multiple firmware binaries found: {names} — exactly one required")
+        return
+
+    fw_path = fw_candidates[0]
+    actual_fw_sha = sha256_of(fw_path)
+
+    # [P1-4] Verify the binary's SHA matches release.json's firmwareSha256.
+    if not expected_fw_sha:
+        gate.fail(f"target[{target}]: release.firmwareSha256", "missing in release.json")
+    elif expected_fw_sha != actual_fw_sha:
+        gate.fail(f"target[{target}]: release.firmwareSha256",
+                  f"manifest={expected_fw_sha[:16]}... actual={actual_fw_sha[:16]}... (binary != manifest)")
+    else:
+        gate.ok(f"target[{target}]: release.firmwareSha256",
+                f"matches actual binary ({actual_fw_sha[:16]}...)")
+
+    # If release.json declares the expected filename, verify it matches.
+    if expected_fw_name and expected_fw_name != fw_path.name:
+        gate.fail(f"target[{target}]: release.firmwareFilename",
+                  f"manifest={expected_fw_name} actual={fw_path.name}")
+
+    # ------------------------------------------------------------------
+    # Verify SHA256SUMS — re-hash every binary, compare to manifest.
+    # Also verify SHA256SUMS contains EXACTLY the canonical artifact set.
+    # ------------------------------------------------------------------
     sums_path = target_dir / "SHA256SUMS"
     if sums_path.is_file():
-        bad = 0
+        sums_entries = {}
         for line in sums_path.read_text().splitlines():
             parts = line.split(None, 1)
             if len(parts) != 2:
                 continue
             expected, filename = parts
             filename = filename.strip()
+            sums_entries[filename] = expected
+
+        # [P1-3] SHA256SUMS must list exactly the executable artifacts present
+        expected_sums_keys = {"bootloader.bin", "partitions.bin", fw_path.name}
+        missing_in_sums = expected_sums_keys - set(sums_entries.keys())
+        extra_in_sums = set(sums_entries.keys()) - expected_sums_keys
+        if missing_in_sums:
+            gate.fail(f"target[{target}]: SHA256SUMS coverage",
+                      f"missing entries: {sorted(missing_in_sums)}")
+        elif extra_in_sums:
+            gate.fail(f"target[{target}]: SHA256SUMS coverage",
+                      f"unexpected entries: {sorted(extra_in_sums)}")
+        else:
+            gate.ok(f"target[{target}]: SHA256SUMS coverage", "exact match with artifact set")
+
+        # Verify each hash
+        bad = 0
+        for filename, expected in sums_entries.items():
             p = target_dir / filename
             if not p.is_file():
-                gate.fail(f"target[{target}]: SHA256SUMS entry", f"{filename} missing")
+                gate.fail(f"target[{target}]: SHA256SUMS entry", f"{filename} missing on disk")
                 bad += 1
                 continue
             actual = sha256_of(p)
@@ -148,36 +288,53 @@ def check_target(gate: Gate, target: str, target_dir: Path, public_key: Path | N
         if bad == 0:
             gate.ok(f"target[{target}]: SHA256SUMS verify", "all hashes match")
 
+    # ------------------------------------------------------------------
     # Verify provenance
+    # ------------------------------------------------------------------
     prov_path = target_dir / "provenance.json"
-    rel_path  = target_dir / "release.json"
-    if prov_path.is_file() and rel_path.is_file():
+    if prov_path.is_file():
         try:
             prov = json.loads(prov_path.read_text())
-            rel  = json.loads(rel_path.read_text())
-            git_commit = rel.get("gitCommit", "")
-            if not git_commit or git_commit == "unknown":
-                gate.fail(f"target[{target}]: provenance.gitCommit", "empty/unknown")
-            else:
-                gate.ok(f"target[{target}]: provenance.gitCommit", git_commit[:12])
-
-            pio = prov.get("toolchain", {}).get("platformio", "")
-            if not pio or pio == "unknown":
-                gate.fail(f"target[{target}]: toolchain.platformio", "unknown (must be pinned)")
-            else:
-                gate.ok(f"target[{target}]: toolchain.platformio", pio)
-
-            # Cross-check: release.json.firmwareSha256 must match actual
-            actual_fw_sha = sha256_of(fw_path)
-            if rel.get("firmwareSha256") != actual_fw_sha:
-                gate.fail(f"target[{target}]: release.firmwareSha256",
-                          f"manifest={rel.get('firmwareSha256','')[:16]}... actual={actual_fw_sha[:16]}...")
-            else:
-                gate.ok(f"target[{target}]: release.firmwareSha256", "matches actual binary")
         except Exception as e:
             gate.fail(f"target[{target}]: provenance parse", str(e))
+            prov = {}
+    else:
+        prov = {}
 
-    # Ed25519 signature verification
+    git_commit = rel.get("gitCommit", "")
+    if not git_commit or git_commit == "unknown":
+        gate.fail(f"target[{target}]: provenance.gitCommit", "empty/unknown")
+    else:
+        gate.ok(f"target[{target}]: provenance.gitCommit", git_commit[:12])
+
+    # [P1-5] Bind provenance to CI identity: provenance.gitCommit MUST equal --ci-sha
+    if ci_sha:
+        if git_commit != ci_sha:
+            gate.fail(f"target[{target}]: provenance.commit binding",
+                      f"provenance.gitCommit={git_commit[:12]} != GITHUB_SHA={ci_sha[:12]} "
+                      f"(binary may not be built from this commit)")
+        else:
+            gate.ok(f"target[{target}]: provenance.commit binding",
+                    f"provenance.gitCommit == GITHUB_SHA ({ci_sha[:12]})")
+    elif is_prod:
+        # [P1-5] For production, --ci-sha is REQUIRED. Without it, we cannot
+        # verify the binary was built from the tagged commit.
+        gate.fail(f"target[{target}]: provenance.commit binding",
+                  "--ci-sha not provided — cannot verify binary was built from tagged commit (P1-5)")
+    else:
+        gate.warn(f"target[{target}]: provenance.commit binding",
+                  "--ci-sha not provided (dev/staging — skipped)")
+
+    pio = prov.get("toolchain", {}).get("platformio", "")
+    if not pio or pio == "unknown":
+        gate.fail(f"target[{target}]: toolchain.platformio", "unknown (must be pinned)")
+    else:
+        gate.ok(f"target[{target}]: toolchain.platformio", pio)
+
+    # ------------------------------------------------------------------
+    # [P0-A] Ed25519 signature verification — REQUIRED for production.
+    # Unsigned production artifact => FAIL (was "not signed (dev build)" => PASS).
+    # ------------------------------------------------------------------
     sig_path = fw_path.with_suffix(".bin.sig")
     if sig_path.is_file() and public_key and public_key.is_file():
         try:
@@ -185,8 +342,8 @@ def check_target(gate: Gate, target: str, target_dir: Path, public_key: Path | N
             from cryptography.hazmat.primitives import serialization
             pub = serialization.load_pem_public_key(public_key.read_bytes())
             sig = bytes.fromhex(sig_path.read_text().strip())
-            digest = sha256_of(fw_path)  # firmware signs raw 32-byte digest (P0-1)
-            raw_digest = bytes.fromhex(digest)
+            # firmware signs raw 32-byte SHA-256 digest (P0-1)
+            raw_digest = bytes.fromhex(actual_fw_sha)
             assert isinstance(pub, Ed25519PublicKey)
             pub.verify(sig, raw_digest)
             gate.ok(f"target[{target}]: Ed25519 signature", "VALID")
@@ -195,9 +352,20 @@ def check_target(gate: Gate, target: str, target_dir: Path, public_key: Path | N
         except Exception as e:
             gate.fail(f"target[{target}]: Ed25519 signature", f"INVALID: {e}")
     elif sig_path.is_file() and not public_key:
-        gate.fail(f"target[{target}]: Ed25519 signature", "signature present but --public-key not provided")
+        gate.fail(f"target[{target}]: Ed25519 signature",
+                  "signature present but --public-key not provided")
+    elif is_prod:
+        # [P0-A] PRODUCTION INVARIANT: signature is REQUIRED.
+        if not public_key:
+            gate.fail(f"target[{target}]: Ed25519 signature",
+                      "PRODUCTION target requires --public-key (no key provided)")
+        else:
+            gate.fail(f"target[{target}]: Ed25519 signature",
+                      f"PRODUCTION target requires .sig file ({sig_path.name} missing) — "
+                      f"unsigned production artifact is BLOCKED")
     else:
-        gate.ok(f"target[{target}]: Ed25519 signature", "not signed (dev build)")
+        # Dev/staging — unsigned allowed, but recorded as WARN (not PASS-as-OK).
+        gate.warn(f"target[{target}]: Ed25519 signature", "not signed (dev/staging build)")
 
 
 def check_no_duplicate_versions(gate: Gate, artifacts_dir: Path) -> None:
@@ -207,13 +375,10 @@ def check_no_duplicate_versions(gate: Gate, artifacts_dir: Path) -> None:
         if not sub.is_dir():
             continue
         for fw in sub.glob("plts_firmware_v*.bin"):
-            # extract version
             stem = fw.stem  # plts_firmware_v1.7.1
             ver = stem.replace("plts_firmware_v", "")
             seen.setdefault(ver, []).append(sub.name)
     for ver, targets in seen.items():
-        # A version can appear in BOTH generic and modular (different binaries)
-        # but not twice within the same target.
         unique_targets = set(targets)
         if len(targets) != len(unique_targets):
             gate.fail("duplicate version", f"v{ver} appears multiple times in same target: {targets}")
@@ -221,17 +386,74 @@ def check_no_duplicate_versions(gate: Gate, artifacts_dir: Path) -> None:
             gate.ok("duplicate version", f"v{ver} in {sorted(unique_targets)}")
 
 
-def check_cross_repo(gate: Gate, pwa_path: Path, firmware_repo_path: Path) -> None:
-    """P0-6 — verify PWA's committed binary SHA matches firmware repo's binary SHA."""
+def check_cross_repo(
+    gate: Gate,
+    pwa_path: Path | None,
+    firmware_repo_path: Path | None,
+    is_prod_release: bool,
+) -> None:
+    """
+    [P0-B] Cross-repo verification — MANDATORY for production.
+
+    Previous behavior: missing --pwa-path => "skipped" => PASS (false green).
+    New behavior:
+      - Production release: missing --pwa-path or --firmware-repo-path => FAIL
+      - Dev/staging: skipped is OK (WARN, not FAIL)
+    """
+    if not pwa_path or not firmware_repo_path:
+        if is_prod_release:
+            gate.fail(
+                "cross-repo P0-6",
+                "PRODUCTION release requires --pwa-path AND --firmware-repo-path "
+                "(cannot skip cross-repo identity verification for production)",
+            )
+        else:
+            gate.warn(
+                "cross-repo P0-6",
+                "skipped (provide --pwa-path + --firmware-repo-path to enable; required for production)",
+            )
+        return
+
     pwa_fw = pwa_path / "public" / "firmware"
     fw_bin = firmware_repo_path / "firmware-generic" / "bin"
     if not pwa_fw.is_dir():
-        gate.ok("cross-repo P0-6", "PWA has no public/firmware/ — no drift possible")
-        return
-    if not fw_bin.is_dir():
-        gate.fail("cross-repo P0-6", "firmware-generic/bin/ missing")
+        # PWA has no public/firmware/ — this is the desired end-state (P0-6:
+        # PWA should NOT track binaries). Verify the PWA manifest version
+        # matches the firmware manifest version instead.
+        pwa_manifest = pwa_path / "public" / "firmware" / "manifest.json"
+        fw_manifest = firmware_repo_path / "firmware-generic" / "manifest.json"
+        if not pwa_manifest.is_file() and not fw_manifest.is_file():
+            gate.fail("cross-repo P0-6", f"both manifests missing: {pwa_manifest} + {fw_manifest}")
+            return
+        # If PWA manifest is in a different location, look for it.
+        pwa_manifest_alt = pwa_path / "public" / "firmware" / "manifest.json"
+        if not pwa_manifest_alt.is_file():
+            # PWA may have a manifest at public/firmware/manifest.json if
+            # it's still using the legacy sync flow. If neither exists, the
+            # PWA has fully decoupled — check release reference instead.
+            # For now, accept: PWA has no firmware dir => no drift possible.
+            gate.ok("cross-repo P0-6", "PWA has no public/firmware/ (fully decoupled — OK)")
+            return
+        # Compare versions
+        try:
+            pwa_m = json.loads(pwa_manifest_alt.read_text())
+            fw_m = json.loads(fw_manifest.read_text())
+            if pwa_m.get("version") != fw_m.get("version"):
+                gate.fail("cross-repo P0-6",
+                          f"PWA manifest version {pwa_m.get('version')} != "
+                          f"firmware manifest version {fw_m.get('version')}")
+            else:
+                gate.ok("cross-repo P0-6",
+                        f"manifests in sync (v{pwa_m.get('version')})")
+        except Exception as e:
+            gate.fail("cross-repo P0-6", f"manifest parse error: {e}")
         return
 
+    if not fw_bin.is_dir():
+        gate.fail("cross-repo P0-6", f"firmware-generic/bin/ missing: {fw_bin}")
+        return
+
+    # Compare SHAs for bootloader, partitions, and versioned firmware binary.
     for f in ("bootloader.bin", "partitions.bin"):
         a, b = fw_bin / f, pwa_fw / f
         if a.is_file() and b.is_file():
@@ -263,11 +485,15 @@ def main() -> int:
     ap.add_argument("--target", action="append", required=True, choices=["generic", "modular"],
                     help="target to check (can be repeated)")
     ap.add_argument("--pwa-path", type=Path, default=None,
-                    help="PWA repo checkout (for P0-6 cross-repo check)")
+                    help="PWA repo checkout (REQUIRED for production — P0-B)")
     ap.add_argument("--firmware-repo-path", type=Path, default=None,
-                    help="Firmware repo root (for P0-6 cross-repo check)")
+                    help="Firmware repo root (REQUIRED for production — P0-B)")
     ap.add_argument("--public-key", type=Path, default=None,
-                    help="Ed25519 public key PEM (for signature verification)")
+                    help="Ed25519 public key PEM (REQUIRED for production — P0-A)")
+    ap.add_argument("--ci-sha", type=str, default=None,
+                    help="GITHUB_SHA — provenance.release.gitCommit MUST match (P1-5)")
+    ap.add_argument("--strict", action="store_true",
+                    help="Apply production invariants even to dev/staging artifacts")
     args = ap.parse_args()
 
     gate = Gate()
@@ -277,19 +503,33 @@ def main() -> int:
         print(gate.summary())
         return 1
 
+    # Determine if this is a production release (any target is production).
+    # If so, cross-repo and signature checks are MANDATORY.
+    is_prod_release = False
+    for target in args.target:
+        td = find_target_dir(args.artifacts_dir, target)
+        if td and is_production_target(target, td):
+            is_prod_release = True
+            break
+    if args.strict:
+        is_prod_release = True
+
+    # [P0-A] For production, --public-key is REQUIRED upfront.
+    if is_prod_release and not args.public_key:
+        gate.fail("production public key",
+                  "PRODUCTION release requires --public-key (Ed25519 signing key)")
+
     for target in args.target:
         td = find_target_dir(args.artifacts_dir, target)
         if td is None:
             gate.fail(f"target[{target}]", "artifact directory not found")
         else:
-            check_target(gate, target, td, args.public_key)
+            check_target(gate, target, td, args.public_key, args.ci_sha, args.strict)
 
     check_no_duplicate_versions(gate, args.artifacts_dir)
 
-    if args.pwa_path and args.firmware_repo_path:
-        check_cross_repo(gate, args.pwa_path, args.firmware_repo_path)
-    else:
-        gate.ok("cross-repo P0-6", "skipped (provide --pwa-path + --firmware-repo-path to enable)")
+    # [P0-B] Cross-repo check is MANDATORY for production.
+    check_cross_repo(gate, args.pwa_path, args.firmware_repo_path, is_prod_release)
 
     print(gate.summary())
     return 1 if gate.blockers else 0

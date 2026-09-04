@@ -282,7 +282,7 @@ console.log('\n=== WAVE-3 AUTHORIZATION TEST (real Code.gs + real crypto) ===\n'
 const env = createGasContext();
 env.sandbox.setupMasterTemplate();
 
-const TOKEN = 'plts_sec_CHANGE_ME';               // Config default from template
+const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';               // Config default from template
 const ADMIN = 'plts_admin_w3_7f2c9e1a4d6b8a3c';   // operator-only secret
 const DEV_A = 'PLTS_GAS_A';                       // HMAC fleet device A
 const SEC_A = 'secret_A_0123456789abcdef';
@@ -495,7 +495,7 @@ console.log('\n[C] GAS-2-K — OTA admin gate + calibration ranges:');
   // C5 — fail-closed while ADMIN_TOKEN is unset (fresh deployment).
   const env2 = createGasContext();
   env2.sandbox.setupMasterTemplate();
-  const c5 = doPost(env2, { action: 'OTA_PUBLISH', token: 'plts_sec_CHANGE_ME', admin_token: 'anything', manifest });
+  const c5 = doPost(env2, { action: 'OTA_PUBLISH', token: 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE', admin_token: 'anything', manifest });
   check('C5 ADMIN_TOKEN unset → OTA publishing DISABLED (401, honest refusal)',
     c5.code === 401 && /disabled — set ADMIN_TOKEN/.test(c5.message), c5.message);
 
