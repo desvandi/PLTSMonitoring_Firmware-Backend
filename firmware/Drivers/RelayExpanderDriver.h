@@ -16,8 +16,8 @@
 #define PLTS_DRIVERS_RELAY_EXPANDER_DRIVER_H
 
 #include <Arduino.h>
+#include "../Core/Config.h"   // [CI fix] MUST be before #if PLTS_ENABLE_RELAYS
 #if PLTS_ENABLE_RELAYS
-#include "../Core/Config.h"   // [self-review fix] needed for Core::PCF8574_* constants
 
 namespace Drivers {
 

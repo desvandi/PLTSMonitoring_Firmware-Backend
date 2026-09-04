@@ -30,9 +30,9 @@
 #define PLTS_SERVICES_RELAY_CONTROLLER_H
 
 #include <Arduino.h>
-#if PLTS_ENABLE_RELAYS
-#include "../Core/Config.h"
+#include "../Core/Config.h"   // [CI fix] MUST be before #if PLTS_ENABLE_RELAYS
 #include "../Core/Types.h"
+#if PLTS_ENABLE_RELAYS
 #include "../Drivers/RelayExpanderDriver.h"
 #include <ArduinoJson.h>
 

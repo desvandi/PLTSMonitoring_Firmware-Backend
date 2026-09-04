@@ -5,11 +5,12 @@
 #ifndef PLTS_WEB_RELAY_HANDLERS_H
 #define PLTS_WEB_RELAY_HANDLERS_H
 
+#include "../Core/Config.h"   // [CI fix] MUST be before #if PLTS_ENABLE_RELAYS
 #if PLTS_ENABLE_RELAYS
 namespace Web {
 namespace RelayHandlers {
   void registerRoutes();
 }}
-#endif
+#endif // PLTS_ENABLE_RELAYS
 
-#endif
+#endif // PLTS_WEB_RELAY_HANDLERS_H
