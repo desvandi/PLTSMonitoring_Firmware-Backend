@@ -638,8 +638,11 @@ void RelayController::_saveLockoutStates() {
 }
 
 void RelayController::_recordHeartbeat() {
-  extern void recordHeartbeat(Core::TaskId);
-  recordHeartbeat(Core::TaskId::Relay);
+  // [CI fix] Use Services::health.recordHeartbeat() — the canonical API.
+  // The previous 'extern void recordHeartbeat(Core::TaskId)' declaration
+  // looked for a free function that doesn't exist — recordHeartbeat is a
+  // member of HealthSupervisor class.
+  Services::health.recordHeartbeat(Core::TaskId::Relay);
 }
 
 // [P1-7] all_off with per-channel result tracking
