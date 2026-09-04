@@ -405,6 +405,13 @@ jobs:
           name: plts-firmware-modular-production
           path: ci-artifacts/modular
 
+      - name: Import GPG public key for tag verification
+        env:
+          PLTS_RELEASE_GPG_PUBLIC_KEY: ${{ secrets.PLTS_RELEASE_GPG_PUBLIC_KEY }}
+        run: |
+          echo "$PLTS_RELEASE_GPG_PUBLIC_KEY" | gpg --import --no-tty --batch
+          gpg --list-keys --keyid-format=long
+
       - name: Verify tag signature + identity
         env:
           AUTHORIZED_SIGNERS: ${{ secrets.AUTHORIZED_SIGNERS }}

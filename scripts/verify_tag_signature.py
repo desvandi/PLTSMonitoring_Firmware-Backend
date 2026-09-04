@@ -102,8 +102,10 @@ def run() -> int:
     # 2. Tag signature must verify.
     # ------------------------------------------------------------------
     if tag_type == "tag":
+        # [CI fix] 'git tag -v' doesn't work with refs/tags/ prefix.
+        # Use the tag name directly (without refs/tags/ prefix).
         verify_result = subprocess.run(
-            ["git", "tag", "-v", tag_ref],
+            ["git", "tag", "-v", args.tag],
             capture_output=True, text=True, check=False,
         )
         # git tag -v exits 0 if signature is valid, non-zero otherwise.
@@ -202,7 +204,7 @@ def run() -> int:
     # ------------------------------------------------------------------
     # 4. Tag's target commit MUST equal GITHUB_SHA.
     # ------------------------------------------------------------------
-    tag_commit = git("rev-list", "-n", "1", tag_ref)
+    tag_commit = git("rev-list", "-n", "1", args.tag)
     if not tag_commit:
         blockers.append(f"could not resolve tag {args.tag} to a commit")
         print(f"[FAIL] tag-commit: could not resolve")
