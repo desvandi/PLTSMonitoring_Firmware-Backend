@@ -49,15 +49,16 @@ for env_var, macro in SECRET_MAP.items():
         continue
 
     if macro == "MQTT_BROKER_PORT":
-        # Numeric macro — safe to use as -D flag
+        # Numeric macro — CPPDEFINES tuple (no quotes needed)
         build_env.Append(CPPDEFINES=[(macro, value)])
     elif "BEGIN CERTIFICATE" in value:
-        # PEM certificate — multiline, CANNOT use -D flag (compiler splits on newline).
-        # Write to a generated header file instead.
+        # PEM certificate — multiline, write to generated header
         _pem_macros[macro] = value
     else:
-        # Simple string — use CPPDEFINES tuple
-        build_env.Append(CPPDEFINES=[(macro, value)])
+        # Simple string — need quotes so compiler sees "value" not bare identifier.
+        # CPPDEFINES tuple alone doesn't add quotes, so also add BUILD_FLAGS.
+        build_env.Append(CPPDEFINES=[(macro, f'"{value}"')])
+        build_env.Append(BUILD_FLAGS=[f"-D{macro}='\"{value}\"'"])
     print(f"  OK: {macro} injected ({len(value)} chars)")
 
 # Write PEM certificates to a generated header file (multiline values can't
