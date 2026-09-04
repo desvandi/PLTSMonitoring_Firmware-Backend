@@ -27,6 +27,13 @@ firmware_signing_public.pem
 *.bin.ota.json
 *.elf
 *.map
+# [self-review] Generated provenance/manifest files are build artifacts.
+# They are produced by generate_provenance.py + generate_canonical_manifest.py
+# and distributed via GitHub Releases — NOT committed to source.
+release.json
+provenance.json
+SHA256SUMS
+manifest-canonical.json
 # [P0-4 AUDIT 2026-09] Binaries are NOT source — they are immutable build
 # artifacts distributed via GitHub Releases / Actions artifacts. The previous
 # `!firmware-generic/bin/*.bin` exception caused binary drift (audit-7: two

@@ -43,8 +43,11 @@ import sys
 from pathlib import Path
 
 
-# [P1-3] Canonical artifact inventory. The gate fails if ANY of these is
-# missing OR if any UNEXPECTED executable artifact (.bin/.elf/.hex) is present.
+# [P1-3 + self-review] Canonical artifact inventory. The gate fails if ANY
+# of these is missing OR if any UNEXPECTED executable artifact (.bin/.elf/.hex)
+# is present. manifest-canonical.json is included so the required-files check
+# catches it even for dev/staging (the separate check at line ~297 adds
+# production-specific enforcement for the signature field).
 CANONICAL_ARTIFACTS = {
     "bootloader.bin",
     "partitions.bin",
@@ -52,6 +55,7 @@ CANONICAL_ARTIFACTS = {
     "release.json",
     "provenance.json",
     "SHA256SUMS",
+    "manifest-canonical.json",   # [self-review] schema 2.0 canonical OTA manifest
 }
 EXECUTABLE_EXTS = (".bin", ".elf", ".hex", ".map")
 

@@ -271,22 +271,21 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Master release gate.
-  # [Audit 9 P0-3] Only runs when ALL builds that are expected to produce
-  # artifacts have SUCCEEDED. Previous `if: always()` caused false failures
-  # when build-production was skipped on PRs.
+  # [Audit 9 P0-3 + self-review fix] Must include build-production in needs
+  # so download-artifact can fetch the modular-production artifact.
+  # On PR, build-production is skipped (if: push/dispatch only) — the gate
+  # tolerates this via the result check.
   # --------------------------------------------------------------------------
   release-gate:
     name: Master release gate
     runs-on: ubuntu-latest
-    # On tag push: all three builds must succeed.
-    # On branch push: build-production runs (needs production env), staging
-    # + generic must succeed. If build-production fails, gate does NOT run
-    # (the failure IS the gate signal).
-    # On PR: build-production is skipped; gate runs on staging+generic only.
-    needs: [build-staging, build-generic-tree]
+    needs: [build-production, build-staging, build-generic-tree]
     if: |
-      (success() || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
-      (github.event_name != 'pull_request' || success())
+      always() &&
+      needs.build-staging.result == 'success' &&
+      needs.build-generic-tree.result == 'success' &&
+      (needs.build-production.result == 'success' ||
+       (needs.build-production.result == 'skipped' && github.event_name == 'pull_request'))
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -306,7 +305,35 @@ jobs:
         with:
           path: ci-artifacts
 
-      # On tag push, we also need build-production artifacts + PWA checkout.
+      # [self-review fix] On PR, build-production is skipped so there's no
+      # modular-production artifact. The gate should only check the modular
+      # target when the production artifact exists. We pass a flag to the
+      # gate script to skip modular on PR.
+      - name: Run release gate (relaxed — PR, no production artifacts)
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 scripts/release_gate.py \
+            --artifacts-dir ci-artifacts \
+            --target generic \
+            --ci-sha "$GITHUB_SHA"
+
+      - name: Run release gate (branch push — production if available)
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # On branch push to main, build-production runs. Check both targets.
+          if [ -d ci-artifacts/plts-firmware-modular-production ]; then
+            python3 scripts/release_gate.py \
+              --artifacts-dir ci-artifacts \
+              --target generic \
+              --target modular \
+              --ci-sha "$GITHUB_SHA"
+          else
+            python3 scripts/release_gate.py \
+              --artifacts-dir ci-artifacts \
+              --target generic \
+              --ci-sha "$GITHUB_SHA"
+          fi
+
       - name: Checkout PWA repo (for cross-repo check on tag releases)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -333,15 +360,6 @@ jobs:
               format=serialization.PublicFormat.SubjectPublicKeyInfo,
           ))
           "
-
-      - name: Run release gate (relaxed — branch/PR)
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        run: |
-          python3 scripts/release_gate.py \
-            --artifacts-dir ci-artifacts \
-            --target generic \
-            --target modular \
-            --ci-sha "$GITHUB_SHA"
 
       - name: Run release gate (STRICT — tag/release)
         if: startsWith(github.ref, 'refs/tags/v')
