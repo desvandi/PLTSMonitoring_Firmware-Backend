@@ -58,13 +58,36 @@ def run() -> int:
     # ------------------------------------------------------------------
     # 1. Tag must be annotated + signed.
     # ------------------------------------------------------------------
-    # `git cat-file -t <tag>` returns "tag" for annotated tags, "commit" for lightweight tags.
-    # [CI fix] Use refs/tags/ prefix to ensure git resolves the tag OBJECT,
-    # not the commit it points to. Without the prefix, some git configurations
-    # resolve the tag name to the commit (especially in shallow clones or
-    # CI checkouts where refs are set up differently).
-    tag_ref = args.tag if args.tag.startswith("refs/tags/") else f"refs/tags/{args.tag}"
-    tag_type = git("cat-file", "-t", tag_ref)
+    # [CI fix] GitHub Actions checkout@v4 fetches tags as commit refs, not
+    # tag objects. We need to explicitly fetch the tag object to verify
+    # its type and signature. Use 'git fetch origin tag <tag>' to get the
+    # actual annotated tag object.
+    tag_ref = f"refs/tags/{args.tag}"
+    # Try to fetch the tag object from origin (needed for CI)
+    subprocess.run(["git", "fetch", "origin", "tag", args.tag],
+                   capture_output=True, text=True, check=False)
+
+    # Check the type of the OBJECT that the tag ref points to.
+    # For annotated tags: 'git cat-file -t refs/tags/v1.8.0' returns 'tag'
+    # For lightweight tags: returns 'commit'
+    # But in CI, the ref might point to a commit even for annotated tags.
+    # So also try: 'git rev-parse refs/tags/v1.8.0^{tag}' — this resolves
+    # to the tag object SHA if it's annotated, or fails if lightweight.
+    tag_obj_sha = ""
+    try:
+        tag_obj_sha = subprocess.run(
+            ["git", "rev-parse", f"{tag_ref}^{{tag}}"],
+            capture_output=True, text=True, check=False
+        ).stdout.strip()
+    except Exception:
+        pass
+
+    if tag_obj_sha and tag_obj_sha != tag_ref:
+        # Annotated tag — tag_obj_sha is the SHA of the tag object
+        tag_type = "tag"
+    else:
+        # Fallback: check the ref type directly
+        tag_type = git("cat-file", "-t", tag_ref)
     if tag_type != "tag":
         blockers.append(
             f"tag {args.tag} is '{tag_type}', not 'tag' — "
