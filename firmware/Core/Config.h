@@ -60,6 +60,9 @@
 #ifndef PLTS_ENABLE_PZEM_AC
 #define PLTS_ENABLE_PZEM_AC 0          // RESERVED — PZEM-004T AC power meter
 #endif                                 // (bench-validation pending; see README §PZEM)
+#ifndef PLTS_ENABLE_RELAYS
+#define PLTS_ENABLE_RELAYS 1           // v1.8.0: 8-channel relay via PCF8574 I²C expander
+#endif
 
 // ---------------------------------------------------------------------------
 // Build Profile Guard (brief §73) — must select exactly one
@@ -392,6 +395,32 @@ static constexpr const char* PATH_CALIBRATION_BAK = "/calibration.bak";
 static constexpr const char* PATH_CALIBRATION_TMP = "/calibration.tmp";
 static constexpr uint8_t CONFIG_SCHEMA_VERSION_NUM = 1;
 extern bool calibrationDirty;
+
+// ---------------------------------------------------------------------------
+// [v1.8.0] 8-Channel Relay Configuration (PCF8574 I²C Expander)
+// See docs/RELAY_GPIO_HARDWARE_CONTRACT.md for full hardware spec.
+// ---------------------------------------------------------------------------
+#if PLTS_ENABLE_RELAYS
+static constexpr uint8_t  RELAY_CHANNEL_COUNT       = 8;
+static constexpr uint8_t  PCF8574_I2C_ADDRESS_DEFAULT = 0x20;  // A0=A1=A2=GND
+static constexpr uint8_t  PCF8574_I2C_ADDRESS_MIN   = 0x20;
+static constexpr uint8_t  PCF8574_I2C_ADDRESS_MAX   = 0x27;
+static constexpr uint8_t  PCF8574_POWER_ON_STATE    = 0xFF;    // all HIGH = all OFF (active-LOW)
+static constexpr uint8_t  RELAY_BOOT_SAFE_STATE     = 0x00;    // all OFF
+
+// Per-channel safety defaults (overridable via NVS config)
+static constexpr uint32_t RELAY_DEFAULT_MAX_ON_TIME_SEC     = 3600;  // 1 hour (0 = unlimited)
+static constexpr uint32_t RELAY_DEFAULT_MIN_ON_TIME_SEC     = 0;     // no minimum
+static constexpr uint32_t RELAY_DEFAULT_MIN_OFF_TIME_SEC    = 0;     // no minimum
+static constexpr uint32_t RELAY_DEFAULT_MIN_SWITCH_INTERVAL_SEC = 0; // no anti-chatter
+
+// Relay task timing
+static constexpr uint32_t RELAY_TICK_MS = 200;   // 5 Hz tick
+static constexpr uint8_t  RELAY_MAX_NAME_LEN = 24;
+
+// NVS namespace for relay config
+static constexpr const char* RELAY_NVS_NAMESPACE = "plts_relays";
+#endif
 
 } // namespace Core
 

@@ -46,6 +46,22 @@ static const CommandDef COMMAND_REGISTRY[] = {
     {nullptr}},
   {"system", "factory_reset_confirm",
     {"token", nullptr}},
+  // [v1.8.0] 8-channel relay commands (PLTS_ENABLE_RELAYS)
+  {"relay", "on",
+    {"channel","source", nullptr}},
+  {"relay", "off",
+    {"channel","source", nullptr}},
+  {"relay", "pulse",
+    {"channel","durationMs","source", nullptr}},
+  {"relay", "all_off",
+    {nullptr}},
+  {"relay", "config",
+    {"channel","name","maxOnTimeSec","minOnTimeSec","minOffTimeSec",
+     "minSwitchIntervalSec","enabled","interlockGroup", nullptr}},
+  {"relay", "acknowledge",
+    {"channel", nullptr}},
+  {"relay", "clear",
+    {"channel", nullptr}},
 };
 
 static const size_t COMMAND_REGISTRY_COUNT =

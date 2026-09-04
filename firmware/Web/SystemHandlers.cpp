@@ -63,6 +63,7 @@ void handleFactoryResetConfirm() {
     "plts_soc",      // [audit-2 S-16] SOC integrator
     "plts_emg",      // [audit-2 S-16] emergency relay state + trip counter
     "plts_auth",     // [audit-2 S-16] refresh tokens
+    "plts_relays",   // [v1.8.0] 8-channel relay config + lockout states
   };
   for (const char* ns : NAMESPACES) {
     if (p.begin(ns, false)) { p.clear(); p.end(); }

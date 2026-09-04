@@ -18,6 +18,9 @@
 #include "../Services/AlarmRegistry.h"
 #include "../Services/LogService.h"
 #include "../Storage/ConfigStore.h"
+#if PLTS_ENABLE_RELAYS
+#include "../Services/RelayController.h"   // [v1.8.0] E-WAVE safety cascade
+#endif
 
 namespace Services {
 
@@ -126,6 +129,12 @@ void EmergencySupervisor::_trip(const char* reason, const char* eventType,
   _trips++;
   _nvsSetU32(NVS_KEY_TRIPS, _trips);
   Drivers::emergencyRelay.setEnergized(false);   // ISOLATED — immediate, local GPIO
+#if PLTS_ENABLE_RELAYS
+  // [v1.8.0] E-WAVE safety cascade — one-way gate. When E-WAVE trips,
+  // all 8 relay channels are forced OFF. This CANNOT be overridden by
+  // REST, MQTT, PWA, or Scheduler. The reverse (relay → E-WAVE) is FORBIDDEN.
+  Services::relaysController.emergencyAllOff();
+#endif
   _queueEventUnlocked(eventType, eventReason.length() > 0 ? eventReason : String(reason));
   Services::alarms.raise(Core::AlarmCode::EMERGENCY_TRIP, Core::AlarmSeverity::Critical,
        (String("EMERGENCY TRIP: ") + reason + " — relay isolated, operator ARM required").c_str());

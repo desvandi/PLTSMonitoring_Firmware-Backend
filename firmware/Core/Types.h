@@ -322,6 +322,13 @@ namespace AlarmCode {
   // cleared on operator ARM. The relay itself is latched in hardware; this
   // alarm exists so alarm-center/PWA visibility matches relay reality.
   constexpr const char* EMERGENCY_TRIP          = "EMERGENCY_TRIP";
+  // Relay layer (v1.8.0 8-channel relay integration)
+  constexpr const char* RELAY_FAULT              = "RELAY_FAULT";
+  constexpr const char* RELAY_MAX_ON_TIME        = "RELAY_MAX_ON_TIME";
+  constexpr const char* RELAY_INTERLOCK_VIOLATION= "RELAY_INTERLOCK_VIOLATION";
+  constexpr const char* RELAY_STATE_DRIFT        = "RELAY_STATE_DRIFT";
+  constexpr const char* RELAY_COMMAND_REJECTED   = "RELAY_COMMAND_REJECTED";
+  constexpr const char* RELAY_CONFIGURATION_ERROR= "RELAY_CONFIGURATION_ERROR";
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +363,7 @@ enum class TaskId : uint8_t {
   BmsComm,      // v1.6.0: battery/inverter protocol manager task
   Emergency,    // v1.7.0: E-WAVE supervisor tick (local-first, 10 Hz)
   GasEmergency, // v1.7.0: GAS command poll / ACK / event flush task
+  Relay,        // v1.8.0: 8-channel relay controller tick (5 Hz)
   COUNT
 };
 
@@ -375,6 +383,7 @@ inline const char* taskIdToStr(TaskId t) {
     case TaskId::BmsComm:      return "bmsComm";
     case TaskId::Emergency:    return "emergency";
     case TaskId::GasEmergency: return "gasEmergency";
+    case TaskId::Relay:        return "relay";
     case TaskId::COUNT:        break;
   }
   return "unknown";
@@ -536,6 +545,79 @@ inline const char* logTypeToStr(LogType t) {
   }
   return "UNKNOWN";
 }
+
+// ---------------------------------------------------------------------------
+// [v1.8.0] 8-Channel Relay Types
+// ---------------------------------------------------------------------------
+
+// Relay state confidence — honest reporting of software vs verified state
+enum class RelayStateConfidence : uint8_t {
+  SoftwareOnly,  // GPIO commanded, no physical feedback (default)
+  Verified,      // Aux contact confirms (future HW)
+  Unknown,       // Never commanded / boot indeterminate
+  Fault          // State drift / driver error
+};
+
+inline const char* relayStateConfidenceToStr(RelayStateConfidence c) {
+  switch (c) {
+    case RelayStateConfidence::SoftwareOnly: return "SOFTWARE_ONLY";
+    case RelayStateConfidence::Verified:     return "VERIFIED";
+    case RelayStateConfidence::Unknown:      return "UNKNOWN";
+    case RelayStateConfidence::Fault:        return "FAULT";
+  }
+  return "UNKNOWN";
+}
+
+// Relay command source — provenance for audit trail
+enum class RelaySource : uint8_t {
+  Off,         // default state, no command
+  Manual,      // operator REST/MQTT command
+  Schedule,    // RTC-based schedule (future)
+  Automation,  // remote automation rule (future)
+  Safety,      // safety supervisor (maxOnTime FORCE OFF, etc.)
+  System,      // system (E-WAVE cascade, boot policy)
+};
+
+inline const char* relaySourceToStr(RelaySource s) {
+  switch (s) {
+    case RelaySource::Off:        return "OFF";
+    case RelaySource::Manual:     return "MANUAL";
+    case RelaySource::Schedule:   return "SCHEDULE";
+    case RelaySource::Automation: return "AUTOMATION";
+    case RelaySource::Safety:     return "SAFETY";
+    case RelaySource::System:     return "SYSTEM";
+  }
+  return "UNKNOWN";
+}
+
+// Relay safety lockout state machine (5-state, NVS-persisted)
+// NORMAL → TRIPPED → ACKNOWLEDGED → CLEARED → ARMED → NORMAL
+// ACK = operator has seen alarm (NOT permission to re-enable)
+// CLEAR requires fault condition resolved
+enum class RelayLockoutState : uint8_t {
+  Normal,       // operating normally
+  Tripped,      // safety condition detected (maxOnTime, fault)
+  Acknowledged, // operator has acknowledged the alarm
+  Cleared,      // fault condition resolved, awaiting ARM
+  Armed         // re-armed, will return to NORMAL on next tick
+};
+
+inline const char* relayLockoutStateToStr(RelayLockoutState s) {
+  switch (s) {
+    case RelayLockoutState::Normal:       return "NORMAL";
+    case RelayLockoutState::Tripped:      return "TRIPPED";
+    case RelayLockoutState::Acknowledged: return "ACKNOWLEDGED";
+    case RelayLockoutState::Cleared:      return "CLEARED";
+    case RelayLockoutState::Armed:        return "ARMED";
+  }
+  return "UNKNOWN";
+}
+
+// Relay command semantics
+enum class RelayCommandSemantics : uint8_t {
+  IdempotentState   = 0,  // SET_STATE: ON/OFF — replay-safe
+  NonIdempotentAction = 1, // PULSE — NOT replay-safe (has duration)
+};
 
 } // namespace Core
 

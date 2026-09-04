@@ -20,6 +20,9 @@
 #include "SystemHandlers.h"
 #include "ExtraHandlers.h"
 #include "ProvisionHandlers.h"
+#if PLTS_ENABLE_RELAYS
+#include "RelayHandlers.h"
+#endif
 
 namespace Web {
 
@@ -76,6 +79,9 @@ void HttpServer::begin() {
   OtaHandlers::registerRoutes();
   SystemHandlers::registerRoutes();
   ExtraHandlers::registerRoutes();   // [FW-20] PWA-contract route parity
+  #if PLTS_ENABLE_RELAYS
+  RelayHandlers::registerRoutes();   // [v1.8.0] 8-channel relay REST endpoints
+  #endif
   // [AUDIT 2026-08-28 F-FW1] First-boot WiFi provisioning (AP setup mode
   // only — closes the dead-end where nothing ever wrote wifi_ssid/wifi_pass).
   ProvisionHandlers::registerRoutes();

@@ -17,6 +17,9 @@
 #include "../Services/AuthManager.h"
 #include "../Drivers/Acs712Driver.h"
 #include "../Drivers/Sht31Driver.h"   // [v1.6.3] live-apply calibration offsets
+#if PLTS_ENABLE_RELAYS
+#include "../Services/RelayController.h"   // [v1.8.0] relay command dispatch
+#endif
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <cstring>
@@ -463,6 +466,26 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     Network::mqttConfigReceiver.requestDeferredReboot(500);
     return { true, "ACCEPTED", "factory reset applied — rebooting" };
   }
+
+  // ---------- relay.* (v1.8.0) ----------
+  #if PLTS_ENABLE_RELAYS
+  if (type == "relay") {
+    uint8_t channel = doc["channel"] | 0;
+    String source = doc["source"] | "MANUAL";
+    uint32_t pulseMs = doc["durationMs"] | 0;
+    bool desired = (action == "on" || action == "pulse");
+
+    String messageOut;
+    Services::RelayCommandResult result = Services::relaysController.applyCommand(
+      action, channel, desired, pulseMs, source, messageOut);
+
+    bool ok = (result == Services::RelayCommandResult::Applied);
+    String code = (result == Services::RelayCommandResult::Applied) ? "EXECUTED" :
+                  (result == Services::RelayCommandResult::Blocked) ? "BLOCKED" :
+                  (result == Services::RelayCommandResult::Rejected) ? "REJECTED" : "FAILED";
+    return { ok, code, messageOut };
+  }
+  #endif
 
   // Unreachable — whitelist check above already rejected unknown types.
   return { false, "REJECTED", "unreachable" };

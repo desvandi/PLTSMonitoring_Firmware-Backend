@@ -21,6 +21,9 @@
 #include "../Core/Globals.h"
 #include "../Core/Common.h"
 #include "../Services/AlarmRegistry.h"  // for Alarm struct (RC-11: single canonical owner)
+#if PLTS_ENABLE_RELAYS
+#include "../Services/RelayController.h"
+#endif
 
 namespace Web {
 
@@ -235,6 +238,16 @@ inline String serialize(const Core::SystemStatus& s) {
   emg["relayEnergized"] = s.emergency.relayEnergized;
   emg["tripAtMs"]       = s.emergency.tripAtMs;
   emg["crashChain"]     = s.emergency.crashChain;
+#endif
+
+#if PLTS_ENABLE_RELAYS
+  // v1.8.0 — 8-channel relay block (additive; <= v1.7.x consumers treat
+  // absent as "no relay support" — PWA compatibility gate hides relay view).
+  {
+    JsonArray relayArr = doc.createNestedArray("relays");
+    Services::relaysController.serializeStatus(relayArr);
+    doc["relayAvailable"] = Services::relaysController.isAvailable();
+  }
 #endif
 
   // Active alarms

@@ -207,6 +207,9 @@ void bmsCommTask(void* pv);   // v1.6.0 — BMS/inverter protocol manager
 void emergencyTask(void* pv);     // v1.7.0 — E-WAVE supervisor (local-first)
 void gasEmergencyTask(void* pv);  // v1.7.0 — GAS command poll/ACK/events
 #endif
+#if PLTS_ENABLE_RELAYS
+void relayTask(void* pv);         // v1.8.0 — 8-channel relay controller (5 Hz)
+#endif
 void publishTelemetry();
 void printBootBanner();
 
@@ -317,6 +320,11 @@ void setup() {
   // event, relay pins from persisted config, LED init. Every boot re-enters
   // EMERGENCY — ARM is operator-only (never automatic).
   Services::emergency.begin();
+#endif
+#if PLTS_ENABLE_RELAYS
+  // [v1.8.0] 8-channel relay controller — init AFTER emergency (so E-WAVE
+  // isolation is guaranteed regardless of relay init outcome).
+  Services::relaysController.begin();
 #endif
 
   // Spool & Services::journal
@@ -458,6 +466,9 @@ void setup() {
   // blocking TLS POST (7 s cap) can never stall MQTT/web or the supervisor.
   xTaskCreatePinnedToCore(emergencyTask,    "emg",         4096, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(gasEmergencyTask, "gasemg",      6144, NULL, 2, NULL, 1);
+#endif
+#if PLTS_ENABLE_RELAYS
+  xTaskCreatePinnedToCore(relayTask,        "relay",       4096, NULL, 2, NULL, 0);
 #endif
 
   Serial.println("[BOOT] All tasks started. System ready.");
@@ -1451,3 +1462,20 @@ void otaTask(void* pv) {
     vTaskDelayUntil(&lastWake, period);
   }
 }
+
+// =============================================================================
+// [v1.8.0] relayTask — 8-channel relay controller tick (5 Hz)
+// =============================================================================
+#if PLTS_ENABLE_RELAYS
+void relayTask(void* pv) {
+  esp_task_wdt_add(NULL);
+  TickType_t lastWake = xTaskGetTickCount();
+  const TickType_t period = pdMS_TO_TICKS(Core::RELAY_TICK_MS);  // 200ms = 5 Hz
+
+  while (true) {
+    esp_task_wdt_reset();
+    Services::relaysController.tick();
+    vTaskDelayUntil(&lastWake, period);
+  }
+}
+#endif
