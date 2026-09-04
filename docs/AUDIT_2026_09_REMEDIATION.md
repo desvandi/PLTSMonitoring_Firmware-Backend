@@ -34,6 +34,47 @@
 **Remaining work**: Hardware acceptance on real hardware (P1-10 checklist)
 + Master Release Gate running green in CI for one full release cycle.
 
+**Audit iterasi 3 (Auditor Audit 8 — release gate enforcement):**
+- **4 P0 blocker** ditemukan oleh Auditor terkait release gate enforcement:
+  - **P0-A**: production signature masih optional di release_gate.py (unsigned
+    production artifact bisa PASS). **FIXED** — gate sekarang production-aware,
+    signature REQUIRED untuk production target, FAIL jika unsigned.
+  - **P0-B**: cross-repo verification masih optional (skip→PASS). **FIXED** —
+    mandatory untuk production, FAIL jika --pwa-path/--firmware-repo-path
+    tidak diberikan.
+  - **P0-C**: Master Release Gate belum ada release-publishing enforcement.
+    **FIXED** — new release-publish job creates immutable GitHub Release
+    ONLY on tag push AND only if release-gate PASSED.
+  - **P0-D**: GitHub Release belum ada. **FIXED** — release-publish job
+    creates the release with all artifacts attached.
+- **9 P1 open items** dari Auditor:
+  - **P1-1**: embedded firmware identity test. **FIXED** — G5b scans binary
+    for X.Y.Z semver, verifies manifest version is embedded.
+  - **P1-2**: SHA-256 + signature in canonical manifest. **FIXED** — new
+    generate_canonical_manifest.py produces schema 2.0 manifest-canonical.json.
+  - **P1-3+4**: full artifact inventory + exact artifact selection. **FIXED**
+    — CANONICAL_ARTIFACTS set, firmware identified by release.json SHA, not glob.
+  - **P1-5**: provenance commit binding. **FIXED** — --ci-sha binds
+    provenance.gitCommit == GITHUB_SHA, FAIL on mismatch.
+  - **P1-7**: pin PlatformIO in ALL CI jobs. **FIXED** — staging + generic
+    now use platformio==6.1.18.
+  - **P1-8**: CHANGE_ME in test fixtures. **FIXED** — replaced with
+    TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE.
+  - **P1-9**: hardware acceptance. **PARTIALLY FIXED** — template v1.7.1.md
+    created, CI gating implemented (pre-release if absent). Physical test
+    still pending operator action.
+  - **P1-6 (residual)**: OTA lifecycle physical verification. **OPEN** —
+    source-level implementation complete (Audit 2), physical validation
+    pending hardware acceptance test.
+
+**Remaining work (operator action required)**:
+1. Set GitHub Environment `production` secrets (PIO_MQTT_*, PIO_OTA_*,
+   PIO_FIRMWARE_SIGNING_PRIVATE_KEY).
+2. Apply branch protection (docs/P2_BRANCH_PROTECTION_AND_GPG_SIGNING.md).
+3. Run hardware acceptance on real ESP32 (docs/hardware-acceptance/v1.7.1.md).
+4. Tag v1.7.1 (after hardware acceptance PASS) to trigger immutable release.
+5. Revoke + rotate the exposed GitHub PAT.
+
 ## P0 — Critical (Release Integrity)
 
 | ID | Title | Implementation | Verification |
