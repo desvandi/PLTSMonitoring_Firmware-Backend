@@ -75,8 +75,8 @@ if _pem_macros:
         f.write("// This file is in .gitignore and should never be committed.\n\n")
         f.write("#pragma once\n\n")
         for macro, value in _pem_macros.items():
-            # Escape backslashes and quotes for C string literal
-            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            # Escape for C string literal: backslashes, quotes, AND newlines
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
             f.write(f'#define {macro} "{escaped}"\n')
             print(f"  OK: {macro} written to generated header (PEM, {len(value)} chars)")
     build_env.Append(CPPPATH=[secrets_dir])
