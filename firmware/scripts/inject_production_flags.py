@@ -40,6 +40,8 @@ SECRET_MAP = {
 
 print("[inject_production_flags] Injecting production secrets from environment...")
 
+_pem_macros = {}  # [CI fix] must be initialized BEFORE the loop
+
 for env_var, macro in SECRET_MAP.items():
     value = os.environ.get(env_var, "")
     if not value:
@@ -60,12 +62,6 @@ for env_var, macro in SECRET_MAP.items():
 
 # Write PEM certificates to a generated header file (multiline values can't
 # go on the command line as -D flags).
-_pem_macros = {}
-for env_var, macro in SECRET_MAP.items():
-    value = os.environ.get(env_var, "")
-    if value and "BEGIN CERTIFICATE" in value:
-        _pem_macros[macro] = value
-
 if _pem_macros:
     import tempfile
     secrets_dir = os.path.join(os.path.dirname(__file__), "..", ".pio", "generated")
