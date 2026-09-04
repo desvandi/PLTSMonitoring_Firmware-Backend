@@ -72,8 +72,8 @@ void handleFactoryResetConfirm() {
   // evidence of who triggered the reset should survive. Audit log is in
   // LittleFS PATH_AUDIT_LOG. Save to a temporary NVS blob before format,
   // restore after.
-  extern bool preserveAuditLogAcrossReset();   // defined in LogService.cpp
-  extern void restoreAuditLogAfterReset();
+  extern bool Services::preserveAuditLogAcrossReset();   // defined in LogService.cpp
+  extern void Services::restoreAuditLogAfterReset();
   bool auditPreserved = preserveAuditLogAcrossReset();
   LittleFS.format();
   if (auditPreserved) restoreAuditLogAfterReset();
