@@ -129,9 +129,16 @@ def is_production_target(target: str, target_dir: Path) -> bool:
 
     Production invariants (signature required, cross-repo required) apply when:
       - target == "modular" AND directory name contains "production"
-      - target == "generic" (generic tree is the OTA distribution tree)
+      - target == "generic" (generic tree IS the OTA distribution tree)
       - release.json.target == "production" (explicit)
       - --strict is set on CLI (handled by caller)
+
+    [CI fix] For signature enforcement: the GENERIC tree (firmware-generic)
+    is the legacy ESP Web Tools browser-flashing tree. It does NOT go through
+    Ed25519 OTA signing — it's for first-install only. Only the MODULAR
+    production tree requires Ed25519 signature. is_production_target() still
+    returns True for generic (so cross-repo + other invariants apply), but
+    the signature check specifically exempts generic.
     """
     if "production" in target_dir.name:
         return True
@@ -165,6 +172,10 @@ def check_target(
     gate.ok(name, str(target_dir))
 
     is_prod = is_production_target(target, target_dir) or strict
+    # [CI fix] Generic tree does NOT require Ed25519 signature — it's the
+    # legacy ESP Web Tools browser-flashing tree (first-install only, not OTA).
+    # Only the modular production tree requires signature.
+    requires_signature = is_prod and target != "generic"
 
     # ------------------------------------------------------------------
     # [P1-3] Full artifact inventory: required files MUST exist, no extra
@@ -372,7 +383,7 @@ def check_target(
             fw_art = cm_artifacts.get("firmware", {})
             fw_sig = fw_art.get("signature")
             fw_sig_alg = fw_art.get("signatureAlgorithm")
-            if is_prod and strict:
+            if requires_signature and strict:
                 # [P0-A] Strict mode (tag push): signature REQUIRED in canonical manifest
                 if not fw_sig or fw_sig == "null":
                     gate.fail(f"target[{target}]: canonical.firmware.signature",
@@ -383,7 +394,7 @@ def check_target(
                 else:
                     gate.ok(f"target[{target}]: canonical.firmware.signature",
                             f"present ({fw_sig_alg})")
-            elif is_prod and not strict:
+            elif requires_signature and not strict:
                 # Non-strict (branch push): signature is good but not enforced
                 if fw_sig and fw_sig != "null":
                     gate.ok(f"target[{target}]: canonical.firmware.signature",
@@ -475,9 +486,9 @@ def check_target(
         else:
             gate.warn(f"target[{target}]: Ed25519 signature",
                       "signature present but --public-key not provided (non-strict — branch push)")
-    elif is_prod and strict:
+    elif requires_signature and strict:
         # [P0-A] PRODUCTION INVARIANT (strict mode only — tag push):
-        # signature is REQUIRED.
+        # signature is REQUIRED. Only for targets that require signature (not generic).
         if not public_key:
             gate.fail(f"target[{target}]: Ed25519 signature",
                       "PRODUCTION target requires --public-key (no key provided)")
@@ -485,7 +496,7 @@ def check_target(
             gate.fail(f"target[{target}]: Ed25519 signature",
                       f"PRODUCTION target requires .sig file ({sig_path.name} missing) — "
                       f"unsigned production artifact is BLOCKED")
-    elif is_prod and not strict:
+    elif requires_signature and not strict:
         # Production build on branch push (non-strict) — signature present
         # is good, but we don't enforce it. The strict gate (tag push) will.
         if sig_path.is_file():
