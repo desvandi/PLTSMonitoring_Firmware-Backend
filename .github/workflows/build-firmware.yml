@@ -147,10 +147,10 @@ jobs:
             echo "Production firmware CANNOT be released unsigned (Audit 8 P0-A)"
             exit 1
           fi
-          echo "$PIO_FIRMWARE_SIGNING_PRIVATE_KEY" > /tmp/firmware_signing_private.pem
-          chmod 600 /tmp/firmware_signing_private.pem
+          echo "$PIO_FIRMWARE_SIGNING_PRIVATE_KEY" > firmware_signing_private.pem
+          chmod 600 firmware_signing_private.pem
           python3 ../../scripts/sign_firmware.py --sign firmware.bin
-          shred -u /tmp/firmware_signing_private.pem
+          shred -u firmware_signing_private.pem
           ls -la
 
       - name: Generate canonical OTA manifest (schema 2.0)
