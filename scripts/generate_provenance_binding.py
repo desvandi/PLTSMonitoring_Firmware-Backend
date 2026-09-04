@@ -78,11 +78,18 @@ def main():
     diff_stat = git("diff", "--stat", f"{source_commit}..{args.release_commit}")
     diff_files = git("diff", "--name-only", f"{source_commit}..{args.release_commit}")
     diff_file_list = [f for f in diff_files.splitlines() if f.strip()]
-    source_only_changes = not any(
-        f.startswith("firmware/") or f.startswith("firmware-generic/") or
-        f.startswith("scripts/") or f.startswith(".github/")
+
+    # [Audit 2026-09-04 P1-2 fix] sourceOnlyChanges should only check directories
+    # that affect the FIRMWARE BINARY: firmware/ and firmware-generic/.
+    # Scripts (scripts/) and CI config (.github/) are release-engineering files
+    # that do NOT affect the compiled binary. A release commit may legitimately
+    # update verifier scripts + CI workflow + hw-acceptance JSON without changing
+    # the firmware binary — this is still "source-only" for binary equivalence.
+    firmware_source_changes = any(
+        f.startswith("firmware/") or f.startswith("firmware-generic/")
         for f in diff_file_list
     )
+    source_only_changes = not firmware_source_changes
 
     # Compute byte difference between hw-tested binary SHA and released binary SHA
     # (We can't compute byte difference directly since we don't have both binaries
