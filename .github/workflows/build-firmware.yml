@@ -415,13 +415,22 @@ jobs:
       - name: Verify tag signature + identity
         env:
           AUTHORIZED_SIGNERS: ${{ secrets.AUTHORIZED_SIGNERS }}
+          EXPECTED_TAGGER_EMAILS: ${{ secrets.EXPECTED_TAGGER_EMAILS }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          python3 scripts/verify_tag_signature.py \
-            --tag "$TAG" \
-            --ci-sha "$GITHUB_SHA" \
-            --release-json ci-artifacts/modular/release.json \
+          ARGS=(
+            --tag "$TAG"
+            --ci-sha "$GITHUB_SHA"
+            --release-json ci-artifacts/modular/release.json
             --authorized-signers-env "$AUTHORIZED_SIGNERS"
+          )
+          # [Audit 2026-09-04 P0-1] Defense-in-depth: enforce tagger email identity
+          # so a valid GPG signature from a mismatched email identity is caught
+          # locally (GitHub would report verification=false/bad_email).
+          if [ -n "$EXPECTED_TAGGER_EMAILS" ]; then
+            ARGS+=(--expected-tagger-emails "$EXPECTED_TAGGER_EMAILS")
+          fi
+          python3 scripts/verify_tag_signature.py "${ARGS[@]}"
 
   # --------------------------------------------------------------------------
   # [Audit 9 P0-2] Hardware acceptance semantic gate.
@@ -436,6 +445,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') && needs.verify-tag-signature.result == 'success'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          # [Audit 2026-09-04 P1-2] fetch-depth: 0 needed so the verifier
+          # can resolve the parent commit (source commit) via git rev-parse.
+          # Shallow clone (default fetch-depth=1) only has the tag commit,
+          # so parent lookup returns 'unknown' and the parent-child check
+          # fails even when the relationship is valid.
+          fetch-depth: 0
 
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
@@ -448,12 +464,18 @@ jobs:
           path: ci-artifacts/modular
 
       - name: Verify hardware acceptance JSON
+        # [Audit 2026-09-04 P1-2 FIX] Pass --source-commit explicitly so the
+        # verifier compares hw-acceptance.gitCommit against the SOURCE commit
+        # (release.json.gitCommit), NOT against GITHUB_SHA (the tag/release
+        # commit). This avoids the chicken-and-egg problem where the hw-
+        # acceptance JSON file lives in the release commit, making it
+        # impossible for its gitCommit field to equal the release commit's SHA.
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
           VERSION="${TAG#v}"
           python3 scripts/verify_hardware_acceptance.py \
             --version "$VERSION" \
-            --ci-sha "$GITHUB_SHA" \
+            --source-commit "$GITHUB_SHA" \
             --release-json ci-artifacts/modular/release.json
 
   # --------------------------------------------------------------------------
@@ -517,7 +539,7 @@ jobs:
           cp plts-firmware-generic/provenance.json                 ../release-assets/generic-provenance.json
           cp plts-firmware-generic/SHA256SUMS                      ../release-assets/generic-SHA256SUMS
           cp plts-firmware-generic/manifest-canonical.json         ../release-assets/generic-manifest-canonical.json
-          cp plts-firmware-generic/manifest.json                   ../release-assets/generic-manifest-espwebtools.json
+          cp plts-firmware-generic/manifest-espwebtools.json       ../release-assets/generic-manifest-espwebtools.json
 
           # Hardware acceptance evidence (verified by previous job)
           cd ..
@@ -532,6 +554,20 @@ jobs:
           if [ -f "$HW_MD" ]; then
             cp "$HW_MD" release-assets/hardware-acceptance.md
           fi
+
+          # [Audit 2026-09-04 P1-2] Provenance binding — explicit machine-verifiable
+          # chain: tag → signed tag object → release commit → source commit →
+          # hardware-tested binary SHA → released binary SHA → GitHub Release.
+          # Generated at release time (not build time) because it binds the tag
+          # object SHA + GitHub Release URL which are only known after publish.
+          python3 scripts/generate_provenance_binding.py \
+            --tag "$TAG" \
+            --version "$VERSION" \
+            --release-commit "$GITHUB_SHA" \
+            --release-json ci-artifacts/plts-firmware-modular-production/release.json \
+            --hw-json "$HW_FILE" \
+            --output release-assets/provenance-binding.json \
+            --github-release-url "https://github.com/${{ github.repository }}/releases/tag/$TAG"
 
           echo "=== Release assets ==="
           ls -la release-assets/
