@@ -23,6 +23,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PWA_ROOT = ROOT.parent / "PLTSMonitoring_PWA"
 
+# [Audit 10 P0-3 fix] In CI, the PWA repo is NOT checked out alongside the
+# firmware repo. Tests that cross-reference PWA files must SKIP (not FAIL)
+# when the PWA repo is absent. The cross-repo contract is verified by the
+# PWA CI's cross-repo-contract job instead.
+PWA_AVAILABLE = PWA_ROOT.is_dir()
+
 PATTERNS = {
     "pwa_canonical": (
         r"`/api/alarms/\$\{[^}]+\}/acknowledge`",
@@ -55,7 +61,9 @@ failures = []
 
 # ---- PWA: deviceApi.ts --------------------------------------------------
 pwa_device_api = PWA_ROOT / "src" / "lib" / "deviceApi.ts"
-if not pwa_device_api.is_file():
+if not PWA_AVAILABLE:
+    print("SKIP pwa_canonical: PWA repo not checked out (CI mode — cross-repo contract verified by PWA CI)")
+elif not pwa_device_api.is_file():
     failures.append(f"PWA deviceApi.ts missing: {pwa_device_api}")
 else:
     text = pwa_device_api.read_text()

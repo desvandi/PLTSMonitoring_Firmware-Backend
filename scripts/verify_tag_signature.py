@@ -110,14 +110,21 @@ def run() -> int:
                         break
 
             if not signer_key_id:
-                # Fallback: use git for-each-ref to get the tagger's key
+                # [Audit 10 P0-1 FIX] FAIL-CLOSED: if we cannot extract the
+                # signer's key ID, we CANNOT verify authorization. The
+                # signature may be valid, but we don't know WHO signed it.
+                # This is a security-critical gap — BLOCK the release.
+                # Previous behavior was WARN (continue without authorization
+                # check), which allowed any valid GPG signature to pass.
                 tag_info = git("for-each-ref", f"refs/tags/{args.tag}",
                                "--format=%(taggername) %(taggeremail)")
-                print(f"[WARN] tag-signature: could not extract signer key ID from GPG output")
-                print(f"       tagger: {tag_info}")
-                # Don't block — the signature IS valid (exit 0), we just
-                # couldn't extract the key ID for authorized-signer check.
-                # The authorized-signer check is skipped if we can't extract.
+                blockers.append(
+                    f"could not extract signer key ID from GPG output — "
+                    f"cannot verify authorization. tagger: {tag_info}. "
+                    f"This is FAIL-CLOSED: a valid signature from an unknown "
+                    f"signer is BLOCKED (Audit 10 P0-1)."
+                )
+                print(f"[FAIL] tag-signer: could not extract signer key ID — BLOCKED (fail-closed)")
             else:
                 print(f"[PASS] tag-signature: signer key ID = {signer_key_id}")
 
@@ -152,8 +159,17 @@ def run() -> int:
                     else:
                         print(f"[PASS] tag-signer: key {signer_key_id} is authorized")
                 else:
-                    print(f"[WARN] tag-signer: no authorized-signers configured — skipping authorization check")
-                    print(f"       Configure .github/authorized-signers or AUTHORIZED_SIGNERS CI secret")
+                    # [Audit 10 P0-1 FIX] FAIL-CLOSED: empty authorized-signers
+                    # list = NO authorization enforcement. A valid signature
+                    # from ANY key would pass. This is unacceptable for
+                    # production — BLOCK.
+                    blockers.append(
+                        f"no authorized-signers configured (neither "
+                        f"--authorized-signers-file nor --authorized-signers-env has entries). "
+                        f"Production release tags MUST have at least one authorized GPG key ID. "
+                        f"Configure .github/authorized-signers or the AUTHORIZED_SIGNERS CI secret."
+                    )
+                    print(f"[FAIL] tag-signer: no authorized-signers configured — BLOCKED (fail-closed)")
 
     # ------------------------------------------------------------------
     # 4. Tag's target commit MUST equal GITHUB_SHA.

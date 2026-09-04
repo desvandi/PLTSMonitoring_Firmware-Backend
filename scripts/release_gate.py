@@ -219,9 +219,14 @@ def check_target(
     expected_fw_sha = rel.get("firmwareSha256", "")
     expected_fw_name = rel.get("firmwareFilename") or rel.get("artifacts", {}).get("firmware", {}).get("filename", "")
 
-    # Find firmware binaries present
+    # Find firmware binaries present.
+    # [self-review fix] Must exclude .bin.sig, .bin.sha256, .bin.ota.json sidecar
+    # files — they start with "plts_firmware_v" too but are NOT firmware binaries.
     fw_candidates = [p for p in target_dir.iterdir()
-                     if p.is_file() and (p.name == "firmware.bin" or p.name.startswith("plts_firmware_v"))]
+                     if p.is_file()
+                     and (p.name == "firmware.bin"
+                          or (p.name.startswith("plts_firmware_v") and p.name.endswith(".bin")
+                              and not p.name.endswith((".bin.sig", ".bin.sha256", ".bin.ota.json"))))]
     if len(fw_candidates) == 0:
         gate.fail(f"target[{target}]: firmware binary", "no firmware.bin or plts_firmware_v*.bin found")
         return
