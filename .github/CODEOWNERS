@@ -1,0 +1,22 @@
+# CODEOWNERS — PLTS Monitor Firmware-Backend
+#
+# [Audit 9 P1] Branch protection rules require CODEOWNERS for mandatory
+# review enforcement. Configure in GitHub Settings → Branches → main →
+# "Require review from Code Owners".
+#
+# Default owner for everything in the repo.
+* @desvandi
+
+# Security-critical areas — require additional scrutiny.
+# These paths trigger mandatory code-owner review on every PR.
+/code.gs/                    @desvandi
+/firmware/Utils/             @desvandi
+/firmware/Services/AuthManager.* @desvandi
+/scripts/sign_firmware.py    @desvandi
+/scripts/release_gate.py     @desvandi
+/scripts/verify_tag_signature.py  @desvandi
+/scripts/verify_hardware_acceptance.py  @desvandi
+/scripts/generate_provenance.py  @desvandi
+/scripts/generate_canonical_manifest.py  @desvandi
+/.github/workflows/          @desvandi
+/.github/authorized-signers  @desvandi

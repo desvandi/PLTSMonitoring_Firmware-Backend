@@ -1,9 +1,14 @@
-# Branch Protection & GPG Signing Recommendations (P2-1)
+# Branch Protection & GPG Signing (P2-1, Audit 9 P0-1)
 
-> **Status: RECOMMENDED** — implementation requires GitHub repository settings
-> (Settings → Branches → Branch protection rules) and per-engineer GPG setup.
-> These cannot be enforced purely via files in the repo. This document is the
-> authoritative reference for the configuration operators must apply.
+> **Status: REQUIRED — Audit 9 P0-1 blocker.** Implementation requires GitHub
+> repository settings (Settings → Branches → Branch protection rules) and
+> per-engineer GPG setup. These cannot be enforced purely via files in the
+> repo. This document is the authoritative reference for the configuration
+> operators MUST apply before tagging any production release.
+>
+> **Without these settings, the CI `verify-tag-signature` job will still
+> verify tag signatures at runtime, but GitHub itself won't prevent
+> unauthorized users from pushing unsigned tags. Both layers are needed.**
 
 ## 1. Branch Protection — `main`
 

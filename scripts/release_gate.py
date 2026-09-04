@@ -289,6 +289,102 @@ def check_target(
             gate.ok(f"target[{target}]: SHA256SUMS verify", "all hashes match")
 
     # ------------------------------------------------------------------
+    # [Audit 9 P1] Canonical manifest (schema 2.0) enforcement.
+    # The manifest-canonical.json is the authoritative OTA contract. The
+    # gate MUST verify it exists, is parseable, and all its SHA-256 + signature
+    # fields match the actual artifacts on disk.
+    # ------------------------------------------------------------------
+    canonical_path = target_dir / "manifest-canonical.json"
+    if not canonical_path.is_file():
+        if is_prod:
+            gate.fail(f"target[{target}]: canonical manifest",
+                      "manifest-canonical.json missing — REQUIRED for production (P1)")
+        else:
+            gate.warn(f"target[{target}]: canonical manifest",
+                      "manifest-canonical.json missing (dev/staging — not required)")
+    else:
+        try:
+            cm = json.loads(canonical_path.read_text())
+            # schemaVersion
+            if cm.get("schemaVersion") != "2.0":
+                gate.fail(f"target[{target}]: canonical.schemaVersion",
+                          f"expected '2.0', got '{cm.get('schemaVersion')}'")
+            else:
+                gate.ok(f"target[{target}]: canonical.schemaVersion", "2.0")
+
+            # version must match release.json
+            cm_version = cm.get("version", "")
+            if cm_version != rel.get("version", ""):
+                gate.fail(f"target[{target}]: canonical.version",
+                          f"manifest={cm_version} release.json={rel.get('version')}")
+            else:
+                gate.ok(f"target[{target}]: canonical.version", cm_version)
+
+            # releaseId must match release.json.buildId
+            cm_release_id = cm.get("releaseId", "")
+            if cm_release_id != rel.get("buildId", ""):
+                gate.fail(f"target[{target}]: canonical.releaseId",
+                          f"manifest={cm_release_id} release.json={rel.get('buildId')}")
+            else:
+                gate.ok(f"target[{target}]: canonical.releaseId", cm_release_id[:20])
+
+            # gitCommit must match release.json
+            cm_commit = cm.get("gitCommit", "")
+            if cm_commit != rel.get("gitCommit", ""):
+                gate.fail(f"target[{target}]: canonical.gitCommit",
+                          f"manifest={cm_commit[:12]} release.json={rel.get('gitCommit','')[:12]}")
+            else:
+                gate.ok(f"target[{target}]: canonical.gitCommit", cm_commit[:12])
+
+            # artifacts: each SHA must match actual file on disk
+            cm_artifacts = cm.get("artifacts", {})
+            for art_name in ("bootloader", "partitions", "firmware"):
+                art = cm_artifacts.get(art_name, {})
+                art_sha = art.get("sha256", "")
+                art_path_name = art.get("path", "")
+                art_path_on_disk = target_dir / art_path_name if art_path_name else None
+
+                if not art_sha:
+                    gate.fail(f"target[{target}]: canonical.{art_name}.sha256", "missing")
+                    continue
+                if not art_path_on_disk or not art_path_on_disk.is_file():
+                    gate.fail(f"target[{target}]: canonical.{art_name}.path",
+                              f"file not found: {art_path_name}")
+                    continue
+                actual_art_sha = sha256_of(art_path_on_disk)
+                if actual_art_sha != art_sha:
+                    gate.fail(f"target[{target}]: canonical.{art_name}.sha256",
+                              f"manifest={art_sha[:16]}... actual={actual_art_sha[:16]}...")
+                else:
+                    gate.ok(f"target[{target}]: canonical.{art_name}.sha256",
+                            f"matches ({art_sha[:16]}...)")
+
+            # firmware signature in canonical manifest
+            fw_art = cm_artifacts.get("firmware", {})
+            fw_sig = fw_art.get("signature")
+            fw_sig_alg = fw_art.get("signatureAlgorithm")
+            if is_prod:
+                if not fw_sig or fw_sig == "null":
+                    gate.fail(f"target[{target}]: canonical.firmware.signature",
+                              "PRODUCTION requires signature in canonical manifest")
+                elif not fw_sig_alg:
+                    gate.fail(f"target[{target}]: canonical.firmware.signatureAlgorithm",
+                              "missing")
+                else:
+                    gate.ok(f"target[{target}]: canonical.firmware.signature",
+                            f"present ({fw_sig_alg})")
+            else:
+                if fw_sig and fw_sig != "null":
+                    gate.ok(f"target[{target}]: canonical.firmware.signature",
+                            f"present ({fw_sig_alg})")
+                else:
+                    gate.warn(f"target[{target}]: canonical.firmware.signature",
+                              "absent (dev/staging)")
+
+        except Exception as e:
+            gate.fail(f"target[{target}]: canonical manifest parse", str(e))
+
+    # ------------------------------------------------------------------
     # Verify provenance
     # ------------------------------------------------------------------
     prov_path = target_dir / "provenance.json"

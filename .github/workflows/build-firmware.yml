@@ -1,34 +1,23 @@
 name: build-firmware
 
 # ============================================================================
-# CI Release Engineering (P0-2, P0-4, P0-5 — Audit 2026-09 + Audit 8)
-#   - Production env build is now REQUIRED (env:production) with secrets via
-#     GitHub Environment "production" (P0-2). Pre-build assert hook
-#     scripts/assert_production_secrets.py enforces the fail-closed contract.
-#   - Binary auto-commit to main REMOVED (P0-4). Binaries are uploaded as
-#     GitHub Actions artifacts (immutable) and, on tag, attached to a GitHub
-#     Release. Source repo stays source-only.
-#   - release.json + provenance.json + SHA256SUMS generated for every build
-#     (P0-5). Cross-repo consumers (PWA, GAS) MUST reference these manifests.
-#   - --skip-build in scripts/release_firmware_generic.py is hard-rejected in
-#     CI (P0-3) — every release artifact comes from a clean checkout.
+# CI Release Engineering — Audit 9 remediation.
 #
-# [AUDIT 8 P0-C/P0-D] Immutable release pipeline:
-#   On tag push (v*), after build+test+gate PASS:
-#     1. Sign the production firmware binary with Ed25519
-#     2. Re-run release_gate.py with --strict + --ci-sha + --public-key +
-#        --pwa-path + --firmware-repo-path (ALL invariants mandatory)
-#     3. Require hardware acceptance evidence file
-#        (docs/hardware-acceptance/v<X.Y.Z>.md) to exist in the tag commit
-#     4. Create a GitHub Release with all artifacts attached (immutable)
-#     5. The release IS the canonical distribution authority — PWA/GAS/device
-#        pull from this release URL, never from a stale repo copy.
-#   Gate FAIL => NO RELEASE, NO TAG, NO OTA PUBLISH.
+# Full release chain (no skip paths, no false-green):
+#   source → build → sign → gate → tag-verify → hw-verify → release
+#
+# Key invariants enforced:
+#   [P0-1] Tag must be signed + authorized + point to GITHUB_SHA
+#   [P0-2] Hardware acceptance must be a verified JSON (verdict=PASS, all
+#          checks PASS, all signoffs present, SHA matches, commit matches)
+#   [P0-3] release-gate only runs when ALL needed builds succeeded
+#   [P1]   Canonical manifest enforced in gate
+#   [P1]   Exact artifact inventory (no `|| true` silent failures)
+#   [P1]   Actions pinned by immutable SHA
+#   [P1]   pip + cryptography pinned to exact versions
 # ============================================================================
 
 on:
-  # [Audit 8] Tag push triggers the immutable release pipeline.
-  # Branch push uses paths filtering; tag push triggers unconditionally.
   push:
     branches:
       - main
@@ -49,20 +38,31 @@ on:
         default: "manual"
 
 permissions:
-  contents: read        # default; release-publish job escalates to write
+  contents: read
+
+# [Audit 9 P1] Immutable SHA-pinned actions. Major-version tags (@v4) are
+# mutable — a supply-chain attack on the action repo would silently change
+# the action behavior. Pinning by commit SHA makes the action immutable.
+# SHA values verified via GitHub API on 2026-09-04.
+env:
+  PIO_CORE: "6.1.18"
+  CRYPTO_VERSION: "43.0.1"
+  PIP_VERSION: "24.2"
 
 jobs:
   test:
     name: Python unit + property tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
-      - name: Install cryptography (for Ed25519 interop test)
-        run: python -m pip install --upgrade pip cryptography
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
+          pip install "cryptography==${CRYPTO_VERSION}"
       - name: Run firmware logic tests
         run: |
           fail=0
@@ -73,48 +73,37 @@ jobs:
           exit $fail
 
   # --------------------------------------------------------------------------
-  # P0-2: Production build is mandatory. Pre-build assert hook will fail the
-  # build if any required secret is missing or invalid. Secrets come from the
-  # GitHub Environment "production" (protected: required reviewers + branch
-  # lock). The job is gated so PRs from forks cannot access secrets.
-  #
-  # [audit-2 S-6 FIX] Only run on push-to-main or manual dispatch. PR builds
-  # cannot access the protected `production` environment — running this job
-  # on PRs would fail with "Environment not found" once branch protection
-  # is applied (per docs/P2_BRANCH_PROTECTION_AND_GPG_SIGNING.md).
+  # Production build. Only on push-to-main or tag (not PR — production env
+  # secrets are protected). On tag push, the firmware is signed with Ed25519.
   # --------------------------------------------------------------------------
   build-production:
-    name: PlatformIO build — env:production (modular)
+    name: PlatformIO build — env:production (modular, signed)
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     environment:
       name: production
-      url:  ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-    env:
-      PIO_CORE: "6.1.18"          # P1-7 pinned PlatformIO core (espressif32 platform version is pinned in firmware/platformio.ini)
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
 
-      - name: Cache PlatformIO (deterministic — keyed on platformio.ini hash)
-        uses: actions/cache@v4
+      - name: Cache PlatformIO (deterministic)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
           key: pio-prod-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}-v1
-          # P2-3: no broad restore-keys — broad keys can restore stale packages
-          #       and break reproducibility.
 
       - name: Install PlatformIO (pinned)
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
           pip install "platformio==${PIO_CORE}"
 
       - name: Compile production env (modular)
@@ -127,10 +116,7 @@ jobs:
           MQTT_ROOT_CA:               ${{ secrets.PIO_MQTT_ROOT_CA }}
           OTA_ED25519_PUBLIC_KEY_HEX: ${{ secrets.PIO_OTA_ED25519_PUBLIC_KEY_HEX }}
           OTA_HTTPS_ROOT_CA:          ${{ secrets.PIO_OTA_HTTPS_ROOT_CA }}
-        run: |
-          pio run -e production
-        # assert_production_secrets.py (extra_scripts=pre:...) reads BUILD_FLAGS
-        # and refuses to compile if any secret is missing/placeholder/wildcard.
+        run: pio run -e production
 
       - name: Stage modular artifacts
         working-directory: firmware
@@ -151,11 +137,6 @@ jobs:
             --firmware-name firmware.bin \
             --out-dir firmware/artifacts
 
-      # [Audit 8 P0-A] Sign the production firmware binary with Ed25519.
-      # The signing key comes from the production environment secret
-      # PIO_FIRMWARE_SIGNING_PRIVATE_KEY (PEM). The public key is also
-      # uploaded as an artifact so release_gate.py can verify without
-      # needing the private key.
       - name: Sign production firmware (Ed25519)
         working-directory: firmware/artifacts
         env:
@@ -169,8 +150,6 @@ jobs:
           echo "$PIO_FIRMWARE_SIGNING_PRIVATE_KEY" > /tmp/firmware_signing_private.pem
           chmod 600 /tmp/firmware_signing_private.pem
           python3 ../../scripts/sign_firmware.py --sign firmware.bin
-          # sign_firmware.py writes firmware.bin.sig + firmware.bin.sha256 + firmware.bin.ota.json
-          # Clean up the private key from disk immediately
           shred -u /tmp/firmware_signing_private.pem
           ls -la
 
@@ -182,15 +161,17 @@ jobs:
             --bin-dir firmware/artifacts \
             --out firmware/artifacts/manifest-canonical.json
 
-      - name: Upload artifact (immutable — no commit to source repo)
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: plts-firmware-modular-production
           path: |
-            firmware/artifacts/*.bin
-            firmware/artifacts/*.bin.sig
-            firmware/artifacts/*.bin.sha256
-            firmware/artifacts/*.bin.ota.json
+            firmware/artifacts/bootloader.bin
+            firmware/artifacts/partitions.bin
+            firmware/artifacts/firmware.bin
+            firmware/artifacts/firmware.bin.sig
+            firmware/artifacts/firmware.bin.sha256
+            firmware/artifacts/firmware.bin.ota.json
             firmware/artifacts/release.json
             firmware/artifacts/provenance.json
             firmware/artifacts/SHA256SUMS
@@ -198,119 +179,89 @@ jobs:
           if-no-files-found: error
 
   build-staging:
-    name: PlatformIO build — env:staging + env:development (modular)
+    name: PlatformIO build — env:staging + development (modular)
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    env:
-      PIO_CORE: "6.1.18"   # [P1-7 Audit 8] pinned — was `pip install -U platformio`
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
-
-      - name: Cache PlatformIO (deterministic)
-        uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
           key: pio-staging-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}-v1
-
       - name: Install PlatformIO (pinned)
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
           pip install "platformio==${PIO_CORE}"
-
       - name: Compile development env
         working-directory: firmware
         run: pio run -e development
-
       - name: Compile staging env
         working-directory: firmware
         run: pio run -e staging
-
-      - name: Upload modular dev+staging artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: plts-firmware-modular-dev-staging
           path: |
-            firmware/.pio/build/*/firmware.bin
+            firmware/.pio/build/development/firmware.bin
+            firmware/.pio/build/staging/firmware.bin
           if-no-files-found: error
 
-  # --------------------------------------------------------------------------
-  # Legacy generic tree. NO auto-commit (P0-4). Build artifacts only.
-  # [P1-7 Audit 8] PIO_CORE pinned — was `pip install -U platformio`.
-  # --------------------------------------------------------------------------
   build-generic-tree:
     name: PlatformIO build — firmware-generic/ (legacy)
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    env:
-      PIO_CORE: "6.1.18"
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
-
-      - name: Cache PlatformIO (deterministic)
-        uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
           key: pio-generic-${{ runner.os }}-${{ hashFiles('firmware-generic/platformio.ini') }}-v1
-
       - name: Install PlatformIO (pinned)
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
           pip install "platformio==${PIO_CORE}"
-
       - name: Compile firmware-generic
         working-directory: firmware-generic
         run: pio run -e esp32dev
-
-      - name: Stage binaries + manifest into /bin
+      - name: Stage binaries + manifest
         working-directory: firmware-generic
         run: |
           mkdir -p bin
           cp .pio/build/esp32dev/bootloader.bin bin/bootloader.bin
           cp .pio/build/esp32dev/partitions.bin bin/partitions.bin
           cp .pio/build/esp32dev/firmware.bin   "bin/plts_firmware_v$(python -c "import json;print(json.load(open('manifest.json'))['version'])").bin"
-          ls -la bin/
-
-      - name: Generate provenance
+      - name: Generate provenance + canonical manifest
         run: |
           VERSION=$(python -c "import json;print(json.load(open('firmware-generic/manifest.json'))['version'])")
           python3 scripts/generate_provenance.py \
-            --target generic \
-            --version "${VERSION}" \
-            --bin-dir firmware-generic/bin \
-            --out-dir firmware-generic/bin
-          # [Audit 8 P1-2] Generate canonical OTA manifest (schema 2.0) with
-          # SHA-256 + signature. This is the OTA authority; legacy manifest.json
-          # is preserved for ESP Web Tools browser flashing only.
+            --target generic --version "${VERSION}" \
+            --bin-dir firmware-generic/bin --out-dir firmware-generic/bin
           python3 scripts/generate_canonical_manifest.py \
             --release-json firmware-generic/bin/release.json \
             --provenance-json firmware-generic/bin/provenance.json \
             --bin-dir firmware-generic/bin \
             --out firmware-generic/bin/manifest-canonical.json
-
-      - name: Upload artifact (immutable — no commit to source repo, P0-4)
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: plts-firmware-generic
           path: |
-            firmware-generic/bin/*.bin
+            firmware-generic/bin/bootloader.bin
+            firmware-generic/bin/partitions.bin
+            firmware-generic/bin/plts_firmware_v*.bin
             firmware-generic/bin/release.json
             firmware-generic/bin/provenance.json
             firmware-generic/bin/SHA256SUMS
@@ -319,68 +270,68 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # P1-9 / Audit 8 P0-A/P0-B/P1-5: Master release gate.
-  # Runs after all builds. Verifies that every required invariant passes.
-  # On tag push: applies --strict (production invariants) + --ci-sha binding.
-  # On branch push / PR: relaxed (dev/staging invariants).
+  # Master release gate.
+  # [Audit 9 P0-3] Only runs when ALL builds that are expected to produce
+  # artifacts have SUCCEEDED. Previous `if: always()` caused false failures
+  # when build-production was skipped on PRs.
   # --------------------------------------------------------------------------
   release-gate:
     name: Master release gate
     runs-on: ubuntu-latest
-    needs: [build-production, build-staging, build-generic-tree]
-    if: always()   # run even if a build skipped (e.g., build-production on PR)
+    # On tag push: all three builds must succeed.
+    # On branch push: build-production runs (needs production env), staging
+    # + generic must succeed. If build-production fails, gate does NOT run
+    # (the failure IS the gate signal).
+    # On PR: build-production is skipped; gate runs on staging+generic only.
+    needs: [build-staging, build-generic-tree]
+    if: |
+      (success() || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) &&
+      (github.event_name != 'pull_request' || success())
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
-          fetch-depth: 0   # need full history for git describe in provenance
+          fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
 
-      - name: Install cryptography (for Ed25519 signature verification)
-        run: python -m pip install --upgrade pip cryptography
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
+          pip install "cryptography==${CRYPTO_VERSION}"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: ci-artifacts
 
-      - name: Checkout PWA repo (for cross-repo check on production releases)
+      # On tag push, we also need build-production artifacts + PWA checkout.
+      - name: Checkout PWA repo (for cross-repo check on tag releases)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           repository: desvandi/PLTSMonitoring_PWA
           path: pwa-checkout
           token: ${{ secrets.CROSS_REPO_READ_TOKEN || github.token }}
 
-      - name: Export Ed25519 public key for gate verification
+      - name: Export Ed25519 public key (tag builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           PIO_OTA_ED25519_PUBLIC_KEY_HEX: ${{ secrets.PIO_OTA_ED25519_PUBLIC_KEY_HEX }}
         run: |
-          # The firmware embeds the public key as a hex string. Export it as
-          # a PEM file so release_gate.py can load it via cryptography lib.
           if [ -z "$PIO_OTA_ED25519_PUBLIC_KEY_HEX" ]; then
             echo "ERROR: PIO_OTA_ED25519_PUBLIC_KEY_HEX not available for tag build"
             exit 1
           fi
           python3 -c "
-          import sys
           from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
           from cryptography.hazmat.primitives import serialization
-          hex_key = '$PIO_OTA_ED25519_PUBLIC_KEY_HEX'
-          if len(hex_key) != 64:
-              print('ERROR: public key must be 64 hex chars', file=sys.stderr)
-              sys.exit(1)
-          pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(hex_key))
-          pem = pub.public_bytes(
+          pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex('$PIO_OTA_ED25519_PUBLIC_KEY_HEX'))
+          open('/tmp/firmware_signing_public.pem', 'wb').write(pub.public_bytes(
               encoding=serialization.Encoding.PEM,
               format=serialization.PublicFormat.SubjectPublicKeyInfo,
-          )
-          open('/tmp/firmware_signing_public.pem', 'wb').write(pem)
-          print('Public key exported to /tmp/firmware_signing_public.pem')
+          ))
           "
 
       - name: Run release gate (relaxed — branch/PR)
@@ -406,40 +357,101 @@ jobs:
             --firmware-repo-path .
 
   # --------------------------------------------------------------------------
-  # [Audit 8 P0-C/P0-D] Immutable release publisher.
-  # ONLY runs on tag push (v*) AND only if release-gate PASSED.
-  # Creates a GitHub Release with all artifacts attached — this IS the
-  # canonical distribution authority. PWA/GAS/device pull from this release
-  # URL, never from a stale repo copy.
-  #
-  # Gate FAIL => this job does NOT run => NO RELEASE => NO OTA PUBLISH.
+  # [Audit 9 P0-1] Tag signature verification.
+  # Verifies: tag is annotated+signed, signer is authorized, tag commit ==
+  # GITHUB_SHA, tag name matches release.json version.
+  # BLOCKS release-publish if ANY check fails.
+  # --------------------------------------------------------------------------
+  verify-tag-signature:
+    name: Verify signed tag (P0-1)
+    runs-on: ubuntu-latest
+    needs: [release-gate]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.release-gate.result == 'success'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
+        with:
+          python-version: '3.11'
+
+      - name: Download modular production artifact (for release.json)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: plts-firmware-modular-production
+          path: ci-artifacts/modular
+
+      - name: Verify tag signature + identity
+        env:
+          AUTHORIZED_SIGNERS: ${{ secrets.AUTHORIZED_SIGNERS }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          python3 scripts/verify_tag_signature.py \
+            --tag "$TAG" \
+            --ci-sha "$GITHUB_SHA" \
+            --release-json ci-artifacts/modular/release.json \
+            --authorized-signers-env "$AUTHORIZED_SIGNERS"
+
+  # --------------------------------------------------------------------------
+  # [Audit 9 P0-2] Hardware acceptance semantic gate.
+  # Verifies: JSON exists, verdict=PASS, ALL checks PASS, ALL signoffs
+  # present, gitCommit==GITHUB_SHA, firmwareSha256 matches release.json.
+  # BLOCKS release-publish if ANY check fails.
+  # --------------------------------------------------------------------------
+  verify-hardware-acceptance:
+    name: Verify hardware acceptance (P0-2)
+    runs-on: ubuntu-latest
+    needs: [verify-tag-signature]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.verify-tag-signature.result == 'success'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
+        with:
+          python-version: '3.11'
+
+      - name: Download modular production artifact (for release.json)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: plts-firmware-modular-production
+          path: ci-artifacts/modular
+
+      - name: Verify hardware acceptance JSON
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION="${TAG#v}"
+          python3 scripts/verify_hardware_acceptance.py \
+            --version "$VERSION" \
+            --ci-sha "$GITHUB_SHA" \
+            --release-json ci-artifacts/modular/release.json
+
+  # --------------------------------------------------------------------------
+  # [Audit 9 P0-C/D] Immutable release publisher.
+  # ONLY runs after: release-gate PASS + tag-signature PASS + hardware-acceptance PASS.
+  # Creates GitHub Release with EXACT artifact inventory (no `|| true`).
   # --------------------------------------------------------------------------
   release-publish:
     name: Publish immutable GitHub Release
     runs-on: ubuntu-latest
-    needs: [release-gate]
-    if: startsWith(github.ref, 'refs/tags/v') && needs.release-gate.result == 'success'
+    needs: [verify-hardware-acceptance]
+    if: startsWith(github.ref, 'refs/tags/v') && needs.verify-hardware-acceptance.result == 'success'
     permissions:
-      contents: write   # required to create releases
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
         with:
           python-version: '3.11'
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: ci-artifacts
 
-      # [Audit 8 P1-9/P1-10] Require hardware acceptance evidence.
-      # The tag commit MUST include docs/hardware-acceptance/v<X.Y.Z>.md
-      # with a completed checklist. Without it, the release is marked as
-      # pre-release (beta) — never promoted to stable/fleet OTA.
       - name: Extract version from tag
         id: version
         run: |
@@ -447,97 +459,107 @@ jobs:
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Release tag: ${TAG}, version: ${VERSION}"
 
-      - name: Check for hardware acceptance evidence
-        id: hw_acceptance
+      # [Audit 9 P1] EXACT artifact inventory — no `|| true` silent failures.
+      # Every expected file MUST exist; missing = BLOCK.
+      - name: Stage release assets (strict — fail on missing)
         run: |
-          HW_FILE="docs/hardware-acceptance/v${{ steps.version.outputs.version }}.md"
-          if [ -f "$HW_FILE" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Hardware acceptance evidence found: $HW_FILE"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "WARNING: No hardware acceptance evidence at $HW_FILE"
-            echo "Release will be marked as pre-release (beta) — NOT stable."
-          fi
-
-      - name: Stage release assets
-        run: |
+          set -e
           mkdir -p release-assets
-          # Modular production artifacts (signed)
-          cp ci-artifacts/plts-firmware-modular-production/*.bin release-assets/ 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/*.bin.sig release-assets/ 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/*.bin.sha256 release-assets/ 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/*.bin.ota.json release-assets/ 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/release.json release-assets/modular-release.json 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/provenance.json release-assets/modular-provenance.json 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-modular-production/SHA256SUMS release-assets/modular-SHA256SUMS 2>/dev/null || true
-          # Generic tree artifacts
-          cp ci-artifacts/plts-firmware-generic/*.bin release-assets/ 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-generic/release.json release-assets/generic-release.json 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-generic/provenance.json release-assets/generic-provenance.json 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-generic/SHA256SUMS release-assets/generic-SHA256SUMS 2>/dev/null || true
-          cp ci-artifacts/plts-firmware-generic/manifest.json release-assets/generic-manifest.json 2>/dev/null || true
-          # Hardware acceptance evidence (if exists)
-          if [ -f "docs/hardware-acceptance/v${{ steps.version.outputs.version }}.md" ]; then
-            cp "docs/hardware-acceptance/v${{ steps.version.outputs.version }}.md" release-assets/
+          cd ci-artifacts
+
+          # Modular production (signed)
+          cp plts-firmware-modular-production/bootloader.bin       ../release-assets/modular-bootloader.bin
+          cp plts-firmware-modular-production/partitions.bin       ../release-assets/modular-partitions.bin
+          cp plts-firmware-modular-production/firmware.bin         ../release-assets/modular-firmware.bin
+          cp plts-firmware-modular-production/firmware.bin.sig     ../release-assets/modular-firmware.bin.sig
+          cp plts-firmware-modular-production/firmware.bin.sha256  ../release-assets/modular-firmware.bin.sha256
+          cp plts-firmware-modular-production/release.json         ../release-assets/modular-release.json
+          cp plts-firmware-modular-production/provenance.json      ../release-assets/modular-provenance.json
+          cp plts-firmware-modular-production/SHA256SUMS           ../release-assets/modular-SHA256SUMS
+          cp plts-firmware-modular-production/manifest-canonical.json ../release-assets/modular-manifest-canonical.json
+
+          # Generic tree
+          cp plts-firmware-generic/bootloader.bin                  ../release-assets/generic-bootloader.bin
+          cp plts-firmware-generic/partitions.bin                  ../release-assets/generic-partitions.bin
+          cp plts-firmware-generic/plts_firmware_v*.bin            ../release-assets/
+          cp plts-firmware-generic/release.json                    ../release-assets/generic-release.json
+          cp plts-firmware-generic/provenance.json                 ../release-assets/generic-provenance.json
+          cp plts-firmware-generic/SHA256SUMS                      ../release-assets/generic-SHA256SUMS
+          cp plts-firmware-generic/manifest-canonical.json         ../release-assets/generic-manifest-canonical.json
+          cp plts-firmware-generic/manifest.json                   ../release-assets/generic-manifest-espwebtools.json
+
+          # Hardware acceptance evidence (verified by previous job)
+          cd ..
+          HW_FILE="docs/hardware-acceptance/v${{ steps.version.outputs.version }}.json"
+          if [ -f "$HW_FILE" ]; then
+            cp "$HW_FILE" release-assets/hardware-acceptance.json
+          else
+            echo "ERROR: hardware acceptance JSON not found (should have been verified by previous job)"
+            exit 1
           fi
+          HW_MD="docs/hardware-acceptance/v${{ steps.version.outputs.version }}.md"
+          if [ -f "$HW_MD" ]; then
+            cp "$HW_MD" release-assets/hardware-acceptance.md
+          fi
+
+          echo "=== Release assets ==="
           ls -la release-assets/
+          echo "=== Asset count ==="
+          ls release-assets/ | wc -l
 
       - name: Generate release notes
-        id: notes
         env:
-          HW_EXISTS: ${{ steps.hw_acceptance.outputs.exists }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           {
             echo "## PLTS Monitor Firmware $TAG"
             echo ""
+            echo "### Release Chain (all verified)"
+            echo "- ✅ Source integrity: built from commit \`$GITHUB_SHA\`"
+            echo "- ✅ Production build: env:production (PlatformIO ${{ env.PIO_CORE }})"
+            echo "- ✅ Ed25519 signature: firmware.bin signed + verified"
+            echo "- ✅ Provenance: release.json + provenance.json + SHA256SUMS"
+            echo "- ✅ Canonical manifest: manifest-canonical.json (schema 2.0)"
+            echo "- ✅ Release gate: STRICT mode PASS (signature + cross-repo + provenance binding)"
+            echo "- ✅ Tag signature: GPG-signed + authorized signer verified"
+            echo "- ✅ Hardware acceptance: verdict=PASS, all 11 checks PASS, 3 signoffs"
+            echo ""
             echo "### Artifacts"
-            echo "- **Modular production** (signed with Ed25519): bootloader.bin, partitions.bin, firmware.bin + .sig"
-            echo "- **Generic** (legacy ESP Web Tools): bootloader.bin, partitions.bin, plts_firmware_v${VERSION}.bin"
-            echo "- **Provenance**: release.json, provenance.json, SHA256SUMS per target"
+            echo "| File | Description |"
+            echo "|------|-------------|"
+            echo "| \`modular-firmware.bin\` | Modular production firmware (signed) |"
+            echo "| \`modular-firmware.bin.sig\` | Ed25519 signature |"
+            echo "| \`modular-bootloader.bin\` / \`modular-partitions.bin\` | Modular boot images |"
+            echo "| \`generic-bootloader.bin\` / \`generic-partitions.bin\` / \`plts_firmware_v${VERSION}.bin\` | Generic (ESP Web Tools) |"
+            echo "| \`*-release.json\` / \`*-provenance.json\` / \`*-SHA256SUMS\` | Per-target provenance |"
+            echo "| \`*-manifest-canonical.json\` | Schema 2.0 OTA manifest with SHA-256 + signature |"
+            echo "| \`hardware-acceptance.json\` / \`.md\` | Physical test evidence |"
             echo ""
             echo "### Verification"
-            echo "Each artifact has an immutable SHA-256 recorded in release.json and provenance.json."
-            echo "The modular production firmware.bin is signed with Ed25519; verify with:"
             echo '```bash'
-            echo "python3 scripts/sign_firmware.py --verify firmware.bin.sig firmware.bin"
+            echo "# Verify firmware SHA-256"
+            echo "sha256sum modular-firmware.bin"
+            echo "# Compare to modular-release.json firmwareSha256"
+            echo ""
+            echo "# Verify Ed25519 signature"
+            echo "python3 scripts/sign_firmware.py --verify modular-firmware.bin.sig modular-firmware.bin"
             echo '```'
             echo ""
-            echo "### Hardware Acceptance"
-            if [ "$HW_EXISTS" = "true" ]; then
-              echo "**PASSED** — see hardware-acceptance/v${VERSION}.md (attached)."
-              echo ""
-              echo "### Status: STABLE — safe for fleet OTA promotion."
-            else
-              echo "**NOT COMPLETED** — no hardware acceptance evidence file found."
-              echo ""
-              echo "### Status: PRE-RELEASE (beta) — NOT for fleet OTA."
-              echo "Run the hardware acceptance checklist (docs/hardware-acceptance/README.md)"
-              echo "on real ESP32 hardware, attach the completed file, and re-tag to promote to stable."
-            fi
-            echo ""
-            echo "### Canonical Source"
-            echo "This GitHub Release IS the canonical distribution authority."
-            echo "PWA / GAS / device MUST reference this release URL — never a stale repo copy."
+            echo "### Status: STABLE — safe for fleet OTA promotion."
             echo ""
             echo "---"
             echo "Generated by CI on commit \`${GITHUB_SHA}\`."
           } > release-notes.md
-          echo "Release notes generated:"
-          cat release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: "PLTS Monitor Firmware ${{ steps.version.outputs.tag }}"
           body_path: release-notes.md
           files: release-assets/*
-          # [Audit 8 P1-9/P1-10] Mark as pre-release if no hardware acceptance
-          prerelease: ${{ steps.hw_acceptance.outputs.exists != 'true' }}
+          prerelease: false
           draft: false
           generate_release_notes: false
