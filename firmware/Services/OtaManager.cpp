@@ -8,6 +8,7 @@
 #include "../Utils/Crypto.h"
 #include "../Network/MqttTelemetryPublisher.h"
 #include "LogService.h"
+#include "TimeManager.h"   // [CI fix] needed for Services::timeManager
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
