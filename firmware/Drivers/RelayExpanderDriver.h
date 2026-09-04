@@ -17,6 +17,7 @@
 
 #include <Arduino.h>
 #if PLTS_ENABLE_RELAYS
+#include "../Core/Config.h"   // [self-review fix] needed for Core::PCF8574_* constants
 
 namespace Drivers {
 

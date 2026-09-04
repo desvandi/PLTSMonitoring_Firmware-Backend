@@ -68,6 +68,8 @@ static void handleRelayCommand() {
   if (uri.endsWith("/on")) action = "on";
   else if (uri.endsWith("/off")) action = "off";
   else if (uri.endsWith("/pulse")) action = "pulse";
+  else if (uri.endsWith("/acknowledge")) action = "acknowledge";
+  else if (uri.endsWith("/clear")) action = "clear";
   else { sendError(400, "Unknown relay action"); return; }
 
   // Parse body
@@ -188,10 +190,10 @@ static void handleAllOff() {
     }
   }
 
-  // Fallback (no body or invalid) — direct call
-  String messageOut;
-  Services::relaysController.applyCommand("all_off", 0, false, 0, "MANUAL", messageOut);
-  sendSuccess(messageOut, "{}");
+  // [self-review fix] NO FALLBACK — if body is missing or invalid, reject.
+  // The previous fallback called applyCommand directly without journal,
+  // bypassing the transaction durability boundary (brief §8).
+  sendError(400, "Missing or invalid JSON body — requestId required for all_off");
 }
 
 void registerRoutes() {

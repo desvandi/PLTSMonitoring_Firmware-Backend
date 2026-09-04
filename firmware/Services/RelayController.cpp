@@ -34,7 +34,7 @@ void RelayController::begin() {
   // Initialize PCF8574 driver (fail-safe: all OFF)
   _driverAvailable = Drivers::relayExpander.begin(_pcf8574Address);
   if (!_driverAvailable) {
-    Log.append(Core::LogType::Custom,
+    Services::Log.append(Core::LogType::Custom,
                "RELAY: PCF8574 not available — relay control disabled", 0);
     Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
                            Core::AlarmSeverity::Critical,
@@ -107,7 +107,7 @@ RelayCommandResult RelayController::applyCommand(
       _applyChannelState(ch, false, Core::RelaySource::System);
     }
     messageOut = "All channels OFF";
-    Log.append(Core::LogType::Custom, "RELAY: all_off command executed", 0);
+    Services::Log.append(Core::LogType::Custom, "RELAY: all_off command executed", 0);
     return RelayCommandResult::Applied;
   }
 
@@ -200,7 +200,7 @@ RelayCommandResult RelayController::applyCommand(
     String interlockReason;
     if (!_evaluateInterlock(channel, true, interlockReason)) {
       messageOut = "Blocked by interlock: " + interlockReason;
-      alarms.raise(Core::AlarmCode::RELAY_INTERLOCK_VIOLATION,
+      Services::alarms.raise(Core::AlarmCode::RELAY_INTERLOCK_VIOLATION,
                    Core::AlarmSeverity::Warning,
                    interlockReason.c_str());
       return RelayCommandResult::Blocked;
@@ -270,7 +270,7 @@ void RelayController::emergencyAllOff() {
       _applyChannelState(ch, false, Core::RelaySource::System);
     }
   }
-  Log.append(Core::LogType::Custom,
+  Services::Log.append(Core::LogType::Custom,
              "RELAY: E-WAVE cascade — all channels OFF", 0);
 }
 
@@ -280,7 +280,7 @@ bool RelayController::acknowledgeSafetyAlarm(uint8_t channel) {
 
   _state[channel].lockout = Core::RelayLockoutState::Acknowledged;
   _saveLockoutStates();
-  Log.append(Core::LogType::Custom,
+  Services::Log.append(Core::LogType::Custom,
              "RELAY: Channel " + String(channel) + " safety alarm acknowledged", 0);
   return true;
 }
@@ -300,7 +300,7 @@ bool RelayController::clearSafetyLockout(uint8_t channel) {
   // Will transition to ARMED on next tick, then NORMAL
   _state[channel].lockout = Core::RelayLockoutState::Armed;
   _saveLockoutStates();
-  Log.append(Core::LogType::Custom,
+  Services::Log.append(Core::LogType::Custom,
              "RELAY: Channel " + String(channel) + " safety lockout cleared", 0);
   return true;
 }
@@ -451,8 +451,8 @@ void RelayController::_checkMaxOnTime() {
 
       String msg = "RELAY: Channel " + String(ch) + " maxOnTime exceeded (" +
                    String(onDuration) + "s >= " + String(_config[ch].maxOnTimeSec) + "s) — FORCE OFF";
-      Log.append(Core::LogType::Custom, msg, 0);
-      alarms.raise(Core::AlarmCode::RELAY_MAX_ON_TIME,
+      Services::Log.append(Core::LogType::Custom, msg, 0);
+      Services::alarms.raise(Core::AlarmCode::RELAY_MAX_ON_TIME,
                    Core::AlarmSeverity::Critical,
                    msg.c_str());
     }
