@@ -49,10 +49,19 @@ for env_var, macro in SECRET_MAP.items():
     if macro == "MQTT_BROKER_PORT":
         # Numeric macro — no quotes
         build_env.Append(BUILD_FLAGS=[f"-D{macro}={value}"])
-        build_env.Append(CPPDEFINES=[(macro, value)])
     else:
-        # String macro — wrap in '"..."' for C preprocessor
-        build_env.Append(BUILD_FLAGS=[f"-D{macro}='\"{value}\"'"])
+        # String macro — use CPPDEFINES with (name, value) tuple.
+        # PlatformIO will handle quoting automatically — no manual '"..."' needed.
+        # This avoids the "macro names must be identifiers" error caused by
+        # the -D flag format with embedded quotes.
+        pass  # handled below via CPPDEFINES
+
+# Use CPPDEFINES (not BUILD_FLAGS) for string macros — PlatformIO handles quoting
+for env_var, macro in SECRET_MAP.items():
+    value = os.environ.get(env_var, "")
+    if not value:
+        continue
+    if macro != "MQTT_BROKER_PORT":
         build_env.Append(CPPDEFINES=[(macro, value)])
     print(f"  OK: {macro} injected ({len(value)} chars)")
 
