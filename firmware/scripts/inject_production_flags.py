@@ -69,9 +69,13 @@ for env_var, macro in SECRET_MAP.items():
 # STEP 2: Validate (same logic as old assert_production_secrets.py)
 # ============================================================================
 
-BUILD_FLAGS = build_env.ParseFlags(build_env.get("BUILD_FLAGS"))
+# Read CPPDEFINES directly from env (includes both platformio.ini -D flags
+# AND programmatically appended CPPDEFINES from Step 1).
+# The old approach (env.ParseFlags(env.get("BUILD_FLAGS"))) only sees -D flags
+# from platformio.ini, not programmatically added ones.
+RAW_CPPDEFINES = build_env.Dictionary("CPPDEFINES")
 MACROS = {}
-for flag in BUILD_FLAGS.get("CPPDEFINES", []):
+for flag in RAW_CPPDEFINES:
     if isinstance(flag, (list, tuple)) and len(flag) == 2:
         MACROS[str(flag[0])] = str(flag[1])
     elif isinstance(flag, str):
