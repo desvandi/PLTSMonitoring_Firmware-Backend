@@ -64,8 +64,19 @@ def run() -> int:
     # actual annotated tag object.
     tag_ref = f"refs/tags/{args.tag}"
     # Try to fetch the tag object from origin (needed for CI)
-    subprocess.run(["git", "fetch", "origin", "tag", args.tag],
+    # [CI fix] GitHub Actions checkout@v4 resolves tag names to commits.
+    # We need to fetch the actual tag object and update the local ref.
+    subprocess.run(["git", "fetch", "origin", "tag", args.tag, "--force"],
                    capture_output=True, text=True, check=False)
+    # Also update the local ref to point to the tag object, not the commit
+    tag_obj_sha_raw = subprocess.run(
+        ["git", "rev-parse", f"refs/tags/{args.tag}^{{tag}}"],
+        capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if tag_obj_sha_raw:
+        # Force update the ref to point to the tag object
+        subprocess.run(["git", "update-ref", f"refs/tags/{args.tag}", tag_obj_sha_raw],
+                       capture_output=True, text=True, check=False)
 
     # Check the type of the OBJECT that the tag ref points to.
     # For annotated tags: 'git cat-file -t refs/tags/v1.8.0' returns 'tag'
