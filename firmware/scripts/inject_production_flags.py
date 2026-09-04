@@ -47,23 +47,17 @@ for env_var, macro in SECRET_MAP.items():
         continue
 
     if macro == "MQTT_BROKER_PORT":
-        # Numeric macro — no quotes
-        build_env.Append(BUILD_FLAGS=[f"-D{macro}={value}"])
+        # Numeric macro — use CPPDEFINES tuple too (consistent with string macros)
+        build_env.Append(CPPDEFINES=[(macro, value)])
     else:
         # String macro — use CPPDEFINES with (name, value) tuple.
-        # PlatformIO will handle quoting automatically — no manual '"..."' needed.
-        # This avoids the "macro names must be identifiers" error caused by
-        # the -D flag format with embedded quotes.
-        pass  # handled below via CPPDEFINES
-
-# Use CPPDEFINES (not BUILD_FLAGS) for string macros — PlatformIO handles quoting
-for env_var, macro in SECRET_MAP.items():
-    value = os.environ.get(env_var, "")
-    if not value:
-        continue
-    if macro != "MQTT_BROKER_PORT":
         build_env.Append(CPPDEFINES=[(macro, value)])
     print(f"  OK: {macro} injected ({len(value)} chars)")
+
+# Also add ALLOWED_CORS_ORIGINS if not already in platformio.ini build_flags
+# (it IS in platformio.ini, but let's make sure it's in CPPDEFINES for validation)
+if "ALLOWED_CORS_ORIGINS" not in [d[0] if isinstance(d, (list, tuple)) else d for d in build_env.Dictionary("CPPDEFINES")]:
+    build_env.Append(CPPDEFINES=[("ALLOWED_CORS_ORIGINS", "https://plts.example.com")])
 
 # ============================================================================
 # STEP 2: Validate (same logic as old assert_production_secrets.py)
