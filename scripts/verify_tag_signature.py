@@ -51,6 +51,10 @@ def run() -> int:
                     help="File with authorized GPG key IDs (one per line)")
     ap.add_argument("--authorized-signers-env", type=str, default=None,
                     help="Newline-separated authorized key IDs (from CI secret)")
+    ap.add_argument("--expected-tagger-emails", type=str, default=None,
+                    help="Comma-separated list of authorized tagger emails (e.g., 'desvandi101@gmail.com'). "
+                         "If set, the tag's tagger email MUST match one of these. "
+                         "Defense-in-depth for P0-1: prevents a valid signature from an unauthorized identity.")
     args = ap.parse_args()
 
     blockers = []
@@ -132,23 +136,61 @@ def run() -> int:
             print(f"[PASS] tag-signature: valid GPG signature")
 
             # Extract the signer key ID from the verification output.
-            # GPG output format: "Good signature from <name> <email> [key: ABCDEF12]"
-            # or: "Primary key fingerprint: 1234 5678 90AB CDEF ..."
+            # GPG output format varies by version:
+            #   - GPG 2.2.x: "Primary key fingerprint: 1234 5678 90AB CDEF ..."
+            #   - GPG 2.4.x: "gpg:                using RSA key F3EA7A3F...5E0BB8EF44199645"
+            #   - Some:      "Good signature from <name> <email> [key: ABCDEF12]"
+            # [Audit 2026-09-04 P0-1 FIX] Added "using (RSA|ECDSA|EDDSA) key" pattern
+            # because GPG 2.4.x omits the "Primary key fingerprint:" line.
+            import re
             signer_key_id = None
             for line in verify_output.splitlines():
                 line = line.strip()
                 if line.startswith("Primary key fingerprint:"):
-                    # Extract the fingerprint (last 16 chars without spaces)
                     fp = line.split(":", 1)[1].strip().replace(" ", "")
                     signer_key_id = fp[-16:] if len(fp) >= 16 else fp
                     break
-                if "key " in line.lower() and "[" in line:
-                    # Try to extract [key: XXXX] format
-                    import re
-                    m = re.search(r"\[key:\s*([0-9A-Fa-f]+)\]", line)
-                    if m:
-                        signer_key_id = m.group(1)
-                        break
+                # Pattern: "gpg: using RSA key F3EA7A3FC641EA0FE31FBB4C5E0BB8EF44199645"
+                m = re.search(r"using\s+(?:RSA|ECDSA|EDDSA|DSA)\s+key\s+([0-9A-Fa-f]{16,40})", line)
+                if m:
+                    key_hex = m.group(1)
+                    signer_key_id = key_hex[-16:]  # last 16 hex chars = long key ID
+                    break
+                # Pattern: [key: XXXX]
+                m = re.search(r"\[key:\s*([0-9A-Fa-f]+)\]", line)
+                if m:
+                    signer_key_id = m.group(1)
+                    break
+
+            # Fallback: if extraction from `git tag -v` output failed, use
+            # `gpg --list-packets` on the detached signature for a machine-
+            # readable key ID. This is the most robust method.
+            if not signer_key_id:
+                try:
+                    # Extract the signature block from the tag object and
+                    # feed it to gpg --list-packets to find the issuer key ID.
+                    tag_obj = subprocess.run(
+                        ["git", "cat-file", "-p", args.tag],
+                        capture_output=True, text=True, check=False
+                    )
+                    tag_text = tag_obj.stdout
+                    # The PGP signature block is between "-----BEGIN PGP SIGNATURE-----"
+                    # and "-----END PGP SIGNATURE-----"
+                    sig_start = tag_text.find("-----BEGIN PGP SIGNATURE-----")
+                    sig_end = tag_text.find("-----END PGP SIGNATURE-----")
+                    if sig_start >= 0 and sig_end > sig_start:
+                        sig_block = tag_text[sig_start:sig_end + len("-----END PGP SIGNATURE-----")]
+                        pkt = subprocess.run(
+                            ["gpg", "--list-packets", "--no-tty", "--batch"],
+                            input=sig_block, capture_output=True, text=True, check=False
+                        )
+                        pkt_out = pkt.stdout + pkt.stderr
+                        # Look for: ":signature packet: algo 1, keyid F3EA7A3FC641EA0FE31FBB4C5E0BB8EF44199645"
+                        m = re.search(r"keyid\s+([0-9A-Fa-f]{16,40})", pkt_out)
+                        if m:
+                            signer_key_id = m.group(1)[-16:]
+                except Exception:
+                    pass
 
             if not signer_key_id:
                 # [Audit 10 P0-1 FIX] FAIL-CLOSED: if we cannot extract the
@@ -211,6 +253,49 @@ def run() -> int:
                         f"Configure .github/authorized-signers or the AUTHORIZED_SIGNERS CI secret."
                     )
                     print(f"[FAIL] tag-signer: no authorized-signers configured — BLOCKED (fail-closed)")
+
+                # ------------------------------------------------------------------
+                # 3b. [Audit 2026-09-04 P0-1 DEFENSE-IN-DEPTH] Tagger email check.
+                #
+                # GitHub's signature verification requires the tagger email to
+                # match a UID on the signing GPG key AND that UID's email must
+                # be a verified email on the GitHub account. A valid GPG
+                # signature from the correct key but with a mismatched tagger
+                # email causes GitHub to report verification=false/bad_email.
+                #
+                # This check enforces the same invariant at CI level, so a
+                # tag that would fail GitHub verification is caught locally
+                # before the release is published.
+                # ------------------------------------------------------------------
+                if args.expected_tagger_emails:
+                    expected_emails = [
+                        e.strip().lower() for e in args.expected_tagger_emails.split(",")
+                        if e.strip()
+                    ]
+                    tagger_email_raw = git("for-each-ref",
+                                           f"refs/tags/{args.tag}",
+                                           "--format=%(taggeremail)")
+                    # tagger_email_raw looks like "<desvandi101@gmail.com>"
+                    tagger_email = tagger_email_raw.strip().strip("<>").lower()
+                    if not tagger_email:
+                        blockers.append(
+                            f"could not extract tagger email from tag {args.tag} — "
+                            f"cannot verify email identity (P0-1 defense-in-depth)"
+                        )
+                        print(f"[FAIL] tagger-email: could not extract")
+                    elif tagger_email not in expected_emails:
+                        blockers.append(
+                            f"tagger email '{tagger_email}' is not in the authorized list "
+                            f"{expected_emails}. Even if the GPG signature is valid, GitHub "
+                            f"will report verification=false/bad_email when the tagger email "
+                            f"doesn't match a verified UID on the signing key. "
+                            f"This check prevents releasing a tag that GitHub cannot verify."
+                        )
+                        print(f"[FAIL] tagger-email: '{tagger_email}' not in authorized list")
+                    else:
+                        print(f"[PASS] tagger-email: '{tagger_email}' is authorized")
+                else:
+                    print(f"[WARN] tagger-email: --expected-tagger-emails not set; skipping email identity check (P0-1 defense-in-depth)")
 
     # ------------------------------------------------------------------
     # 4. Tag's target commit MUST equal GITHUB_SHA.
