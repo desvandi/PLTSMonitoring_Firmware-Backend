@@ -14,7 +14,7 @@
 # Example: rsa4096/ABCD1234EFGH5678  → key ID = ABCD1234EFGH5678
 #
 # Add your key ID below (replace the placeholder):
-# ABCD1234EFGH5678
+5E0BB8EF44199645
 
 # NOTE: This file is checked into the repo. For higher security, use the
 # CI secret AUTHORIZED_SIGNERS instead (newline-separated key IDs) so the
