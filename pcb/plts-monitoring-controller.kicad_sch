@@ -1,0 +1,270 @@
+(kicad_sch
+	(version 20231120)
+	(generator "eeschema")
+	(generator_version "8.0")
+	(uuid "00000000-0000-4000-8000-000000000001")
+	(paper "A2")
+	(title_block
+		(title "PLTS Monitoring Controller — 00_TOP")
+		(date "2026-09-03")
+		(rev "1.0")
+		(company "PLTS Monitoring Project")
+		(comment 1 "Hierarki 12 sheet §45 — S0 skeleton; konten per sheet diisi tahap S1-S11")
+		(comment 2 "Sumber: Brief v1.1 + Audit Report v1.0 + Task Spec v1.0")
+	)
+	(lib_symbols)
+	(text_box "PLTS MONITORING CONTROLLER — 00_TOP\nIntegrated 48 V LiFePO4 Monitoring Controller (15S, 45-54 V, 100 A shunt path)\nHierarki 12 sheet per §45 brief. 2-layer FR-4 1,6 mm, 2 oz, target board 130 x 90 mm.\nDokumen otoritatif: (1) PCB Design Master Brief v1.1; (2) PLTS_PCB_01_AUDIT_REPORT_v1.0;\n(3) PLTS_PCB_02_KICAD_AGENT_TASK_SPEC_v1.0. Prioritas §61: keselamatan > integritas Kelvin >\nrobustness 54 V > keandalan ESP32 > EMI > komunikasi > termal > servisabilitas > ukuran/biaya.\nPrioritas absolut: pin map §2 TIDAK diubah; INA219 tidak diganti; E-stop hardware-first."
+		(exclude_from_sim no)
+		(at 20 20 0)
+		(size 250 45)
+		(stroke (width 0) (type default))
+		(fill (type none))
+		(effects (font (size 1.27 1.27)) (justify left top))
+		(uuid "f8099e3d-efbe-460e-a8cb-ec2f7e287de8")
+	)
+	(sheet
+		(at 40 90)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "bb5d93ea-cc0f-41cb-a08c-1090e952ff92")
+		(property "Sheetname" "01_POWER"
+			(at 40 88.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "01_POWER.kicad_sch"
+			(at 40 121.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 220 90)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "f5484a70-ba36-4d01-ae53-c22b90ef29f8")
+		(property "Sheetname" "02_ESP32"
+			(at 220 88.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "02_ESP32.kicad_sch"
+			(at 220 121.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 400 90)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "9cc59051-f5ae-4568-84bc-8a2499c4126d")
+		(property "Sheetname" "03_CURRENT_SHUNT"
+			(at 400 88.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "03_CURRENT_SHUNT.kicad_sch"
+			(at 400 121.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "4")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 40 170)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "92f43eb9-4599-465c-8909-a1c70c900dee")
+		(property "Sheetname" "04_BATTERY_ADC"
+			(at 40 168.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "04_BATTERY_ADC.kicad_sch"
+			(at 40 201.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "5")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 220 170)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "de5c49e8-afc5-4d98-b340-897d42848d1e")
+		(property "Sheetname" "05_ACS712"
+			(at 220 168.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "05_ACS712.kicad_sch"
+			(at 220 201.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "6")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 400 170)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "18ab604b-d5bc-4849-9693-83ba9e8935ea")
+		(property "Sheetname" "06_I2C"
+			(at 400 168.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "06_I2C.kicad_sch"
+			(at 400 201.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "7")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 40 250)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "c599e09e-47ee-440d-9068-1084b490a10e")
+		(property "Sheetname" "07_RS485"
+			(at 40 248.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "07_RS485.kicad_sch"
+			(at 40 281.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "8")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 220 250)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "f6f4d7d2-5171-48d7-8d3a-2a93183d827a")
+		(property "Sheetname" "08_CAN"
+			(at 220 248.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "08_CAN.kicad_sch"
+			(at 220 281.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "9")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 400 250)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "ccbe9716-7845-43c4-8422-38342314f3ba")
+		(property "Sheetname" "09_EMERGENCY"
+			(at 400 248.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "09_EMERGENCY.kicad_sch"
+			(at 400 281.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "10")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 40 330)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "531d770e-952b-4c19-82d0-c29cf927b941")
+		(property "Sheetname" "10_PZEM"
+			(at 40 328.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "10_PZEM.kicad_sch"
+			(at 40 361.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "11")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 220 330)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "189f37dd-2636-4bef-b65f-dc462f338dfc")
+		(property "Sheetname" "11_CONNECTORS_TESTPOINTS"
+			(at 220 328.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "11_CONNECTORS_TESTPOINTS.kicad_sch"
+			(at 220 361.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "12")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/" (page "1"))
+	)
+)

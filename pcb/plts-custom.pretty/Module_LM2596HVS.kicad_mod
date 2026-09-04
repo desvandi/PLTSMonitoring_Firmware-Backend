@@ -1,0 +1,276 @@
+(footprint "Module_LM2596HVS"
+		(layer "F.Cu")
+		(uuid "5589684c-c09e-4f29-af6e-fa4b27789952")
+		(at 0 0)
+		(descr "Modul DC-DC buck LM2596HVS 43x21x14mm (TECHPUBLIC 60V/3A/150kHz; Shopee PSU-0133). 4 pad THT kawat/header + 2 lubang M3 non-plated utk standoff. Posisi pad & lubang = VERIFIKASI UNIT FISIK (OPEN-006R). Mounting: standoff M3 x 8mm, sambungkan 4 pad dgn kawat 18AWG per label silkscreen.")
+		(tags "buck module lm2596hvs step-down dc-dc")
+		(property "Reference" "REF**"
+			(at 0 -13.3 0)
+			(layer "F.SilkS")
+			(uuid "d5102e43-c393-4a69-aa99-b97cbb472b03")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Value" "Module_LM2596HVS"
+			(at 0 13.3 0)
+			(layer "F.Fab")
+			(uuid "cc53fb79-c222-4736-9574-7b5c0850fe5b")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "c4ec81b2-c4df-4412-80b1-27a20ba1d9ab")
+			(effects
+				(font
+					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 0 0 0)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "a965ccc0-9d87-4380-8d70-1615829f9c78")
+			(effects
+				(font
+					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(attr through_hole exclude_from_pos_files exclude_from_bom)
+		(fp_line
+			(start -21.5 -10.5)
+			(end -21.5 10.5)
+			(stroke
+				(width 0.12)
+				(type solid)
+			)
+			(layer "F.SilkS")
+			(uuid "90dffc06-58ad-4d3d-8c88-c7d95ff78e37")
+		)
+		(fp_line
+			(start -21.5 -10.5)
+			(end 21.5 -10.5)
+			(stroke
+				(width 0.12)
+				(type solid)
+			)
+			(layer "F.SilkS")
+			(uuid "2cdb6946-0bbf-46c3-8904-557656324984")
+		)
+		(fp_line
+			(start -21.5 10.5)
+			(end 21.5 10.5)
+			(stroke
+				(width 0.12)
+				(type solid)
+			)
+			(layer "F.SilkS")
+			(uuid "b255f819-ee6a-435f-9672-25bfd4af685d")
+		)
+		(fp_line
+			(start 21.5 -10.5)
+			(end 21.5 10.5)
+			(stroke
+				(width 0.12)
+				(type solid)
+			)
+			(layer "F.SilkS")
+			(uuid "ecdd2512-9aef-4be3-b169-a79a06b9b8ef")
+		)
+		(fp_line
+			(start -22 -11)
+			(end -22 11)
+			(stroke
+				(width 0.05)
+				(type solid)
+			)
+			(layer "F.CrtYd")
+			(uuid "8c509ebe-f956-44e5-8f00-ee28eff253cc")
+		)
+		(fp_line
+			(start -22 -11)
+			(end 22 -11)
+			(stroke
+				(width 0.05)
+				(type solid)
+			)
+			(layer "F.CrtYd")
+			(uuid "50c0baed-b129-4f0e-90a1-d7cbf86c3b9c")
+		)
+		(fp_line
+			(start 22 -11)
+			(end 22 11)
+			(stroke
+				(width 0.05)
+				(type solid)
+			)
+			(layer "F.CrtYd")
+			(uuid "6ca37a41-1c92-4a1e-a2e1-818de9d2f7e5")
+		)
+		(fp_line
+			(start 22 11)
+			(end -22 11)
+			(stroke
+				(width 0.05)
+				(type solid)
+			)
+			(layer "F.CrtYd")
+			(uuid "08b6ca47-1827-456b-85fa-5fc1a9d93683")
+		)
+		(fp_line
+			(start -21.5 -10.5)
+			(end -21.5 10.5)
+			(stroke
+				(width 0.1)
+				(type solid)
+			)
+			(layer "F.Fab")
+			(uuid "9755f4f7-4965-4fd4-82a2-046074a55d86")
+		)
+		(fp_line
+			(start -21.5 -10.5)
+			(end 21.5 -10.5)
+			(stroke
+				(width 0.1)
+				(type solid)
+			)
+			(layer "F.Fab")
+			(uuid "049109f1-3ed6-456c-b7d9-cb40cc382a76")
+		)
+		(fp_line
+			(start -21.5 10.5)
+			(end 21.5 10.5)
+			(stroke
+				(width 0.1)
+				(type solid)
+			)
+			(layer "F.Fab")
+			(uuid "ee40ef65-808a-436b-9c21-740e5d50ac1d")
+		)
+		(fp_line
+			(start 21.5 -10.5)
+			(end 21.5 10.5)
+			(stroke
+				(width 0.1)
+				(type solid)
+			)
+			(layer "F.Fab")
+			(uuid "b009913a-6388-4513-bb46-dad96fb5509d")
+		)
+		(fp_text user "OUT-"
+			(at 17.5 -9.3 0)
+			(layer "F.SilkS")
+			(uuid "738f7ae1-4191-452d-bce3-fa7623ed9290")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text user "IN+"
+			(at -17.5 -9.3 0)
+			(layer "F.SilkS")
+			(uuid "7acad753-c0dc-4f37-8f0a-c2e6aff35c4e")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text user "OUT+"
+			(at 17.5 9.3 0)
+			(layer "F.SilkS")
+			(uuid "d2330b44-7f5e-4b2a-ae88-89f850caa28d")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text user "IN-"
+			(at -17.5 9.3 0)
+			(layer "F.SilkS")
+			(uuid "eb2b6006-8ec2-4973-9a6e-6b7d9d1beef5")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+			)
+		)
+		(fp_text user "LM2596HVS module 43x21 - pad/lubang: OPEN-006R"
+			(at 0 0 0)
+			(layer "F.Fab")
+			(uuid "f8e7fbba-690c-4c24-afb1-4e8c096d036d")
+			(effects
+				(font
+					(size 0.8 0.8)
+					(thickness 0.12)
+				)
+			)
+		)
+		(pad "" np_thru_hole circle
+			(at -14 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+			(uuid "53a2fc3d-b9b1-4f3e-92a3-83ff5d49b1d5")
+		)
+		(pad "" np_thru_hole circle
+			(at 14 0)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+			(uuid "4cc4aa0a-49c3-4510-84d6-7a581a75202a")
+		)
+		(pad "1" thru_hole oval
+			(at -17.5 -6.5)
+			(size 3.2 4.2)
+			(drill oval 1.6 2.2)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "502cf55e-62cf-456c-8853-bd948905ca58")
+		)
+		(pad "2" thru_hole oval
+			(at -17.5 6.5)
+			(size 3.2 4.2)
+			(drill oval 1.6 2.2)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "b853b6fc-f028-48c8-9476-4df6b1c55836")
+		)
+		(pad "3" thru_hole oval
+			(at 17.5 6.5)
+			(size 3.2 4.2)
+			(drill oval 1.6 2.2)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "d5c0851c-ddf6-4f2f-8336-0df5ff2a289d")
+		)
+		(pad "4" thru_hole oval
+			(at 17.5 -6.5)
+			(size 3.2 4.2)
+			(drill oval 1.6 2.2)
+			(layers "*.Cu" "*.Mask")
+			(remove_unused_layers no)
+			(uuid "2964cd65-2f6a-44f5-8989-a6d1422f6017")
+		)
+		(embedded_fonts no)
+	)

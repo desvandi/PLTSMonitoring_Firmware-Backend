@@ -1,0 +1,12 @@
+(version 1)
+
+# Zona mains PZEM (audit resolusi OPEN-003/D5; brief par. 38):
+# creepage MAINS <-> SELV >= 6,4 mm (basic insulation mains 250 VAC, pollution degree 2)
+(rule "MAINS_SELV_CREEPAGE"
+	(constraint clearance (min 6.4mm))
+	(condition "A.Netclass == 'MAINS_AC' && B.Netclass != 'MAINS_AC'"))
+
+# Spacing L <-> N di dalam zona mains (konservatif, menyamai creepage mains-SELV)
+(rule "MAINS_LN_SPACING"
+	(constraint clearance (min 2.4mm))
+	(condition "A.Netclass == 'MAINS_AC' && B.Netclass == 'MAINS_AC'"))
