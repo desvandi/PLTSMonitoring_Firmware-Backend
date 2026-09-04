@@ -67,6 +67,11 @@ private:
 
 extern LogService Log;
 
+// [CI fix] Free functions for audit log preservation across factory reset.
+// Defined in LogService.cpp inside namespace Services.
+bool preserveAuditLogAcrossReset();
+void restoreAuditLogAfterReset();
+
 } // namespace Services
 
 #endif // PLTS_SERVICES_LOG_SERVICE_H
