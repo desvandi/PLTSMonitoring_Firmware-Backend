@@ -20,10 +20,14 @@ void RelayController::begin() {
   _loadConfig();
   _loadLockoutStates();
 
-  // Initialize pulse tracking
-  for (uint8_t i = 0; i < 4; i++) {
+  // Initialize pulse tracking — [P1-8] 8 slots, one per channel
+  for (uint8_t i = 0; i < Core::RELAY_CHANNEL_COUNT; i++) {
     _pulses[i].active = false;
   }
+
+  // [P1-10] Initialize command queue
+  _cmdQueueHead = 0;
+  _cmdQueueTail = 0;
 
   // Initialize interlock groups (all inactive by default — operator configures)
   for (uint8_t i = 0; i < 4; i++) {
@@ -70,6 +74,9 @@ void RelayController::begin() {
 void RelayController::tick() {
   // Record heartbeat for health supervisor
   _recordHeartbeat();
+
+  // [P1-10] Process queued commands FIRST — single-threaded mutation
+  processCommandQueue();
 
   if (!_driverAvailable) return;
 
@@ -245,14 +252,19 @@ RelayCommandResult RelayController::applyCommand(
       return RelayCommandResult::Blocked;
     }
 
+    // [P1-9] Reject pulse shorter than minOnTime
+    if (_config[channel].minOnTimeSec > 0 && pulseDurationMs < _config[channel].minOnTimeSec * 1000) {
+      messageOut = "Pulse duration " + String(pulseDurationMs) + "ms < minOnTime " +
+                   String(_config[channel].minOnTimeSec * 1000) + "ms — rejected";
+      return RelayCommandResult::Rejected;
+    }
+
     // Turn ON
     _applyChannelState(channel, true, src);
 
-    // Schedule pulse OFF
-    _pulses[_pulseWriteIdx].channel = channel;
-    _pulses[_pulseWriteIdx].offAtMs = millis() + pulseDurationMs;
-    _pulses[_pulseWriteIdx].active = true;
-    _pulseWriteIdx = (_pulseWriteIdx + 1) % 4;
+    // [P1-8] Schedule pulse OFF — one slot per channel, deterministic
+    _pulses[channel].offAtMs = millis() + pulseDurationMs;
+    _pulses[channel].active = true;
 
     messageOut = "Channel " + String(channel) + " PULSE " + String(pulseDurationMs) + "ms";
     return RelayCommandResult::Applied;
@@ -338,10 +350,28 @@ void RelayController::_applyChannelState(uint8_t ch, bool newState, Core::RelayS
   // SINGLE GPIO MUTATION PATH — the ONLY function that calls relayExpander.setChannel()
   bool oldState = _state[ch].reportedState;
 
-  // Write to hardware
-  Drivers::relayExpander.setChannel(ch, newState);
+  // Write to hardware — [P0-2 FIX] check return value!
+  bool hwOk = Drivers::relayExpander.setChannel(ch, newState);
 
-  // Update state
+  if (!hwOk) {
+    // I²C write FAILED — do NOT update reportedState.
+    // The physical relay state is UNKNOWN. Mark fault + raise alarm.
+    // The operator must reconcile after investigating the I²C issue.
+    _state[ch].fault = true;
+    _state[ch].confidence = Core::RelayStateConfidence::Fault;
+    // desiredState reflects what was requested (for state-drift detection)
+    _state[ch].desiredState = newState;
+    _state[ch].source = source;
+    Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
+                           Core::AlarmSeverity::Critical,
+                           ("I²C write failed for channel " + String(ch)).c_str());
+    Services::Log.append(Core::LogType::Custom,
+                         "RELAY: I²C write FAILED for channel " + String(ch) +
+                         " — state NOT updated (reportedState unchanged, fault=true)", 0);
+    return;
+  }
+
+  // Hardware write succeeded — update state
   _state[ch].reportedState = newState;
   _state[ch].desiredState = newState;
   _state[ch].confidence = Core::RelayStateConfidence::SoftwareOnly;
@@ -461,11 +491,19 @@ void RelayController::_checkMaxOnTime() {
 
 void RelayController::_processPulses() {
   uint32_t now = millis();
-  for (uint8_t i = 0; i < 4; i++) {
-    if (!_pulses[i].active) continue;
-    if (now >= _pulses[i].offAtMs) {
-      _applyChannelState(_pulses[i].channel, false, Core::RelaySource::Manual);
-      _pulses[i].active = false;
+  // [P1-8] 8 slots — one per channel, deterministic
+  for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+    if (!_pulses[ch].active) continue;
+    if (now >= _pulses[ch].offAtMs) {
+      // [P1-9] Check minOnTime before turning OFF
+      uint32_t onDuration = (now - _state[ch].onSinceMs) / 1000;
+      if (_config[ch].minOnTimeSec > 0 && onDuration < _config[ch].minOnTimeSec) {
+        // Delay the OFF until minOnTime is satisfied
+        _pulses[ch].offAtMs = _state[ch].onSinceMs + (_config[ch].minOnTimeSec * 1000);
+      } else {
+        _applyChannelState(ch, false, Core::RelaySource::Manual);
+        _pulses[ch].active = false;
+      }
     }
   }
 }
@@ -490,26 +528,50 @@ void RelayController::_loadConfig() {
   // Load PCF8574 address
   _pcf8574Address = p.getUChar("i2c_addr", Core::PCF8574_I2C_ADDRESS_DEFAULT);
 
-  // Load interlock groups
+  // Load interlock groups — [P1-11] validate members (reject invalid/duplicate/out-of-range)
   for (uint8_t g = 0; g < 4; g++) {
     String prefix = "ilk" + String(g) + "_";
     _interlockGroups[g].active = p.getBool((prefix + "act").c_str(), false);
     _interlockGroups[g].deadTimeMs = p.getUShort((prefix + "dead").c_str(), 1000);
+    _interlockGroups[g].memberCount = 0;
+    _interlockGroups[g].activeMember = 0xFF;
     if (_interlockGroups[g].active) {
       String membersKey = prefix + "mem";
       String members = p.getString(membersKey.c_str(), "");
-      _interlockGroups[g].memberCount = 0;
-      // Parse comma-separated channel indices
+      // Parse comma-separated channel indices with validation
       int start = 0;
       while (start < (int)members.length() && _interlockGroups[g].memberCount < 4) {
         int comma = members.indexOf(',', start);
         String num = (comma < 0) ? members.substring(start) : members.substring(start, comma);
         num.trim();
         if (num.length() > 0) {
-          _interlockGroups[g].members[_interlockGroups[g].memberCount++] = num.toInt();
+          int val = num.toInt();
+          // [P1-11] Validate: must be 0-7
+          if (val < 0 || val >= Core::RELAY_CHANNEL_COUNT) {
+            Services::Log.append(Core::LogType::Custom,
+              "RELAY: Interlock group " + String(g) + " has invalid member " + num + " — skipped", 0);
+          } else {
+            // Check for duplicate
+            bool dup = false;
+            for (uint8_t m = 0; m < _interlockGroups[g].memberCount; m++) {
+              if (_interlockGroups[g].members[m] == val) { dup = true; break; }
+            }
+            if (dup) {
+              Services::Log.append(Core::LogType::Custom,
+                "RELAY: Interlock group " + String(g) + " has duplicate member " + String(val) + " — skipped", 0);
+            } else {
+              _interlockGroups[g].members[_interlockGroups[g].memberCount++] = val;
+            }
+          }
         }
         if (comma < 0) break;
         start = comma + 1;
+      }
+      // If no valid members, deactivate the group
+      if (_interlockGroups[g].memberCount < 2) {
+        Services::Log.append(Core::LogType::Custom,
+          "RELAY: Interlock group " + String(g) + " has <2 valid members — deactivated", 0);
+        _interlockGroups[g].active = false;
       }
     }
   }
@@ -578,6 +640,66 @@ void RelayController::_saveLockoutStates() {
 void RelayController::_recordHeartbeat() {
   extern void recordHeartbeat(Core::TaskId);
   recordHeartbeat(Core::TaskId::Relay);
+}
+
+// [P1-7] all_off with per-channel result tracking
+AllOffResult RelayController::allOffWithResult() {
+  AllOffResult result;
+  result.requested = Core::RELAY_CHANNEL_COUNT;
+
+  for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+    bool wasOn = _state[ch].reportedState;
+    if (wasOn) {
+      _applyChannelState(ch, false, Core::RelaySource::System);
+      // Check if the write succeeded (fault flag set by _applyChannelState on failure)
+      if (_state[ch].fault) {
+        result.failed++;
+        result.detail += "CH" + String(ch) + ":I2C_FAIL ";
+      } else {
+        result.success++;
+      }
+      // Cancel any pending pulse for this channel
+      _pulses[ch].active = false;
+    } else {
+      result.success++;  // already OFF = success
+    }
+  }
+  return result;
+}
+
+// [P1-10] Command queue — single-threaded mutation via relayTask
+bool RelayController::queueCommand(const String& command, uint8_t channel,
+                                    bool desiredState, uint32_t pulseDurationMs,
+                                    const String& source) {
+  uint8_t nextTail = (_cmdQueueTail + 1) % COMMAND_QUEUE_SIZE;
+  if (nextTail == _cmdQueueHead) {
+    // Queue full
+    return false;
+  }
+  QueuedCommand& cmd = _commandQueue[_cmdQueueTail];
+  strncpy(cmd.command, command.c_str(), sizeof(cmd.command) - 1);
+  cmd.command[sizeof(cmd.command) - 1] = '\0';
+  cmd.channel = channel;
+  cmd.desiredState = desiredState;
+  cmd.pulseDurationMs = pulseDurationMs;
+  strncpy(cmd.source, source.c_str(), sizeof(cmd.source) - 1);
+  cmd.source[sizeof(cmd.source) - 1] = '\0';
+  cmd.valid = true;
+  _cmdQueueTail = nextTail;
+  return true;
+}
+
+void RelayController::processCommandQueue() {
+  while (_cmdQueueHead != _cmdQueueTail) {
+    QueuedCommand& cmd = _commandQueue[_cmdQueueHead];
+    if (cmd.valid) {
+      String messageOut;
+      applyCommand(String(cmd.command), cmd.channel, cmd.desiredState,
+                   cmd.pulseDurationMs, String(cmd.source), messageOut);
+      cmd.valid = false;
+    }
+    _cmdQueueHead = (_cmdQueueHead + 1) % COMMAND_QUEUE_SIZE;
+  }
 }
 
 } // namespace Services

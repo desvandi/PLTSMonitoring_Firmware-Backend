@@ -32,13 +32,16 @@ bool RelayExpanderDriver::begin(uint8_t i2cAddress) {
     return false;
   }
 
-  // Verify by reading back
+  // Verify by reading back — [P0-3 FIX] fail-closed on mismatch.
+  // Hardware contract requires readback verification. A mismatch means
+  // either the PCF8574 is not what we think it is, or the I²C bus is
+  // unreliable. Either way, relay control is unsafe — refuse to initialize.
   uint8_t readback = _readInput();
   if (readback != _outputState) {
-    Serial.printf("[RELAY] WARN: PCF8574 readback 0x%02X != expected 0x%02X\n",
+    Serial.printf("[RELAY] ERROR: PCF8574 readback 0x%02X != expected 0x%02X — FAIL-CLOSED\n",
                   readback, _outputState);
-    // Not fatal — PCF8574 input register may differ from output on some clones.
-    // The write succeeded (Wire.endTransmission returned 0), so we trust the write.
+    _available = false;
+    return false;
   }
 
   _available = true;

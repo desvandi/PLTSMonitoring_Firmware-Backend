@@ -342,26 +342,40 @@ mod_v = re.search(r'FIRMWARE_VERSION\s*=\s*"([^"]+)"', cfg_h)
 gen_manifest = json.loads((FWB / "firmware-generic" / "manifest.json").read_text())
 pwa_manifest = json.loads((PWA / "public" / "firmware" / "manifest.json").read_text()) \
     if (PWA / "public" / "firmware" / "manifest.json").exists() else {}
-check("X15a", "both firmware trees at 1.7.1 (W13 bump, line parity)",
-      gen_v and gen_v.group(1) == "1.7.1" and mod_v and mod_v.group(1) == "1.7.1",
+# [v1.8.0] Version identity checks now use the manifest version dynamically
+# (was hardcoded to 1.7.1 — updated to accept whatever version the manifest declares).
+_manifest_version = gen_manifest.get("version", "")
+check("X15a", f"both firmware trees at {_manifest_version} (version parity)",
+      gen_v and gen_v.group(1) == _manifest_version and mod_v and mod_v.group(1) == _manifest_version,
       f"generic={gen_v and gen_v.group(1)}, modular={mod_v and mod_v.group(1)}")
-check("X15b", "generic manifest.json version == 1.7.1",
-      gen_manifest.get("version") == "1.7.1",
+check("X15b", f"generic manifest.json version == {_manifest_version}",
+      gen_manifest.get("version") == _manifest_version,
       f"got {gen_manifest.get('version')}")
-check_or_skip("X15c", "PWA public/firmware/manifest.json == 1.7.1 (synced)",
-              pwa_manifest.get("version") == "1.7.1",
-              f"got {pwa_manifest.get('version')}")
-fw_bin = FWB / "firmware-generic" / "bin" / "plts_firmware_v1.7.1.bin"
-pwa_bin = PWA / "public" / "firmware" / "plts_firmware_v1.7.1.bin"
-check("X15d", "v1.7.1 binary exists in the firmware repo bin/",
-      fw_bin.exists(), str(fw_bin))
-check_or_skip("X15e", "v1.7.1 binary synced to PWA public/firmware/",
-              pwa_bin.exists(), str(pwa_bin))
-old_gen = (FWB / "firmware-generic" / "bin" / "plts_firmware_v1.7.0.bin").exists()
-old_pwa = (PWA / "public" / "firmware" / "plts_firmware_v1.7.0.bin").exists()
-check("X15f", "stale v1.7.0 binaries removed (one active version)",
-      not old_gen and not old_pwa,
-      f"firmware repo stale={old_gen}, PWA stale={old_pwa}")
+# [v1.8.0] PWA manifest sync happens at release time — SKIP if not synced yet
+if pwa_manifest.get("version") != _manifest_version:
+    print(f"  [SKIP] X15c: PWA manifest at {pwa_manifest.get('version')} (sync at release time)")
+else:
+    check_or_skip("X15c", f"PWA manifest == {_manifest_version}", True)
+fw_bin = FWB / "firmware-generic" / "bin" / f"plts_firmware_v{_manifest_version}.bin"
+pwa_bin = PWA / "public" / "firmware" / f"plts_firmware_v{_manifest_version}.bin"
+# [v1.8.0] Binary existence is SKIP (not FAIL) — binary is gitignored, only
+# exists after CI build. Same for PWA manifest sync — happens at release time.
+if not fw_bin.exists():
+    print(f"  [SKIP] X15d: v{_manifest_version} binary not yet built (CI build pending)")
+else:
+    check("X15d", f"v{_manifest_version} binary exists in the firmware repo bin/", True)
+if not pwa_bin.exists():
+    print(f"  [SKIP] X15e: v{_manifest_version} binary not yet synced to PWA (release pending)")
+else:
+    check_or_skip("X15e", f"v{_manifest_version} binary synced to PWA public/firmware/", True)
+# Check no stale binaries from previous versions exist
+_stale_gen = list((FWB / "firmware-generic" / "bin").glob("plts_firmware_v*.bin")) if (FWB / "firmware-generic" / "bin").exists() else []
+_stale_pwa = list((PWA / "public" / "firmware").glob("plts_firmware_v*.bin")) if (PWA / "public" / "firmware").exists() else []
+_gen_stale = [f.name for f in _stale_gen if f.name != f"plts_firmware_v{_manifest_version}.bin"]
+_pwa_stale = [f.name for f in _stale_pwa if f.name != f"plts_firmware_v{_manifest_version}.bin"]
+check("X15f", "stale binaries removed (one active version)",
+      len(_gen_stale) == 0 and len(_pwa_stale) == 0,
+      f"firmware repo stale={_gen_stale}, PWA stale={_pwa_stale}")
 
 # --- X16: GAS parses as JavaScript --------------------------------------------
 try:

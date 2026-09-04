@@ -82,6 +82,14 @@ enum class RelayCommandResult {
   Failed
 };
 
+// [P1-7] Result for all_off — per-channel breakdown
+struct AllOffResult {
+  uint8_t requested = 0;
+  uint8_t success = 0;
+  uint8_t failed = 0;
+  String detail;  // per-channel failures
+};
+
 class RelayController {
 public:
   void begin();
@@ -100,6 +108,21 @@ public:
   /// E-WAVE safety cascade — called from EmergencySupervisor::_trip().
   /// Forces ALL channels OFF immediately. Cannot be overridden.
   void emergencyAllOff();
+
+  /// [P1-7] all_off with per-channel result tracking.
+  /// Returns AllOffResult with success/failed counts.
+  AllOffResult allOffWithResult();
+
+  /// [P1-10] Queue a command for execution in relayTask context.
+  /// All relay mutations from REST/MQTT MUST go through this queue
+  /// to ensure single-threaded state mutation.
+  /// Returns false if queue is full.
+  bool queueCommand(const String& command, uint8_t channel,
+                    bool desiredState, uint32_t pulseDurationMs,
+                    const String& source);
+
+  /// [P1-10] Process queued commands — called from relayTask tick().
+  void processCommandQueue();
 
   /// Acknowledge safety alarm for a channel (TRIPPED → ACKNOWLEDGED).
   bool acknowledgeSafetyAlarm(uint8_t channel);
@@ -127,14 +150,26 @@ private:
   bool _driverAvailable = false;
   uint8_t _pcf8574Address = Core::PCF8574_I2C_ADDRESS_DEFAULT;
 
-  // Pulse tracking
+  // [P1-8] Pulse tracking — one slot per channel (deterministic, no overflow)
   struct PulseEntry {
-    uint8_t channel;
-    uint32_t offAtMs;  // when to turn OFF
-    bool active;
+    bool active = false;
+    uint32_t offAtMs = 0;  // when to turn OFF
   };
-  PulseEntry _pulses[4];  // max 4 concurrent pulses
-  uint8_t _pulseWriteIdx = 0;
+  PulseEntry _pulses[Core::RELAY_CHANNEL_COUNT];  // 8 slots — one per channel
+
+  // [P1-10] Command queue — single-threaded mutation via relayTask
+  struct QueuedCommand {
+    char command[16];
+    uint8_t channel;
+    bool desiredState;
+    uint32_t pulseDurationMs;
+    char source[16];
+    bool valid = false;
+  };
+  static const uint8_t COMMAND_QUEUE_SIZE = 8;
+  QueuedCommand _commandQueue[COMMAND_QUEUE_SIZE];
+  volatile uint8_t _cmdQueueHead = 0;
+  volatile uint8_t _cmdQueueTail = 0;
 
   // --- Internal methods ---
 

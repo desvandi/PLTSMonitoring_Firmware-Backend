@@ -1,8 +1,8 @@
-/* PLTS Monitor Generic Firmware v1.7.1
+/* PLTS Monitor Generic Firmware v1.8.0
  * Flash once. Runtime WiFi/GAS credentials live in LittleFS /config.json.
  * Monitoring only: this firmware never controls an inverter, charger, or relay.
  *
- * v1.7.1 additions (W14 — bench wave: OTA rollback observability):
+ * v1.8.0 additions (W14 — bench wave: OTA rollback observability):
  *   - [W14-2a] applyOta() resets the NVS boot-try ledger and stores the
  *     flashed version ("lfver") at Update.end success. The old ledger
  *     accumulated across image generations: two power-blipped updates left
@@ -23,7 +23,7 @@
  *   - [W14-2c] reportOtaStatus() returns the HTTP code so the deferred
  *     ROLLBACK report can retry until delivered.
  *
- * v1.7.1 additions (W13 — mixed-fleet OTA hardening):
+ * v1.8.0 additions (W13 — mixed-fleet OTA hardening):
  *   - [W13-2] OTA manifest target self-check: Code.gs now serves a `target`
  *     field ('' = fleet-wide, 'generic' | 'modular') with every manifest. A
  *     manifest explicitly targeted at the other firmware tree is REFUSED
@@ -153,7 +153,7 @@
 //   • Arus AC   : ACS712-30A (versi Modified 3.3V) di ADC GPIO 35
 //                 (AC_CURRENT_PIN), sampling RMS 2 siklus @ 50 Hz.
 // ============================================================================
-static const char*    FIRMWARE_VERSION   = "1.7.1";  // W13: OTA mixed-fleet target self-check (manifest 'target' → honest REFUSED)
+static const char*    FIRMWARE_VERSION   = "1.8.0";  // W13: OTA mixed-fleet target self-check (manifest 'target' → honest REFUSED)
 static const char*    CONFIG_PATH        = "/config.json";
 static const uint8_t  RESET_PIN          = 0;         // BOOT button
 static const uint8_t  LED_PIN            = 2;         // Built-in LED

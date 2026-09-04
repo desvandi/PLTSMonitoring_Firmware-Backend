@@ -150,50 +150,78 @@ static void handleRelayCommand() {
 }
 
 // POST /api/relays/all_off
+// [P1-6] Freshness gate + transactionId required + [P1-7] per-channel result
 static void handleAllOff() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
+  if (!requireBody(256)) return;
 
   String raw = http.arg("plain");
   StaticJsonDocument<256> doc;
-  if (raw.length() > 0 && !deserializeJson(doc, raw)) {
-    const char* requestId = doc["requestId"] | "";
-    // Tag for canonical pipeline
-    StaticJsonDocument<256> cmdDoc;
-    cmdDoc["type"] = "relay";
-    cmdDoc["action"] = "all_off";
-    cmdDoc["requestId"] = requestId;
+  if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
 
-    Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(cmdDoc);
-    if (canon.ok) {
-      Services::DecisionResult d =
-        Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
-      if (d.decision == Services::TransactionDecision::Duplicate) {
-        sendSecurityHeaders();
-        http.send(200, "application/json; charset=utf-8", d.previousAckJson);
-        return;
-      }
-
-      String messageOut;
-      Services::relaysController.applyCommand("all_off", 0, false, 0, "MANUAL", messageOut);
-
-      String ack;
-      StaticJsonDocument<256> ackDoc;
-      ackDoc["ok"] = true;
-      ackDoc["result"] = "EXECUTED";
-      ackDoc["message"] = messageOut;
-      ackDoc["transactionId"] = canon.transactionId;
-      serializeJson(ackDoc, ack);
-      Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack);
-      sendSuccess(messageOut, ack);
-      return;
-    }
+  const char* requestId = doc["requestId"] | "";
+  if (strlen(requestId) == 0) {
+    sendError(400, "requestId required for relay mutation");
+    return;
   }
 
-  // [self-review fix] NO FALLBACK — if body is missing or invalid, reject.
-  // The previous fallback called applyCommand directly without journal,
-  // bypassing the transaction durability boundary (brief §8).
-  sendError(400, "Missing or invalid JSON body — requestId required for all_off");
+  // Tag for canonical pipeline
+  StaticJsonDocument<256> cmdDoc;
+  cmdDoc["type"] = "relay";
+  cmdDoc["action"] = "all_off";
+  cmdDoc["requestId"] = requestId;
+  cmdDoc["transactionId"] = doc["transactionId"] | "";
+  cmdDoc["issuedAt"] = doc["issuedAt"] | 0;
+  cmdDoc["expiresAt"] = doc["expiresAt"] | 0;
+
+  // [P1-6] Freshness gate — same as per-channel commands
+  String expiryErr;
+  if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr)) {
+    sendError(400, expiryErr.c_str());
+    return;
+  }
+
+  Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(cmdDoc);
+  if (!canon.ok) { sendError(400, canon.errorMessage); return; }
+
+  Services::DecisionResult d =
+    Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  if (d.decision == Services::TransactionDecision::Conflict) {
+    sendError(409, "requestId reuse with different command");
+    return;
+  }
+  if (d.decision == Services::TransactionDecision::Duplicate) {
+    sendSecurityHeaders();
+    http.send(200, "application/json; charset=utf-8", d.previousAckJson);
+    return;
+  }
+
+  // [P1-7] Execute with per-channel result tracking
+  Services::AllOffResult result = Services::relaysController.allOffWithResult();
+
+  // Build honest ACK — report per-channel success/failure
+  String ack;
+  StaticJsonDocument<512> ackDoc;
+  ackDoc["ok"] = (result.failed == 0);
+  ackDoc["result"] = (result.failed == 0) ? "EXECUTED" : "PARTIAL";
+  ackDoc["requested"] = result.requested;
+  ackDoc["success"] = result.success;
+  ackDoc["failed"] = result.failed;
+  if (result.failed > 0) {
+    ackDoc["detail"] = result.detail;
+  }
+  ackDoc["message"] = String("All OFF: ") + String(result.success) + " ok, " +
+                       String(result.failed) + " failed";
+  ackDoc["transactionId"] = canon.transactionId;
+  serializeJson(ackDoc, ack);
+  Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack);
+
+  if (result.failed > 0) {
+    sendError(500, String("Partial failure: ") + result.detail);
+  } else {
+    sendSuccess("All channels OFF", ack);
+  }
 }
 
 void registerRoutes() {

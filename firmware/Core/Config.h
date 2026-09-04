@@ -87,7 +87,7 @@ namespace Core {
 // ---------------------------------------------------------------------------
 // Versioning (brief §74) — single source of truth
 // ---------------------------------------------------------------------------
-static constexpr const char* FIRMWARE_VERSION        = "1.7.1";  // W13: OTA boot-health fix (PENDING_VERIFY confirm via esp_ota_mark_app_valid_cancel_rollback + 60 s window; boot-attempt counting per boot, not per upload) + mixed-fleet manifest target self-check. Parity line with firmware-generic 1.7.1. Separate product line — see scripts/test_version_identity.py G7.
+static constexpr const char* FIRMWARE_VERSION        = "1.8.0";  // v1.8.0: 8-channel relay integration (PCF8574 I²C expander, RelayController, safety supervisor, interlock, REST + MQTT command pipeline, E-WAVE cascade). All existing monitoring unchanged.
 static constexpr const char* FIRMWARE_BUILD_DATE     = __DATE__ " " __TIME__;
 static constexpr const char* PROTOCOL_VERSION         = "1";     // protocol v1 (PLTS)
 static constexpr const char* CONFIG_SCHEMA_VERSION    = "1";
