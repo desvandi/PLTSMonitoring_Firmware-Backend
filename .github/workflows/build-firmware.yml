@@ -255,18 +255,23 @@ jobs:
             --provenance-json firmware-generic/bin/provenance.json \
             --bin-dir firmware-generic/bin \
             --out firmware-generic/bin/manifest-canonical.json
+      - name: Stage generic artifacts (flat structure for gate)
+        working-directory: firmware-generic
+        run: |
+          mkdir -p staged
+          cp bin/bootloader.bin staged/
+          cp bin/partitions.bin staged/
+          cp bin/plts_firmware_v*.bin staged/
+          cp bin/release.json staged/
+          cp bin/provenance.json staged/
+          cp bin/SHA256SUMS staged/
+          cp bin/manifest-canonical.json staged/
+          cp manifest.json staged/manifest-espwebtools.json
+          ls -la staged/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: plts-firmware-generic
-          path: |
-            firmware-generic/bin/bootloader.bin
-            firmware-generic/bin/partitions.bin
-            firmware-generic/bin/plts_firmware_v*.bin
-            firmware-generic/bin/release.json
-            firmware-generic/bin/provenance.json
-            firmware-generic/bin/SHA256SUMS
-            firmware-generic/bin/manifest-canonical.json
-            firmware-generic/manifest.json
+          path: firmware-generic/staged/*
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
