@@ -64,7 +64,9 @@ for env_var, macro in SECRET_MAP.items():
 # go on the command line as -D flags).
 if _pem_macros:
     import tempfile
-    secrets_dir = os.path.join(os.path.dirname(__file__), "..", ".pio", "generated")
+    # [CI fix] __file__ may not be defined in SCons context — use os.getcwd()
+    # which is the firmware/ directory (PlatformIO working dir).
+    secrets_dir = os.path.join(os.getcwd(), ".pio", "generated")
     os.makedirs(secrets_dir, exist_ok=True)
     secrets_header = os.path.join(secrets_dir, "production_secrets.h")
     with open(secrets_header, "w") as f:
