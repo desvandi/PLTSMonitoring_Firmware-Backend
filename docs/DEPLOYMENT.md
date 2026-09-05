@@ -173,7 +173,34 @@ The `prepush-audit.js` script enforces byte-identical copies of `Panduan_Deploy_
 
 ### Reproducibility
 
-Release binaries include `buildTimestamp` + `gitCommit` in the binary metadata, making builds non-deterministic. Future v1.9.3+ will strip `buildTimestamp` for reproducible builds (target: `same source + same toolchain = same SHA`).
+**CLOSED in v1.9.3 (REL-03 / REL-04).** Before v1.9.3, the binary embedded a
+wall-clock build timestamp (`__DATE__`/`__TIME__` via `FIRMWARE_BUILD_DATE` in
+`firmware/Core/Config.h`), so every build of the same source produced a
+byte-different binary — the hardware-tested SHA could never be proven equal to
+the released SHA (REL-03), and two builds from the same commit never matched
+(REL-04).
+
+As of v1.9.3:
+
+- `FIRMWARE_BUILD_DATE` is derived from `SOURCE_DATE_EPOCH`, resolved from the
+  **git HEAD commit timestamp** by `firmware/scripts/set_build_date.py`
+  (PlatformIO pre-script, all environments). Same source commit → same bytes.
+  Scriptless builds (Arduino IDE) fall back to a constant epoch string — still
+  deterministic. The `buildDate` field exposed via `/api/version` now reports
+  the SOURCE commit date (a provenance feature, not a wall clock).
+- Toolchain is fully pinned (`espressif32@6.7.0`, `platformio==6.1.18`,
+  `ArduinoJson@7.1.0`, `PubSubClient@2.8`) — same as since audit P1-7.
+- The CI job **`reproducible-build`** builds the modular production env AND the
+  generic tree twice from a clean tree on every push and FAILS unless the two
+  SHA-256s are byte-identical. `release-publish` requires this job, so a
+  release cannot be published without proven build determinism.
+- `release.json` / `provenance.json` still record the actual CI
+  `buildTimestamp` as *metadata* (JSON side-files, never embedded in the
+  binary) — those remain wall-clock by design and do not affect binary bytes.
+
+Target achieved: `same source + same toolchain = same SHA`. This also closes
+REL-03: hardware acceptance evidence records the `firmwareSha256` of the exact
+binary tested, and the released binary is byte-identical by construction.
 
 ---
 

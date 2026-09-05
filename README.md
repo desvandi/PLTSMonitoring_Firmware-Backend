@@ -1,7 +1,7 @@
 # PLTS Monitoring — Firmware, Backend GAS, & Toolkit
 
-**Firmware Version:** v1.9.2 · **Backend GAS:** WAVE-7+ · **License:** MIT
-**Status:** Development (v1.9.x INA219 dynamic gain switching — hardware acceptance pending)
+**Firmware Version:** v1.9.3 · **Backend GAS:** WAVE-7+ · **License:** MIT
+**Status:** Development (v1.9.x INA219 dynamic gain switching — hardware acceptance pending; v1.9.3 menutup REL-03/REL-04: build kini reproducible)
 **Repositori kembar (PWA frontend):** [desvandi/PLTSMonitoring_PWA](https://github.com/desvandi/PLTSMonitoring_PWA)
 
 ---
@@ -56,10 +56,11 @@ Proyek ini adalah sistem monitoring PLTS (Pembangkit Listrik Tenaga Surya) berba
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │
 │       │ I²C         │ ADC         │ I²C         │ I²C      │
 │  ┌────┴─────────────┴─────────────┴─────────────┴────┐    │
-│  │              Firmware v1.9.2                      │    │
+│  │              Firmware v1.9.3                      │    │
 │  │  • Dynamic PGA Switching (±80mV / ±160mV)        │    │
 │  │  • Voltage Divider 190kΩ/10kΩ (20:1)             │    │
 │  │  • 8-Channel Relay Controller (E-WAVE)           │    │
+│  │  • Reproducible Build (deterministic identity)   │    │
 │  │  • OTA Manager (Ed25519 + SHA-256)               │    │
 │  │  • MQTT TLS / HTTPS telemetry                    │    │
 │  └───────────────────┬──────────────────────────────┘    │
@@ -104,7 +105,7 @@ Proyek ini adalah sistem monitoring PLTS (Pembangkit Listrik Tenaga Surya) berba
 
 ```
 PLTSMonitoring_Firmware-Backend/
-├── firmware/                    # Modular production firmware (v1.9.2)
+├── firmware/                    # Modular production firmware (v1.9.3)
 │   ├── Core/                    #   Config.h, Types.h, Globals.h, Common.h
 │   ├── Drivers/                 #   INA219, ADC, SHT31, ACS712, PCF8574, RTC
 │   ├── Services/                #   OtaManager, RelayController, AlarmRegistry, dll
@@ -121,7 +122,7 @@ PLTSMonitoring_Firmware-Backend/
 ├── firmware-generic/            # Generic firmware (ESP Web Tools flashing)
 │   ├── src/
 │   │   └── plts_firmware_v1.ino #   Single-file firmware (same features, simpler build)
-│   ├── manifest.json            #   ESP Web Tools manifest (v1.9.2)
+│   ├── manifest.json            #   ESP Web Tools manifest (v1.9.3)
 │   ├── platformio.ini
 │   └── bin/                     #   CI-built binaries (gitignored)
 │
@@ -159,7 +160,9 @@ PLTSMonitoring_Firmware-Backend/
 │   │   ├── v1.8.0.md            #     General HW acceptance (21 sections incl relay)
 │   │   ├── v1.8.0.json          #     Filled-in evidence (verdict=PASS)
 │   │   ├── v1.9.2.md            #     INA219-specific HW acceptance (12 criteria)
-│   │   └── v1.9.2.template.json #     Template for v1.9.2
+│   │   ├── v1.9.2.template.json #     Template for v1.9.2
+│   │   ├── v1.9.3.md            #     INA219 HW acceptance for the v1.9.3 release line
+│   │   └── v1.9.3.template.json #     Template for v1.9.3 (REL-03: SHA byte-exact evidence)
 │   ├── ota-physical-test/       #   OTA physical test protocol (16 criteria)
 │   │   ├── v1.8.0.md
 │   │   └── v1.8.0.template.json
@@ -236,7 +239,7 @@ Rentang arus PLTS sangat lebar: 1A (standby) hingga 150A (beban puncak). Single 
 
 ### Solusi: Dynamic PGA Switching
 
-Firmware v1.9.2 secara otomatis beralih PGA berdasarkan besaran arus:
+Firmware v1.9.2+ (termasuk v1.9.3) secara otomatis beralih PGA berdasarkan besaran arus:
 
 | Mode | Register | PGA Range | Max Current | Resolusi |
 |------|----------|-----------|-------------|----------|
@@ -330,7 +333,7 @@ pio run -e development
 ```bash
 cd firmware-generic
 pio run -e esp32dev
-# Output: bin/plts_firmware_v1.9.2.bin
+# Output: bin/plts_firmware_v1.9.3.bin
 ```
 
 ### Langkah 3: Sign Firmware (Ed25519)
@@ -521,10 +524,11 @@ push/PR to main → [test] → [build-staging] → [build-generic-tree] → [bui
 | Build staging | All pushes | PlatformIO staging env |
 | Build generic | All pushes | PlatformIO generic tree |
 | Build production | All pushes | PlatformIO production env (signed) |
+| Reproducible build 2x | All pushes | REL-04: build A vs clean build B — SHA harus byte-identical (modular + generic) |
 | Release gate | All pushes | Strict invariant check |
 | Verify tag signature | Tag push (v*) | GPG tag + authorized signer verification |
 | Verify HW acceptance | Tag push (v*) | Hardware acceptance JSON gate |
-| Release publish | Tag push (v*) | Create GitHub Release with 20 assets |
+| Release publish | Tag push (v*) | Create GitHub Release with 20+ assets (requires reproducible-build PASS) |
 
 ### Branch Protection
 
@@ -594,13 +598,13 @@ python3 scripts/verify_hardware_acceptance.py \
   --hw-dir docs/hardware-acceptance
 ```
 
-### INA219 Hardware Acceptance (v1.9.2)
+### INA219 Hardware Acceptance (v1.9.2/v1.9.3)
 
-Protocol 12-criteria khusus INA219: config readback, low/mid/peak current accuracy, PGA transitions, hysteresis, current sign, voltage divider, power calculation, telemetry pga_mode.
+Protocol 12-criteria khusus INA219: config readback, low/mid/peak current accuracy, PGA transitions, hysteresis, current sign, voltage divider, power calculation, telemetry pga_mode. Gunakan `v1.9.3.md` untuk release line v1.9.3 (measurement chain identik dengan v1.9.2; bukti SHA kini byte-exact karena build reproducible).
 
 ```bash
 python3 scripts/verify_ina219_hardware_acceptance.py \
-  --version 1.9.2 \
+  --version 1.9.3 \
   --source-commit <SHA> \
   --release-json modular-release.json \
   --hw-dir docs/hardware-acceptance
@@ -699,7 +703,15 @@ node scripts/test_gas_contract.js
 
 ## 14. Changelog
 
-### v1.9.2 (Current)
+### v1.9.3 (Current)
+- **Reproducible build (REL-03/REL-04 CLOSED)** — `FIRMWARE_BUILD_DATE` tidak lagi `__DATE__`/`__TIME__` (wall-clock); kini diturunkan dari `SOURCE_DATE_EPOCH` (timestamp commit HEAD git) via `firmware/scripts/set_build_date.py`. Dua build dari source yang sama = SHA-256 identik.
+- **CI job `reproducible-build`** — build 2× (modular production + generic) dari clean tree, compare SHA; `release-publish` kini mewajibkan job ini (release tak bisa dipublish tanpa bukti determinisme).
+- **buildDate semantics** — `/api/version` `buildDate` kini melaporkan tanggal SOURCE commit (identitas provenance), bukan wall-clock kompilasi.
+- **HW acceptance v1.9.3 protocol** — `docs/hardware-acceptance/v1.9.3.md` + template (12 kriteria sama dengan v1.9.2; evidence `firmwareSha256` kini byte-exact vs released binary).
+- **Version parity** — 1.9.3 di modular (Config.h) + generic (plts_firmware_v1.ino + manifest.json) + mirror PWA (`public/firmware/manifest.json`).
+- Tidak ada perubahan measurement chain — INA219 PGA 0x0FFF/0x17FF, hysteresis 90A/100A, voltage divider 190k/10k, pga_mode telemetry: semuanya identik dengan v1.9.2.
+
+### v1.9.2
 - **INA219 dynamic gain switching** — PGA ±80mV/±160mV dengan hysteresis 90A/100A
 - **Canonical register fix** — constants 0x0FFF/0x17FF per TI datasheet SBOS448G
 - **Register readback verification** — setiap PGA switch diverifikasi via I²C readback

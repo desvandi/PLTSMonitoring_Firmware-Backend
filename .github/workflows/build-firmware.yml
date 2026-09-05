@@ -275,6 +275,130 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
+  # [REL-03/REL-04, v1.9.3] Reproducible build gate.
+  # Builds the SAME source TWICE from a clean tree and FAILS unless the two
+  # binaries are byte-identical (same SHA-256). This closes:
+  #   REL-04 — two builds from the same source must produce identical SHAs
+  #   REL-03 — with reproducibility proven, the hardware-tested binary can
+  #            be byte-compared against the released binary
+  # The v1.9.3 firmware embeds a deterministic build date (SOURCE_DATE_EPOCH
+  # resolved from the git HEAD commit by firmware/scripts/set_build_date.py)
+  # instead of __DATE__/__TIME__, so nothing wall-clock-dependent remains in
+  # the binary. Toolchain is pinned (espressif32@6.7.0, platformio 6.1.18).
+  # Mirrors build-production's trigger policy (push/dispatch only — the
+  # production environment secrets are not exposed to PRs). Runs on tag
+  # pushes too (event_name == 'push'), and release-publish REQUIRES it.
+  # --------------------------------------------------------------------------
+  reproducible-build:
+    name: Reproducible build 2x (REL-04)
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          # Full history: set_build_date.py resolves the HEAD commit
+          # timestamp; keep provenance fallbacks consistent with the gate.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-repro-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini', 'firmware-generic/platformio.ini') }}-v1
+
+      - name: Install PlatformIO (pinned)
+        run: |
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
+          pip install "platformio==${PIO_CORE}"
+
+      # ---- Modular production: build A -----------------------------------
+      - name: Build A — modular production
+        working-directory: firmware
+        env:
+          MQTT_BROKER_HOST:           ${{ secrets.PIO_MQTT_BROKER_HOST }}
+          MQTT_BROKER_PORT:           ${{ secrets.PIO_MQTT_BROKER_PORT }}
+          MQTT_USERNAME:              ${{ secrets.PIO_MQTT_USERNAME }}
+          MQTT_PASSWORD:              ${{ secrets.PIO_MQTT_PASSWORD }}
+          MQTT_ROOT_CA:               ${{ secrets.PIO_MQTT_ROOT_CA }}
+          OTA_ED25519_PUBLIC_KEY_HEX: ${{ secrets.PIO_OTA_ED25519_PUBLIC_KEY_HEX }}
+          OTA_HTTPS_ROOT_CA:          ${{ secrets.PIO_OTA_HTTPS_ROOT_CA }}
+        run: |
+          pio run -e production
+          sha256sum .pio/build/production/firmware.bin > /tmp/modular-sha-a.txt
+          cat /tmp/modular-sha-a.txt
+
+      # ---- Modular production: build B (clean rebuild) -------------------
+      - name: Build B — modular production (clean rebuild)
+        working-directory: firmware
+        env:
+          MQTT_BROKER_HOST:           ${{ secrets.PIO_MQTT_BROKER_HOST }}
+          MQTT_BROKER_PORT:           ${{ secrets.PIO_MQTT_BROKER_PORT }}
+          MQTT_USERNAME:              ${{ secrets.PIO_MQTT_USERNAME }}
+          MQTT_PASSWORD:              ${{ secrets.PIO_MQTT_PASSWORD }}
+          MQTT_ROOT_CA:               ${{ secrets.PIO_MQTT_ROOT_CA }}
+          OTA_ED25519_PUBLIC_KEY_HEX: ${{ secrets.PIO_OTA_ED25519_PUBLIC_KEY_HEX }}
+          OTA_HTTPS_ROOT_CA:          ${{ secrets.PIO_OTA_HTTPS_ROOT_CA }}
+        run: |
+          rm -rf .pio/build/production .pio/generated
+          pio run -e production
+          sha256sum .pio/build/production/firmware.bin > /tmp/modular-sha-b.txt
+          cat /tmp/modular-sha-b.txt
+
+      - name: Compare A vs B — modular production (REL-04)
+        working-directory: firmware
+        run: |
+          SHA_A=$(awk '{print $1}' /tmp/modular-sha-a.txt)
+          SHA_B=$(awk '{print $1}' /tmp/modular-sha-b.txt)
+          echo "modular production SHA-A: ${SHA_A}"
+          echo "modular production SHA-B: ${SHA_B}"
+          if [ "${SHA_A}" != "${SHA_B}" ]; then
+            echo "FAIL: REL-04 — modular production build is NOT reproducible"
+            echo "Two clean builds from commit $GITHUB_SHA produced different SHA-256s."
+            echo "Check for wall-clock/random/path-dependent embeds (grep __DATE__ __TIME__)."
+            exit 1
+          fi
+          echo "PASS: REL-04 — modular production builds are byte-identical"
+
+      # ---- Generic tree (also a released artifact): build A --------------
+      - name: Build A — firmware-generic
+        working-directory: firmware-generic
+        run: |
+          pio run -e esp32dev
+          sha256sum .pio/build/esp32dev/firmware.bin > /tmp/generic-sha-a.txt
+          cat /tmp/generic-sha-a.txt
+
+      # ---- Generic tree: build B (clean rebuild) -------------------------
+      - name: Build B — firmware-generic (clean rebuild)
+        working-directory: firmware-generic
+        run: |
+          rm -rf .pio/build/esp32dev
+          pio run -e esp32dev
+          sha256sum .pio/build/esp32dev/firmware.bin > /tmp/generic-sha-b.txt
+          cat /tmp/generic-sha-b.txt
+
+      - name: Compare A vs B — firmware-generic (REL-04)
+        run: |
+          SHA_A=$(awk '{print $1}' /tmp/generic-sha-a.txt)
+          SHA_B=$(awk '{print $1}' /tmp/generic-sha-b.txt)
+          echo "generic SHA-A: ${SHA_A}"
+          echo "generic SHA-B: ${SHA_B}"
+          if [ "${SHA_A}" != "${SHA_B}" ]; then
+            echo "FAIL: REL-04 — firmware-generic build is NOT reproducible"
+            exit 1
+          fi
+          echo "PASS: REL-04 — firmware-generic builds are byte-identical"
+
+  # --------------------------------------------------------------------------
   # Master release gate.
   # [Audit 9 P0-3 + self-review fix] Must include build-production in needs
   # so download-artifact can fetch the modular-production artifact.
@@ -480,14 +604,19 @@ jobs:
 
   # --------------------------------------------------------------------------
   # [Audit 9 P0-C/D] Immutable release publisher.
-  # ONLY runs after: release-gate PASS + tag-signature PASS + hardware-acceptance PASS.
+  # ONLY runs after: release-gate PASS + tag-signature PASS + hardware-acceptance PASS
+  # + reproducible-build PASS ([REL-04, v1.9.3] — a release may only publish
+  # artifacts whose build determinism has been proven in this run).
   # Creates GitHub Release with EXACT artifact inventory (no `|| true`).
   # --------------------------------------------------------------------------
   release-publish:
     name: Publish immutable GitHub Release
     runs-on: ubuntu-latest
-    needs: [verify-hardware-acceptance]
-    if: startsWith(github.ref, 'refs/tags/v') && needs.verify-hardware-acceptance.result == 'success'
+    needs: [verify-hardware-acceptance, reproducible-build]
+    if: |
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.verify-hardware-acceptance.result == 'success' &&
+      needs.reproducible-build.result == 'success'
     permissions:
       contents: write
     steps:

@@ -1,4 +1,4 @@
-/* PLTS Monitor Generic Firmware v1.9.2
+/* PLTS Monitor Generic Firmware v1.9.3
  * Flash once. Runtime WiFi/GAS credentials live in LittleFS /config.json.
  * Monitoring only: this firmware never controls an inverter, charger, or relay.
  *
@@ -153,7 +153,7 @@
 //   • Arus AC   : ACS712-30A (versi Modified 3.3V) di ADC GPIO 35
 //                 (AC_CURRENT_PIN), sampling RMS 2 siklus @ 50 Hz.
 // ============================================================================
-static const char*    FIRMWARE_VERSION   = "1.9.2";  // v1.9.2: INA219 dynamic gain (canonical register fix). Parity with modular tree.
+static const char*    FIRMWARE_VERSION   = "1.9.3";  // v1.9.3: version-parity with modular tree (reproducible build release). Measurement behavior identical to v1.9.2 — this tree embeds no __DATE__/__TIME__, so its binaries were already wall-clock-free; the v1.9.3 bump keeps the fleet-wide version identity aligned.
 static const char*    CONFIG_PATH        = "/config.json";
 static const uint8_t  RESET_PIN          = 0;         // BOOT button
 static const uint8_t  LED_PIN            = 2;         // Built-in LED
