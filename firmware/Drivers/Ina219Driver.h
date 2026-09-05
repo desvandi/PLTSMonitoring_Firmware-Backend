@@ -9,9 +9,10 @@
 //   - Positive raw current = DISCHARGE (current leaving battery)
 //   - Polarity correction in software: positive output = CHARGING
 //
-// Config 0x152B (16V FSR, ±80mV PGA, 12-bit/128-sample averaging, shunt+bus continuous)
-// [v1.9.1 FIX] Corrected from 0x3FFB which had RESERVED BADC/SADC values.
-// Dynamic PGA switching now actually changes the gain (was broken in v1.9.0).
+// Config 0x0FFF (16V FSR, ±80mV PGA, 12-bit/128-sample averaging, shunt+bus continuous)
+// [v1.9.2 CANONICAL FIX] Corrected from 0x152B (v1.9.1) which had wrong bit-field
+// layout — actually decoded to ±160mV/10-bit-SADC/triggered-mode. Verified against
+// TI datasheet SBOS448G: BRNG=bit13, PG=bits12:11, BADC=bits10:7, SADC=bits6:3, MODE=bits2:0.
 //
 // Failure handling:
 //   - 10 consecutive I2C errors → 60s cooldown (frees bus for other sensors)
