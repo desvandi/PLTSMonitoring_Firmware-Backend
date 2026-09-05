@@ -189,7 +189,10 @@ static constexpr const char* BMS_PROTOCOL_DEFAULT = "auto";
 static constexpr uint8_t  INA219_ADDRESS        = 0x40;
 static constexpr float    INA219_SHUNT_OHM      = 0.00075f;   // 75mV @ 100A → 0.75 mΩ
 static constexpr float    INA219_MAX_CURRENT_A  = 100.0f;
-static constexpr uint16_t INA219_CONFIG         = 0x3FFB;     // 32V FSR, ±320mV PGA, 16-sample avg
+// [v1.9.1 FIX] Legacy INA219_CONFIG constant updated to use valid register
+// fields (was 0x3FFB which had RESERVED BADC/SADC values). Now uses the
+// corrected ±80mV PGA config. See INA219_CONFIG_PGA_80MV below for details.
+static constexpr uint16_t INA219_CONFIG         = 0x152B;     // 16V FSR, ±80mV PGA, 12-bit/128-sample avg
 // Sign correction: raw INA219 shunt voltage is POSITIVE when current leaves
 // battery (discharge). Canonical software semantics require positive = charging.
 // Therefore signCorrection = -1.0f inverts the raw reading.
@@ -219,17 +222,41 @@ static constexpr float    INA219_PGA_SWITCH_DOWN_A  = 90.0f;   // switch back to
 // Max current the shunt can measure in each PGA mode (for saturation detection)
 static constexpr float    INA219_PGA_80MV_MAX_A     = 106.0f;  // 80mV / 0.75mΩ
 static constexpr float    INA219_PGA_160MV_MAX_A    = 150.0f;  // shunt physical limit (75mV@100A → 112.5mV@150A)
-// INA219 config register values for each PGA mode
-// Bits 13-12 (PGA): 00 = ±320mV, 01 = ±160mV, 10 = ±80mV, 11 = ±40mV
-// Bits 11-7  (BADC): 1000 = 12-bit, 128 samples (oversampling for noise reduction)
-// Bits 6-2   (SADC): 1000 = 12-bit, 128 samples
-// Bits 1-0   (mode): 11 = shunt+bus continuous
-// 0x3FFB = 32V FSR, ±320mV, 16-sample avg (legacy default — kept for backwards compat)
-// 0x3BFF = 32V FSR, ±80mV,  12-bit/128-sample (standby mode — high resolution)
-// 0x39FF = 32V FSR, ±160mV, 12-bit/128-sample (peak mode — full range)
-static constexpr uint16_t INA219_CONFIG_PGA_80MV   = 0x3BFF;
-static constexpr uint16_t INA219_CONFIG_PGA_160MV  = 0x39FF;
-static constexpr uint16_t INA219_CONFIG_LEGACY     = 0x3FFB;   // ±320mV, 16-sample (old default)
+
+// [v1.9.1 FIX / INA-01] INA219 config register values — CORRECTED per TI datasheet SBOS397D.
+// -----------------------------------------------------------------------------
+// INA219 Configuration Register (0x00) layout (16 bits):
+//   Bit 15     : RST (1 = reset)
+//   Bit 14     : BRNG (0 = 16V FSR, 1 = 32V FSR)
+//   Bits 13:12 : PGA (shunt voltage gain)
+//                00 = ±40mV  (gain /1)
+//                01 = ±80mV  (gain /2)  ← standby mode
+//                10 = ±160mV (gain /4)  ← peak load mode
+//                11 = ±320mV (gain /8)  ← legacy default
+//   Bits 11:7  : BADC[4:0] (bus ADC resolution + averaging)
+//                00000 = 9-bit, 1 sample (84µs)
+//                00011 = 12-bit, 1 sample (532µs)
+//                00111 = 12-bit, 16 samples (8.51ms)
+//                01001 = 12-bit, 64 samples (34.05ms)
+//                01010 = 12-bit, 128 samples (68.10ms)  ← oversampling for noise
+//                01011..11111 = RESERVED (do not use)
+//   Bits 6:2   : SADC[4:0] (shunt ADC — same encoding as BADC)
+//   Bits 1:0   : MODE (11 = shunt+bus continuous)
+//
+// PREVIOUS (BUGGY) values had PGA=11 (±320mV) for BOTH modes due to inverted
+// bit-mapping in the comment. The comment said "00=±320mV, 11=±40mV" but the
+// datasheet says "00=±40mV, 11=±320mV". This meant dynamic gain switching
+// never actually changed the PGA range — both modes used ±320mV.
+//
+// VERIFIED via scripts/decode_ina219_config.py:
+//   0x152B → PGA=01 (±80mV), BADC=01010 (12-bit/128-sample), SADC=01010, MODE=11 ✅
+//   0x252B → PGA=10 (±160mV), BADC=01010 (12-bit/128-sample), SADC=01010, MODE=11 ✅
+//
+// BRNG=0 (16V FSR) is correct for low-side sensing: VBUS pin ≈ 0V (shunt on
+// GND line), well within 16V range. The "32V FSR" in old comments was wrong.
+static constexpr uint16_t INA219_CONFIG_PGA_80MV   = 0x152B;  // ±80mV,  12-bit/128-sample, 16V FSR
+static constexpr uint16_t INA219_CONFIG_PGA_160MV  = 0x252B;  // ±160mV, 12-bit/128-sample, 16V FSR
+static constexpr uint16_t INA219_CONFIG_LEGACY     = 0x152B;  // default = ±80mV (high-res standby)
 
 // Battery voltage divider (brief §7 + v1.9.0 update)
 // [v1.9.0 / DYNAMIC-GAIN] New divider for high-side battery measurement:
@@ -262,7 +289,19 @@ static constexpr float ADC_FILTER_ALPHA   = 0.2f;
 // [v1.9.0 / DYNAMIC-GAIN] Raised from 120A to 160A to accommodate peak load
 // up to 150A (PGA 160mV mode supports up to 213A theoretically, but the shunt
 // physical rating is 100A @ 75mV continuous, 150A peak short-duration).
-static constexpr float CURRENT_SPIKE_REJECT_A = 160.0f;  // reject |I| > this (was 120A)
+//
+// [v1.9.1 / INA-03] IMPORTANT: This is a SOFTWARE PLausibility ceiling, NOT a
+// hardware current rating. The shunt is rated:
+//   - 100A continuous (75mV drop, within ±80mV PGA range)
+//   - 150A peak short-duration (112.5mV drop, within ±160mV PGA range)
+// The 160A software ceiling rejects obvious sensor/communication errors
+// (e.g., garbage I2C data, NaN propagation). It does NOT provide hardware
+// overcurrent protection. The system MUST have independent hardware protection:
+//   - Fuses/breakers rated per the actual installation
+//   - Thermal monitoring of the shunt (I²R heating at 150A = 16.875W)
+//   - Alarm thresholds configured below the physical limits
+// Document any changes to this value alongside the hardware protection analysis.
+static constexpr float CURRENT_SPIKE_REJECT_A = 160.0f;  // software plausibility ceiling (NOT hardware rating)
 static constexpr float CURRENT_SMOOTH_ALPHA    = 0.3f;     // EMA smoothing
 
 // ACS712 (brief §26-27)

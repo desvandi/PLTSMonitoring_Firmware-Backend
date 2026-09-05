@@ -53,37 +53,70 @@ bool Ina219Driver::_readRegister(uint8_t reg, uint16_t& out) {
   return true;
 }
 
-// [v1.9.0 / DYNAMIC-GAIN] Write the INA219 config register for the given PGA mode.
-// Returns true on success. The calibration register is preserved (PGA change
-// does not affect calibration — only the shunt voltage measurement range).
+// [v1.9.1 FIX / INA-01] Verify config register was written correctly by
+// reading it back. The INA219 config register is read/write, so we can
+// confirm the PGA bits + BADC/SADC fields match what we intended.
+// Returns true if the readback matches the expected value.
+bool Ina219Driver::_verifyConfigRegister(uint16_t expected) {
+  uint16_t readback = 0;
+  if (!_readRegister(REG_CONFIG, readback)) {
+    Serial.printf("[INA219 0x%02X] config readback FAILED (I2C error)\n", _address);
+    return false;
+  }
+  if (readback != expected) {
+    Serial.printf("[INA219 0x%02X] config MISMATCH: wrote 0x%04X, read back 0x%04X\n",
+                  _address, expected, readback);
+    // Decode the mismatch for diagnostics
+    uint8_t pga_written = (expected >> 12) & 0b11;
+    uint8_t pga_read    = (readback  >> 12) & 0b11;
+    Serial.printf("[INA219 0x%02X]   PGA written=%d (expected), read=%d (actual)\n",
+                  _address, pga_written, pga_read);
+    return false;
+  }
+  Serial.printf("[INA219 0x%02X] config readback OK: 0x%04X (PGA=%d, BADC=%d, SADC=%d)\n",
+                _address, readback,
+                (readback >> 12) & 0b11,
+                (readback >> 7) & 0b11111,
+                (readback >> 2) & 0b11111);
+  return true;
+}
+
+// [v1.9.1 FIX / DYNAMIC-GAIN] Write the INA219 config register for the given PGA mode.
+// Returns true on success. After writing, verifies the register via readback.
 bool Ina219Driver::_applyPgaMode(Ina219PgaMode mode) {
   uint16_t config = (mode == Ina219PgaMode::Pga80mV)
                     ? Core::INA219_CONFIG_PGA_80MV
                     : Core::INA219_CONFIG_PGA_160MV;
   if (!_writeRegister(REG_CONFIG, config)) {
-    Serial.printf("[INA219 0x%02X] PGA switch to %s FAILED (I2C error)\n",
+    Serial.printf("[INA219 0x%02X] PGA switch to %s FAILED (I2C write error)\n",
+                  _address, pgaModeToStr(mode));
+    return false;
+  }
+  // [v1.9.1 FIX / INA-01] Verify the register was actually written
+  if (!_verifyConfigRegister(config)) {
+    Serial.printf("[INA219 0x%02X] PGA switch to %s FAILED (readback mismatch)\n",
                   _address, pgaModeToStr(mode));
     return false;
   }
   _pgaMode = mode;
-  // Small delay for the new conversion to settle (INA219 conversion time
-  // for 12-bit/128-sample = 68 ms worst case; we don't block — next tick
-  // will read the settled value after READ_INTERVAL_MS=500ms)
+  // [v1.9.1 FIX / INA-02] Mark that the NEXT sample must be discarded.
+  // After a PGA register write, the INA219 needs one full conversion cycle
+  // (68ms for 12-bit/128-sample) to settle with the new gain. The next tick
+  // (500ms later) will skip the reading and just clear this flag.
+  _discardNextSample = true;
   return true;
 }
 
-// [v1.9.0 / DYNAMIC-GAIN] Hysteresis logic: switch PGA based on current magnitude.
+// [v1.9.1 FIX / DYNAMIC-GAIN] Hysteresis logic: switch PGA based on current magnitude.
 //   |I| >= 100A  → switch UP   to 160mV (avoid saturation at 106A in 80mV mode)
 //   |I| < 90A    → switch DOWN to 80mV  (regain high resolution for standby)
 // The 10A gap prevents chattering when load hovers near the threshold.
 void Ina219Driver::_evaluatePgaSwitch(float absCurrent) {
   if (_pgaMode == Ina219PgaMode::Pga80mV && absCurrent >= Core::INA219_PGA_SWITCH_UP_A) {
-    // Switch UP to 160mV to avoid imminent saturation
     Serial.printf("[INA219 0x%02X] PGA 80mV → 160mV (I=%.2fA ≥ %.0fA threshold)\n",
                   _address, (double)absCurrent, (double)Core::INA219_PGA_SWITCH_UP_A);
     _applyPgaMode(Ina219PgaMode::Pga160mV);
   } else if (_pgaMode == Ina219PgaMode::Pga160mV && absCurrent < Core::INA219_PGA_SWITCH_DOWN_A) {
-    // Switch DOWN to 80mV to regain high resolution
     Serial.printf("[INA219 0x%02X] PGA 160mV → 80mV (I=%.2fA < %.0fA threshold)\n",
                   _address, (double)absCurrent, (double)Core::INA219_PGA_SWITCH_DOWN_A);
     _applyPgaMode(Ina219PgaMode::Pga80mV);
@@ -95,6 +128,7 @@ bool Ina219Driver::begin() {
   _reading = {};
   _reading.status = Ina219Status::NotInitialized;
   _pgaMode = Ina219PgaMode::Pga80mV;  // start in high-resolution mode
+  _discardNextSample = false;
 
   if (!_writeRegister(REG_CONFIG, CONFIG_RESET)) {
     _reading.status = Ina219Status::I2cError;
@@ -146,6 +180,19 @@ void Ina219Driver::tick() {
   if (now - _lastReadMs < READ_INTERVAL_MS) return;
   _lastReadMs = now;
 
+  // [v1.9.1 FIX / INA-02] Discard the first sample after a PGA switch.
+  // The INA219 needs one full conversion cycle (68ms for 12-bit/128-sample)
+  // to settle with the new gain. Reading immediately after the register write
+  // can produce a stale or transitional value. We skip one tick (500ms) which
+  // is well beyond the 68ms settling time, then resume normal readings.
+  if (_discardNextSample) {
+    _discardNextSample = false;
+    _reading.status = Ina219Status::Ok;  // not an error — just settling
+    Serial.printf("[INA219 0x%02X] PGA settling — sample discarded (pga=%s)\n",
+                  _address, pgaModeToStr(_pgaMode));
+    return;
+  }
+
   uint16_t shuntRaw = 0, busRaw = 0;
   if (!_readRegister(REG_SHUNT, shuntRaw) || !_readRegister(REG_BUS, busRaw)) {
     _reading.status = Ina219Status::I2cError;
@@ -173,7 +220,7 @@ void Ina219Driver::tick() {
       Serial.printf("[INA219 0x%02X] PGA 80mV saturation detected (shunt=%.2fmV) — emergency switch to 160mV\n",
                     _address, (double)absShuntMv);
       _applyPgaMode(Ina219PgaMode::Pga160mV);
-      // Skip this sample — the next tick will read with the new PGA
+      // Skip this sample — the next tick will discard (settle) then read
       _reading.status = Ina219Status::OutOfRange;
       return;
     }
