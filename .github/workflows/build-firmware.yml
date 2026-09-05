@@ -594,13 +594,35 @@ jobs:
         # commit). This avoids the chicken-and-egg problem where the hw-
         # acceptance JSON file lives in the release commit, making it
         # impossible for its gitCommit field to equal the release commit's SHA.
+        #
+        # [v1.9.3 INTEGRATION FIX — verifier dispatch by version]
+        # Since v1.9.2 the hardware-acceptance protocol is the INA219
+        # 12-criteria schema (docs/hardware-acceptance/v{ver}.md, filled from
+        # v{ver}.template.json) with 17 MANDATORY measurement fields
+        # (P0-B: missing = BLOCK). The general verifier expects the pre-1.9.2
+        # 11-check schema and would BLOCK a valid INA219 evidence file with
+        # 11 "missing check" failures — deadlocking the release AFTER the
+        # physical acceptance session. Dispatch instead:
+        #   >= 1.9.2 -> verify_ina219_hardware_acceptance.py
+        #   <  1.9.2 -> verify_hardware_acceptance.py (v1.8.0 evidence schema)
+        # Dispatch logic validated by local dry-run: the INA219 verifier PASSes
+        # (exit 0) a template-conformant v1.9.3.json; the general verifier
+        # BLOCKs (exit 1) the same file.
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
           VERSION="${TAG#v}"
-          python3 scripts/verify_hardware_acceptance.py \
-            --version "$VERSION" \
-            --source-commit "$GITHUB_SHA" \
-            --release-json ci-artifacts/modular/release.json
+          RUNS_INA219=$(python3 -c "print(1 if tuple(map(int,'$VERSION'.split('.')))>=(1,9,2) else 0)")
+          if [ "$RUNS_INA219" = "1" ]; then
+            python3 scripts/verify_ina219_hardware_acceptance.py \
+              --version "$VERSION" \
+              --source-commit "$GITHUB_SHA" \
+              --release-json ci-artifacts/modular/release.json
+          else
+            python3 scripts/verify_hardware_acceptance.py \
+              --version "$VERSION" \
+              --source-commit "$GITHUB_SHA" \
+              --release-json ci-artifacts/modular/release.json
+          fi
 
   # --------------------------------------------------------------------------
   # [Audit 9 P0-C/D] Immutable release publisher.
@@ -719,7 +741,7 @@ jobs:
             echo "- ✅ Canonical manifest: manifest-canonical.json (schema 2.0)"
             echo "- ✅ Release gate: STRICT mode PASS (signature + cross-repo + provenance binding)"
             echo "- ✅ Tag signature: GPG-signed + authorized signer verified"
-            echo "- ✅ Hardware acceptance: verdict=PASS, all 11 checks PASS, 3 signoffs"
+            echo "- ✅ Hardware acceptance: verdict=PASS, all required checks PASS (12 INA219 criteria for v1.9.2+), 3 signoffs"
             echo ""
             echo "### Artifacts"
             echo "| File | Description |"
