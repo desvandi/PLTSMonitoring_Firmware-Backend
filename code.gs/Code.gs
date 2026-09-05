@@ -237,11 +237,16 @@ const TELEMETRY_HEADER = [
   // v1.7.0 [W12-2] — PZEM-004T real AC meter, optional (indices 36..38,
   // 0-based; modular firmware with PLTS_ENABLE_PZEM_AC). Same append-only
   // migration: pre-W12 rows read back as meter absent → null (honest).
-  'p_ac_meter', 'meter_v', 'meter_connected'
+  'p_ac_meter', 'meter_v', 'meter_connected',
+  // v1.9.0 [DYNAMIC-GAIN] — INA219 PGA mode (indices 39, 0-based).
+  // "80mV" = high-resolution standby, "160mV" = peak load.
+  // Absent on <= v1.8.x firmware → '' (honest: legacy device, no PGA switching).
+  'ina219_pga_mode'
 ];
 const TELEMETRY_HEADER_V1_5_LEN = 24;   // column count before the v1.6.0 extension
 const TELEMETRY_HEADER_V1_6_LEN = 31;   // column count before the v1.7.0 extension
 const TELEMETRY_HEADER_V1_7_LEN = 36;   // column count before the [W12-2] meter extension
+const TELEMETRY_HEADER_V1_8_LEN = 39;   // column count before the [v1.9.0] PGA extension
 
 // last_nonce/last_ts are VESTIGIAL (schema-compat only, no longer written
 // since WAVE-4 / GAS-2-X — replay protection lives in the nonce cache).
@@ -777,7 +782,9 @@ function recordTelemetryLocked_(norm, deviceKey) {
       // v1.7.0 [WAVE-7] — 2nd ACS712 channel + emergency relay state
       norm.iAcGen, norm.emgState, norm.emgReason, norm.emgEstop, norm.emgTrips,
       // v1.7.0 [W12-2] — PZEM real AC meter (optional)
-      norm.pAcMeter, norm.meterV, norm.meterConnected
+      norm.pAcMeter, norm.meterV, norm.meterConnected,
+      // v1.9.0 [DYNAMIC-GAIN] — INA219 PGA mode ("80mV" / "160mV" / "")
+      norm.ina219PgaMode
     ]);
     rotateLogs_(sheet);
     upsertLedger_(ledger, lrow, deviceKey, expectedNext, highestSeq, dupCount, gapCount, gaps);
@@ -849,7 +856,10 @@ function normalizeEnvelope_(data, deviceKey) {
     // [W12-2] v1.7.0 — PZEM-004T real AC meter (optional, modular firmware,
     // PLTS_ENABLE_PZEM_AC). Absent on generic firmware → '' / false (honest:
     // no meter — p_ac_est stays the headline, never a fabricated reading).
-    pAcMeter: '', meterV: '', meterConnected: false
+    pAcMeter: '', meterV: '', meterConnected: false,
+    // v1.9.0 [DYNAMIC-GAIN] — INA219 PGA mode ("80mV" / "160mV").
+    // Absent on <= v1.8.x firmware → '' (honest: legacy device, no PGA switching).
+    ina219PgaMode: ''
   };
   if (data.battery || data.protocolVersion) {
     // Canonical nested envelope
@@ -871,6 +881,11 @@ function normalizeEnvelope_(data, deviceKey) {
     n.socSource = String((bat.soc && bat.soc.provenance) || 'UNKNOWN').toUpperCase();
     n.chargeWh = numOrEmpty_(bat.chargeWh); n.dischargeWh = numOrEmpty_(bat.dischargeWh);
     n.chargeAh = numOrEmpty_(bat.chargeAh); n.dischargeAh = numOrEmpty_(bat.dischargeAh);
+    // [v1.9.0 / DYNAMIC-GAIN] INA219 PGA mode — extract from battery block.
+    // The firmware sends bat.pgaMode = "80mV" | "160mV" | "" (legacy/absent).
+    // Stored as STRING (not number) — it's an instrumentation indicator, not
+    // a measurement. The i_bat_dc column remains Float for current precision.
+    n.ina219PgaMode = String(bat.pgaMode || '');
     const bms = bat.bms || null;
     if (bms) {
       n.bmsProtocol = String(bms.protocol || '');

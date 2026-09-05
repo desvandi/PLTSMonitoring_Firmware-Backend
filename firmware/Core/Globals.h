@@ -267,6 +267,10 @@ struct SystemStatus {
     float estimatedUsableCapacityAh;
     float peakChargeCurrent;
     float peakDischargeCurrent;
+    // [v1.9.0 / DYNAMIC-GAIN] INA219 PGA mode for telemetry visibility.
+    // String: "80mV" (high-resolution standby) or "160mV" (peak load).
+    // Null when INA219 unavailable (backwards-compat: consumers treat absent as UNKNOWN).
+    const char* pgaMode;
   } battery;
   // v1.6.0 — external BMS/inverter comm snapshot (NaN-safe like the rest).
   // Populated from Comm::batteryComm by the energy task under telemetryMutex.
