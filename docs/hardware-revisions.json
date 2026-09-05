@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "description": "Hardware revision registry [Audit 2026-09-05 re-audit, sections 17+20]. Machine-readable source of truth for the hardware-identity acceptance boundary. Evidence verifiers (verify_ina219_hardware_acceptance.py, verify_ota_evidence.py) validate evidence hardwareIdentity.boardRevision against this registry: a release may only cite revisions with releaseEligible=true. Development-only revisions (S10/S12 PCB work) can NEVER be the acceptance basis for a production release without a new, revision-specific acceptance. The companion document docs/HARDWARE_REVISIONS.md explains the boundary in prose.",
+  "revisions": [
+    {
+      "id": "bench-prototype",
+      "description": "Hand-wired bench prototype: ESP32-WROOM-32 DevKit + INA219 breakout (R100 removed) + external 100A/75mV shunt (0.75mOhm, low-side) + 190k/10k voltage divider on GPIO34. No PCB revision identifier.",
+      "releaseEligible": true,
+      "acceptanceBasis": "v1.8.0 hardware acceptance evidence (docs/hardware-acceptance/v1.8.0.json) + v1.8.0 OTA physical test evidence (docs/ota-physical-test/v1.8.0.json)",
+      "designatedReleaseTarget": ["v1.9.3"],
+      "notes": "Designated release-target hardware class for the v1.9.3 production release. The v1.9.3 measurement chain (INA219 PGA registers, divider, ADC) is identical to the chain accepted on this class."
+    },
+    {
+      "id": "S10",
+      "description": "PCB revision S10 — module carrier board (KiCad fabrication outputs generated in commit 9cbd58c).",
+      "releaseEligible": false,
+      "developmentOnly": true,
+      "notes": "Development-only. NOT a v1.9.3 release target. Hardware acceptance performed on earlier revisions does not transfer: a release targeting S10 requires a NEW hardware acceptance with boardRevision=S10."
+    },
+    {
+      "id": "S12",
+      "description": "PCB revision S12 — relay-expansion board (full routing, DRC 0 errors, Freerouting + A* bridges, commit 9cbd58c).",
+      "releaseEligible": false,
+      "developmentOnly": true,
+      "notes": "Development-only. NOT a v1.9.3 release target. Includes BSS138-based emergency sense/drive circuitry whose documentation changed after the v1.9.3 software release line — requires revision-specific acceptance (including emergency-circuit criteria) before any release may cite it."
+    }
+  ]
+}

@@ -98,6 +98,14 @@ def main():
     commit_matches = hw.get("gitCommit") == rel.get("gitCommit")
     is_parent = hw.get("gitCommit") == source_commit
 
+    # [Audit 2026-09-05 re-audit, section 20] Hardware identity binding: the
+    # provenance chain now binds THREE identities (firmware + hardware +
+    # release). boardRevision/deviceSerial/relayBoardRevision come from the
+    # hardware acceptance evidence; the release-time binding records them so
+    # the exact physical device class that was hardware-tested is
+    # machine-verifiable against docs/hardware-revisions.json.
+    hw_identity = hw.get("hardwareIdentity") if isinstance(hw.get("hardwareIdentity"), dict) else {}
+
     binding = {
         "schemaVersion": 1,
         "schema": "provenance-binding",
@@ -135,6 +143,11 @@ def main():
             "gitCommit": hw.get("gitCommit"),
             "firmwareSha256": hw.get("firmwareSha256"),
             "hardwareSerial": hw.get("hardwareSerial"),
+            "hardwareIdentity": {
+                "boardRevision": hw_identity.get("boardRevision"),
+                "deviceSerial": hw_identity.get("deviceSerial"),
+                "relayBoardRevision": hw_identity.get("relayBoardRevision"),
+            },
             "testDate": hw.get("testDate"),
             "verdict": hw.get("verdict"),
         },
@@ -160,6 +173,11 @@ def main():
             "gitCommit": hw.get("gitCommit"),
             "firmwareSha256": hw.get("firmwareSha256"),
             "hardwareSerial": hw.get("hardwareSerial"),
+            "hardwareIdentity": {
+                "boardRevision": hw_identity.get("boardRevision"),
+                "deviceSerial": hw_identity.get("deviceSerial"),
+                "relayBoardRevision": hw_identity.get("relayBoardRevision"),
+            },
             "testDate": hw.get("testDate"),
             "signoffs": {
                 "testEngineer": hw.get("testEngineer"),
