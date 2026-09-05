@@ -218,9 +218,14 @@ static constexpr float ADC_FILTER_ALPHA   = 0.2f;
 static constexpr float CURRENT_SPIKE_REJECT_A = 120.0f;  // reject |I| > this (shunt rating)
 static constexpr float CURRENT_SMOOTH_ALPHA    = 0.3f;     // EMA smoothing
 
-// ACS712 (brief §26-27)
-static constexpr float    ACS712_SENSITIVITY       = 0.185f;     // V/A for ACS712-20A (configurable)
-static constexpr float    ACS712_SENSITIVITY_MV_PER_A = 185.0f;  // mV/A (same as above in mV)
+// ACS712 (brief §26-27) — R3 fix: constants matched to PCB (sheet 05_ACS712)
+// PCB: ACS712ELCTR-30A-T (66 mV/A native) + output divider R30/R31 10k over
+// R32/R33 15k = 0.6 ratio into ADC. Effective sensitivity at the ADC pin:
+//   66 mV/A x 10k/(10k+15k) = 66 x 0.6 = 39.6 mV/A = 0.0396 V/A
+// (old value 0.185 V/A assumed ACS712-20A WITHOUT the PCB divider — mismatch
+//  made every AC current reading ~4.67x too high.)
+static constexpr float    ACS712_SENSITIVITY       = 0.0396f;    // V/A at ADC: ACS712-30A 66mV/A x divider 0.6 (PCB sheet 05)
+static constexpr float    ACS712_SENSITIVITY_MV_PER_A = 39.6f;  // mV/A (same as above in mV)
 static constexpr uint16_t ACS712_SAMPLE_RATE_HZ    = 1000;        // 1 kHz for 50 Hz AC
 static constexpr uint16_t ACS712_WINDOW_MS          = 40;          // 2 cycles of 50 Hz = 40 ms
 static constexpr uint16_t ACS712_WINDOW_CYCLES     = 2;
