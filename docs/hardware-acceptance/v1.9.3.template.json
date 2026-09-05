@@ -9,6 +9,12 @@
   "releaseManager": "",
   "testDate": "",
   "hardwareSerial": "",
+  "hardwareIdentity": {
+    "boardRevision": "bench-prototype",
+    "deviceSerial": "FILLED_BY_OPERATOR_ACTUAL_ESP32_MODULE_SERIAL",
+    "relayBoardRevision": "none",
+    "notes": ""
+  },
   "configReadbackHex": "",
   "configReadbackPgaBits": null,
   "adcFineTuneApplied": 1.0,
@@ -54,5 +60,5 @@
     "powerDeltaPct": null,
     "telemetryPgaModeMatchesHardware": null
   },
-  "notes": "v1.9.3 INA219 hardware acceptance. Measurement chain is identical to v1.9.2 (canonical PGA register fix 0x0FFF/0x17FF per TI SBOS448G); v1.9.3 adds the deterministic build identity ([REL-03/REL-04] — buildTimestamp stripped from the binary, replaced by SOURCE_DATE_EPOCH-derived commit date). Firmware SHA-256 evidence is now byte-exact: the binary flashed for this acceptance MUST be byte-identical to the released binary. Criteria 2, 6, and 10 require a physical reference meter — they are NOT optional."
+  "notes": "v1.9.3 INA219 hardware acceptance. Measurement chain is identical to v1.9.2 (canonical PGA register fix 0x0FFF/0x17FF per TI SBOS448G); v1.9.3 adds the deterministic build identity ([REL-03/REL-04] — buildTimestamp stripped from the binary, replaced by SOURCE_DATE_EPOCH-derived commit date). Firmware SHA-256 evidence is now byte-exact: the binary flashed for this acceptance MUST be byte-identical to the released binary. Criteria 2, 6, and 10 require a physical reference meter — they are NOT optional. [Audit 2026-09-05 re-audit, sections 17+20] Evidence must bind THREE identities: firmware (version/gitCommit/firmwareSha256), hardware (hardwareIdentity: boardRevision per docs/hardware-revisions.json — v1.9.3 release target = bench-prototype; deviceSerial = actual ESP32 module serial, must equal hardwareSerial; relayBoardRevision), and release (the signed v1.9.3 tag). Development-only PCB revisions (S10/S12) are BLOCKED as acceptance basis."
 }
