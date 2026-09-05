@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "1.9.1",
-  "gitCommit": "FILLED_BY_OPERATOR_MUST_MATCH_GITHUB_SHA",
+  "version": "1.9.2",
+  "gitCommit": "3ec9d0562e232aa8021410787fd9417edbca41f1",
   "firmwareSha256": "FILLED_BY_OPERATOR_MUST_MATCH_RELEASE_JSON",
   "verdict": "PENDING",
   "testEngineer": "",
@@ -54,5 +54,5 @@
     "powerDeltaPct": null,
     "telemetryPgaModeMatchesHardware": null
   },
-  "notes": "v1.9.1 INA219 hardware acceptance. The v1.9.0 PGA register bug (inverted bit-mapping → both modes used ±320mV) was a P0 measurement-integrity defect. Although the source is now fixed (0x152B/0x252B with correct PGA bits + readback verification), hardware evidence is the acceptance criterion. Criteria 2, 6, and 10 require a physical reference meter — they are NOT optional."
+  "notes": "v1.9.2 INA219 hardware acceptance. The v1.9.0 PGA register bug (inverted bit-mapping \u2192 both modes used \u00b1320mV) was a P0 measurement-integrity defect. Although the source is now fixed (0x152B/0x252B with correct PGA bits + readback verification), hardware evidence is the acceptance criterion. Criteria 2, 6, and 10 require a physical reference meter \u2014 they are NOT optional."
 }

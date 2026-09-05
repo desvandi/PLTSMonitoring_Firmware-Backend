@@ -87,7 +87,7 @@ namespace Core {
 // ---------------------------------------------------------------------------
 // Versioning (brief §74) — single source of truth
 // ---------------------------------------------------------------------------
-static constexpr const char* FIRMWARE_VERSION        = "1.8.0";  // v1.8.0: 8-channel relay integration (PCF8574 I²C expander, RelayController, safety supervisor, interlock, REST + MQTT command pipeline, E-WAVE cascade). All existing monitoring unchanged.
+static constexpr const char* FIRMWARE_VERSION        = "1.9.2";  // v1.9.2: INA219 dynamic gain switching (canonical register fix). PGA ±80mV/±160mV with hysteresis 90A/100A, 190k/10k voltage divider (20:1), pga_mode telemetry. v1.9.0 had inverted PGA mapping (both modes ±320mV); v1.9.1 had wrong bit-field layout (PGA/MODE/SADC all wrong); v1.9.2 corrected per TI datasheet SBOS448G: 0x0FFF=±80mV, 0x17FF=±160mV, both 12b/128s continuous.
 static constexpr const char* FIRMWARE_BUILD_DATE     = __DATE__ " " __TIME__;
 static constexpr const char* PROTOCOL_VERSION         = "1";     // protocol v1 (PLTS)
 static constexpr const char* CONFIG_SCHEMA_VERSION    = "1";

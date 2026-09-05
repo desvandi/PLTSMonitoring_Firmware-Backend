@@ -240,7 +240,7 @@ def run() -> int:
     elif pga_bits == 3:
         blockers.append(
             f"configReadbackPgaBits=3 (0b11 = ±320mV) — this is the BUGGY v1.9.0 value! "
-            f"The firmware is still running old constants. Reflash with v1.9.1+."
+            f"The firmware is still running old constants. Reflash with v1.9.2+."
         )
         print(f"[FAIL] configReadbackPgaBits: 3 (BUGGY ±320mV)")
     else:
@@ -251,7 +251,7 @@ def run() -> int:
     verdict = hw.get("verdict", "")
     if verdict != "PASS":
         blockers.append(
-            f"verdict is '{verdict}', not 'PASS' — v1.9.1 INA219 measurement chain NOT accepted"
+            f"verdict is '{verdict}', not 'PASS' — v1.9.2 INA219 measurement chain NOT accepted"
         )
         print(f"[FAIL] verdict: '{verdict}' (expected: PASS)")
     else:
