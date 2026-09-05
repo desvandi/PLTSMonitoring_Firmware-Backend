@@ -497,7 +497,7 @@ extern bool calibrationDirty;
 
 // ---------------------------------------------------------------------------
 // [v1.8.0] 8-Channel Relay Configuration (PCF8574 I²C Expander)
-// See docs/RELAY_GPIO_HARDWARE_CONTRACT.md for full hardware spec.
+// See docs/ARCHITECTURE.md §5 (Hardware Interface: PCF8574) for full hardware spec.
 // ---------------------------------------------------------------------------
 #if PLTS_ENABLE_RELAYS
 static constexpr uint8_t  RELAY_CHANNEL_COUNT       = 8;

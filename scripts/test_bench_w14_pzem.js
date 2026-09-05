@@ -2,7 +2,7 @@
 /**
  * test_bench_w14_pzem.js — WAVE 14 BENCH: PZEM flag trial (uji coba flag PZEM)
  * =============================================================================
- * Virtual-bench execution of docs/bench/PANDUAN_VALIDASI.md §3 (the part that
+ * Virtual-bench execution of docs/HARDWARE_ACCEPTANCE.md §5.1 PZEM Validation (the part that
  * can run WITHOUT a physical meter on this host): a VirtualPzem-004T v3 slave
  * wired to a 1:1 JS port of Drivers/Pzem004tDriver.cpp over a virtual UART,
  * driven exactly like firmware_v1.ino's measurementTask, serialized exactly
