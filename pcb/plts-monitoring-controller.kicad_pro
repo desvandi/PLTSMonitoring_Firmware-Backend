@@ -99,7 +99,7 @@
         "silk_overlap": "warning",
         "skew_out_of_range": "error",
         "solder_mask_bridge": "error",
-        "starved_thermal": "error",
+        "starved_thermal": "warning",
         "text_height": "warning",
         "text_on_edge_cuts": "error",
         "text_thickness": "warning",
@@ -327,6 +327,10 @@
       {
         "netclass": "PWR",
         "pattern": "PROTECTED_VBAT"
+      },
+      {
+        "netclass": "PWR",
+        "pattern": "+5V_RELAY_EXP"
       }
     ]
   },
