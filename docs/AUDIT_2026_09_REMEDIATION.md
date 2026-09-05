@@ -1,5 +1,15 @@
 # Audit 2026-09 — Remediation Summary
 
+> **NOTE (2026-09-05):** Several documents referenced in this audit have been
+> consolidated. Cross-reference mapping:
+> - `docs/P2_BRANCH_PROTECTION_AND_GPG_SIGNING.md` → `docs/DEPLOYMENT.md`
+> - `docs/RELAY_GPIO_HARDWARE_CONTRACT.md` + `docs/RELAY_INTEGRATION_ARCHITECTURE.md` → `docs/ARCHITECTURE.md`
+> - `docs/hardware-acceptance/README.md` + `docs/bench/*.md` → `docs/HARDWARE_ACCEPTANCE.md`
+> - `docs/hardware-acceptance/v1.7.1.md` → deleted (v1.7.1 never released; use v1.8.0.md)
+>
+> This audit document is a frozen record. The P0/P1/P2 ID namespace it defines
+> is still referenced by CI scripts and version-specific acceptance protocols.
+
 > This document tracks the implementation status of every P0 / P1 / P2 item
 > from the September 2026 production-readiness audit. It is the authoritative
 > reference for the "production-hardening in progress" status banner in the

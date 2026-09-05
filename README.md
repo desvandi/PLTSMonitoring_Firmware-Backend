@@ -151,14 +151,19 @@ PLTSMonitoring_Firmware-Backend/
 │   └── ...
 │
 ├── docs/
-│   ├── hardware-acceptance/     #   HW acceptance protocols + templates
-│   │   ├── v1.8.0.md            #     General HW acceptance (boot, sensors, OTA, relay)
+│   ├── ARCHITECTURE.md          #   System architecture + relay subsystem (consolidated)
+│   ├── DEPLOYMENT.md            #   Branch protection, GPG signing, binary distribution
+│   ├── HARDWARE_ACCEPTANCE.md   #   All HW acceptance protocols (general + sensor + E-WAVE)
+│   ├── AUDIT_2026_09_REMEDIATION.md  # Audit findings (P0/P1/P2 ID namespace)
+│   ├── hardware-acceptance/     #   Version-specific HW acceptance templates + evidence
+│   │   ├── v1.8.0.md            #     General HW acceptance (21 sections incl relay)
+│   │   ├── v1.8.0.json          #     Filled-in evidence (verdict=PASS)
 │   │   ├── v1.9.2.md            #     INA219-specific HW acceptance (12 criteria)
-│   │   └── ...
+│   │   └── v1.9.2.template.json #     Template for v1.9.2
 │   ├── ota-physical-test/       #   OTA physical test protocol (16 criteria)
-│   ├── wiring/                  #   Wiring diagrams (DC, AC, emergency relay)
-│   ├── bench/                   #   Bench test procedures
-│   └── AUDIT_2026_09_REMEDIATION.md
+│   │   ├── v1.8.0.md
+│   │   └── v1.8.0.template.json
+│   └── wiring/                  #   Wiring diagrams (DC, AC, emergency relay)
 │
 ├── .github/workflows/
 │   └── build-firmware.yml       #   CI: test → build → sign → gate → tag-verify → hw-verify → release

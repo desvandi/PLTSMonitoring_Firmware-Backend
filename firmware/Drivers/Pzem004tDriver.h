@@ -25,7 +25,7 @@
 // STATUS: IMPLEMENTED, BENCH-VALIDATION PENDING — PLTS_ENABLE_PZEM_AC
 // defaults to 0. The driver compiles out entirely until an operator has
 // validated one physical unit against a reference meter (procedure in
-// docs/bench/PANDUAN_VALIDASI.md). Enable only after that.
+// docs/HARDWARE_ACCEPTANCE.md §5.1 PZEM Validation). Enable only after that.
 //
 // Plausibility gates (same honesty as the BMS layer): the meter can lie or
 // glitch — implausible values are never reported (status OutOfRange, value

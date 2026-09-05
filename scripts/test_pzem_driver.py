@@ -5,7 +5,7 @@ test_pzem_driver.py — PZEM-004T v3 AC meter driver (README §13 #9 closure pat
 The AC-power-is-an-ESTIMATE limitation gets its UPGRADE PATH: an implemented,
 mechanically tested PZEM-004T v3 driver — held OFF (PLTS_ENABLE_PZEM_AC=0)
 until one physical unit passes bench validation against a reference meter
-(docs/bench/PANDUAN_VALIDASI.md). Honesty gates verified here:
+(docs/HARDWARE_ACCEPTANCE.md §5.1 PZEM Validation). Honesty gates verified here:
 
   G1 — CRC16-MODBUS against the PUBLISHED query frame
        (01 03 00 00 00 0A -> CRC C5 CD — the canonical Peacefair request)
