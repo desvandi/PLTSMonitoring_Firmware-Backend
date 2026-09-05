@@ -3,6 +3,12 @@
   "version": "1.9.3",
   "testDate": "",
   "hardwareSerial": "",
+  "hardwareIdentity": {
+    "boardRevision": "bench-prototype",
+    "deviceSerial": "FILLED_BY_OPERATOR_ACTUAL_ESP32_MODULE_SERIAL",
+    "relayBoardRevision": "none",
+    "notes": ""
+  },
   "deviceStartingVersion": "",
   "canonicalReleaseVersion": "1.9.3",
   "canonicalReleaseFirmwareSha256": "",

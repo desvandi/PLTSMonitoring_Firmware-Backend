@@ -47,6 +47,108 @@ REQUIRED_SIGNOFFS = [
 ]
 
 
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except (ValueError, TypeError):
+        return (0, 0, 0)
+
+
+def check_hardware_identity(ota, blockers, warnings, version):
+    """[Audit 2026-09-05 re-audit, sections 17+20] Three-identity rule.
+
+    Evidence for versions >= 1.9.3 must bind the HARDWARE identity
+    (hardwareIdentity.boardRevision / deviceSerial / relayBoardRevision) in
+    addition to the firmware identity. boardRevision is validated against
+    docs/hardware-revisions.json: DEVELOPMENT-ONLY PCB revisions (S10/S12)
+    are BLOCKED as an acceptance basis for a production release.
+    """
+    if _version_tuple(version) < (1, 9, 3):
+        return  # hardware identity binding introduced at v1.9.3
+
+    hi = ota.get("hardwareIdentity")
+    if not isinstance(hi, dict):
+        blockers.append(
+            "hardwareIdentity block is MISSING (MANDATORY for v1.9.3+ evidence — "
+            "Audit 2026-09-05 re-audit section 20: evidence must bind firmware + "
+            "hardware + release identities). Fill it per the protocol: "
+            "boardRevision (registry id), deviceSerial (actual ESP32 serial), "
+            "relayBoardRevision ('none' when not populated)."
+        )
+        print("[FAIL] hardwareIdentity: MISSING (mandatory for v1.9.3+)")
+        return
+
+    board = str(hi.get("boardRevision", "") or "").strip()
+    serial = str(hi.get("deviceSerial", "") or "").strip()
+    relay = str(hi.get("relayBoardRevision", "") or "").strip()
+
+    if not board:
+        blockers.append(
+            "hardwareIdentity.boardRevision is empty — must be a registry id from "
+            "docs/hardware-revisions.json"
+        )
+        print("[FAIL] hardwareIdentity.boardRevision: empty")
+    else:
+        registry_path = Path(__file__).resolve().parent.parent / "docs" / "hardware-revisions.json"
+        registry = None
+        try:
+            registry = json.loads(registry_path.read_text())
+        except Exception as e:  # noqa: BLE001
+            blockers.append(
+                f"hardware revision registry unreadable ({registry_path}: {e}) — "
+                f"cannot validate boardRevision '{board}'"
+            )
+            print("[FAIL] hardware-revisions.json: unreadable")
+        if registry is not None:
+            revs = {r.get("id"): r for r in registry.get("revisions", []) if isinstance(r, dict)}
+            rev = revs.get(board)
+            if rev is None:
+                blockers.append(
+                    f"hardwareIdentity.boardRevision '{board}' is NOT declared in the "
+                    f"hardware revision registry (docs/hardware-revisions.json). Declare "
+                    f"it with releaseEligible=true before citing it in evidence."
+                )
+                print(f"[FAIL] hardwareIdentity.boardRevision: '{board}' not in registry")
+            elif not rev.get("releaseEligible"):
+                blockers.append(
+                    f"hardwareIdentity.boardRevision '{board}' is DEVELOPMENT-ONLY "
+                    f"(releaseEligible=false). OTA physical test performed on a "
+                    f"development revision does not certify a production release. "
+                    f"The v1.9.3 release-target hardware class is 'bench-prototype' "
+                    f"(see docs/HARDWARE_REVISIONS.md)."
+                )
+                print(f"[FAIL] hardwareIdentity.boardRevision: '{board}' is development-only (BLOCKED)")
+            else:
+                print(f"[PASS] hardwareIdentity.boardRevision: '{board}' (release-eligible per registry)")
+
+    if not serial:
+        blockers.append(
+            "hardwareIdentity.deviceSerial is empty — record the actual ESP32 "
+            "module serial (boot log / shield print)"
+        )
+        print("[FAIL] hardwareIdentity.deviceSerial: empty")
+    else:
+        hw_serial = str(ota.get("hardwareSerial", "") or "").strip()
+        if hw_serial and hw_serial != serial:
+            blockers.append(
+                f"hardwareIdentity.deviceSerial '{serial}' != top-level hardwareSerial "
+                f"'{hw_serial}' — the evidence must describe ONE physical device."
+            )
+            print("[FAIL] hardwareIdentity.deviceSerial: mismatch with hardwareSerial")
+        else:
+            suffix = " (matches hardwareSerial)" if hw_serial else ""
+            print(f"[PASS] hardwareIdentity.deviceSerial: recorded{suffix}")
+
+    if not relay:
+        blockers.append(
+            "hardwareIdentity.relayBoardRevision is empty — use 'none' when no "
+            "relay-expansion board is populated"
+        )
+        print("[FAIL] hardwareIdentity.relayBoardRevision: empty")
+    else:
+        print(f"[PASS] hardwareIdentity.relayBoardRevision: '{relay}'")
+
+
 def run() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="Release version (e.g., 1.8.0)")
@@ -103,6 +205,13 @@ def run() -> int:
         print(f"[FAIL] version: '{ota_version}' != '{args.version}'")
     else:
         print(f"[PASS] version: '{ota_version}'")
+
+    # --- 4b. Hardware identity binding ---
+    # [Audit 2026-09-05 re-audit, sections 17+20] See check_hardware_identity().
+    # Strictly ADDITIVE: v1.9.3+ evidence requires the hardware identity
+    # block; earlier versions keep their original schema. This gate must
+    # never be weakened to pass wrong evidence.
+    check_hardware_identity(ota, blockers, warnings, args.version)
 
     # --- 5. canonicalReleaseVersion matches ---
     canonical_version = ota.get("canonicalReleaseVersion", "")
