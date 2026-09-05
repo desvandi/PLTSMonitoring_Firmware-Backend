@@ -2826,7 +2826,7 @@
 			(at 215.9 116.84 0)
 			(effects (font (size 1.27 1.27)) (justify right))
 		)
-		(property "Value" "22uF 25V X7R"
+		(property "Value" "47uF 25V X5R"
 			(at 241.3 116.84 0)
 			(effects (font (size 1.27 1.27)) (justify left))
 		)

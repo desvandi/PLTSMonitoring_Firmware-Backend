@@ -9,7 +9,7 @@
 		(date "2026-09-04")
 		(rev "1.0")
 		(company "PLTS Monitoring Project")
-		(comment 1 "Sheet 09_EMERGENCY — S6: topologi §11.1 terkunci; tabel kebenaran 9 kondisi §57; R71 default-OFF; flyback SS14; TVS SMAJ5.0A x2; sense 2,96V/0V; rating K1 = BOM S10")
+		(comment 1 "Sheet 09_EMERGENCY — rev R1+R2: drive AKTIF-LOW (R78 pull-up fail-safe); sense INVERTING Q21 BSS138 (HIGH=trip, INPUT_PULLUP aman); tabel 9 kondisi §57; R71 default-OFF; flyback SS14; TVS SMAJ5.0A x2; rating K1 = BOM S10")
 	)
 	(lib_symbols
 (symbol "Device:R"
@@ -2110,6 +2110,430 @@
 		)
 		(embedded_fonts no)
 	)
+	
+(symbol "Transistor_FET:BSS138"
+		(pin_names
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "Q"
+			(at 5.08 1.905 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "BSS138"
+			(at 5.08 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23"
+			(at 5.08 -1.905 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+					(italic yes)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "https://www.onsemi.com/pub/Collateral/BSS138-D.PDF"
+			(at 5.08 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Description" "50V Vds, 0.22A Id, N-Channel MOSFET, SOT-23"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "N-Channel MOSFET"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_fp_filters" "SOT?23*"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "BSS138_0_1"
+			(polyline
+				(pts
+					(xy 0.254 1.905) (xy 0.254 -1.905)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.254 0) (xy -2.54 0)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.762 2.286) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.762 0.508) (xy 0.762 -0.508)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.762 -1.27) (xy 0.762 -2.286)
+				)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.762 -1.778) (xy 3.302 -1.778) (xy 3.302 1.778) (xy 0.762 1.778)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 1.016 0) (xy 2.032 0.381) (xy 2.032 -0.381) (xy 1.016 0)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(circle
+				(center 1.651 0)
+				(radius 2.794)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 2.54 2.54) (xy 2.54 1.778)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(circle
+				(center 2.54 1.778)
+				(radius 0.254)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(circle
+				(center 2.54 -1.778)
+				(radius 0.254)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(polyline
+				(pts
+					(xy 2.54 -2.54) (xy 2.54 0) (xy 0.762 0)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 2.794 0.508) (xy 2.921 0.381) (xy 3.683 0.381) (xy 3.81 0.254)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 3.302 0.381) (xy 2.921 -0.254) (xy 3.683 -0.254) (xy 3.302 0.381)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "BSS138_1_1"
+			(pin input line
+				(at -5.08 0 0)
+				(length 2.54)
+				(name "G"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 2.54 5.08 270)
+				(length 2.54)
+				(name "D"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 2.54 -5.08 90)
+				(length 2.54)
+				(name "S"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "power:+3V3"
+		(power)
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(property "Reference" "#PWR"
+			(at 0 -3.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "+3V3"
+			(at 0 3.556 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3V3\""
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "ki_keywords" "global power"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(symbol "+3V3_0_1"
+			(polyline
+				(pts
+					(xy -0.762 1.27) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 2.54) (xy 0.762 1.27)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 0) (xy 0 2.54)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "+3V3_1_1"
+			(pin power_in line
+				(at 0 0 90)
+				(length 0)
+				(name "~"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
 	)
 	(junction (at 116.84 127.0) (diameter 0) (color 0 0 0 0) (uuid "40188618-1051-44de-9685-8cce7eba0c4d"))
 	(junction (at 170.18 93.98) (diameter 0) (color 0 0 0 0) (uuid "7f2fbe00-89bd-4f20-8d16-2f73e1b7202e"))
@@ -2120,10 +2544,8 @@
 	(junction (at 185.42 121.92) (diameter 0) (color 0 0 0 0) (uuid "5ae6ca53-d791-4b20-9534-b1dc5a78d7e4"))
 	(junction (at 170.18 104.14) (diameter 0) (color 0 0 0 0) (uuid "0138a478-94de-49bd-9cab-8eb2bf2a1551"))
 	(junction (at 162.56 104.14) (diameter 0) (color 0 0 0 0) (uuid "8ff29957-8f1c-4582-a275-763f0853eaf5"))
-	(wire (pts (xy 55.88 99.06) (xy 64.77 99.06)) (stroke (width 0) (type default)) (uuid "2f684954-9bff-4477-9360-61e4eaf9b356"))
 	(wire (pts (xy 72.39 99.06) (xy 81.28 99.06)) (stroke (width 0) (type default)) (uuid "ee660d34-e032-47e1-8977-e35733f23ae4"))
 	(wire (pts (xy 81.28 99.06) (xy 81.28 101.6)) (stroke (width 0) (type default)) (uuid "be7c5440-0694-4db5-b3bf-c44dd1637b69"))
-	(wire (pts (xy 81.28 106.68) (xy 81.28 111.76)) (stroke (width 0) (type default)) (uuid "6fc9da32-86d2-4f1d-a219-1fc1b7038477"))
 	(wire (pts (xy 96.52 101.6) (xy 96.52 96.52)) (stroke (width 0) (type default)) (uuid "4f7127e6-f267-44d5-a416-dcc36ed1aaaa"))
 	(wire (pts (xy 96.52 106.68) (xy 102.87 106.68)) (stroke (width 0) (type default)) (uuid "85a9b3e9-f8d7-4dfd-900c-cca485c4a980"))
 	(wire (pts (xy 110.49 106.68) (xy 110.49 127.0)) (stroke (width 0) (type default)) (uuid "a4c7618e-765c-4938-86d1-04b96d56478e"))
@@ -2145,30 +2567,40 @@
 	(wire (pts (xy 203.2 106.68) (xy 203.2 121.92)) (stroke (width 0) (type default)) (uuid "d685f85e-b864-4047-bd70-f5c935d1bb80"))
 	(wire (pts (xy 203.2 121.92) (xy 185.42 121.92)) (stroke (width 0) (type default)) (uuid "8f5fc7b2-e25d-431a-85d2-402e93da2bfe"))
 	(wire (pts (xy 185.42 121.92) (xy 124.46 121.92)) (stroke (width 0) (type default)) (uuid "51866bb5-15e7-4ea1-b443-de199f2b943c"))
-	(wire (pts (xy 170.18 104.14) (xy 162.56 104.14)) (stroke (width 0) (type default)) (uuid "81193412-a6ff-474a-995e-85b91e879a98"))
-	(wire (pts (xy 162.56 104.14) (xy 154.94 104.14)) (stroke (width 0) (type default)) (uuid "a314969b-a99f-47e9-a44d-7c21917988a7"))
-	(wire (pts (xy 170.18 111.76) (xy 170.18 114.3)) (stroke (width 0) (type default)) (uuid "50cc638c-9e34-42fc-9bf3-2f320e8a32bf"))
-	(wire (pts (xy 162.56 111.76) (xy 162.56 114.3)) (stroke (width 0) (type default)) (uuid "79b59371-2ba9-4ff5-ad2a-c6a7e2661b8d"))
 	(wire (pts (xy 233.68 101.6) (xy 238.76 101.6)) (stroke (width 0) (type default)) (uuid "8d149de5-51d1-4c7d-8dc5-f18e00999c77"))
 	(wire (pts (xy 233.68 106.68) (xy 236.22 106.68)) (stroke (width 0) (type default)) (uuid "fe443059-bdb3-4676-9dec-cd174eb26f1e"))
 	(wire (pts (xy 236.22 106.68) (xy 236.22 104.14)) (stroke (width 0) (type default)) (uuid "e49957fd-421d-44ea-9c9d-c354df77ba00"))
 	(wire (pts (xy 236.22 104.14) (xy 238.76 104.14)) (stroke (width 0) (type default)) (uuid "0f1d012d-43ec-4d45-a0d8-3ce643f582bd"))
-	(global_label "RELAY_CTRL"
-		(shape input)
-		(at 55.88 99.06 0)
-		(fields_autoplaced yes)
-		(effects
-			(font (size 1.27 1.27))
-			(justify left)
-		)
-		(uuid "dd768591-a5a1-4c48-afb9-d188d42380ee")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 55.88 99.06 0)
-			(effects
-				(font (size 1.27 1.27))
-				(hide yes)
-			)
-		)
+
+	(wire (pts (xy 64.77 93.98) (xy 64.77 99.06)) (stroke (width 0) (type default)) (uuid "c1cff410-408c-4f93-8b3f-2dbd429f86db"))
+	(wire (pts (xy 81.28 106.68) (xy 55.88 106.68)) (stroke (width 0) (type default)) (uuid "a0fc46a4-bd6e-4ac6-9410-a2cf9ecde148"))
+	(wire (pts (xy 55.88 106.68) (xy 55.88 110.49)) (stroke (width 0) (type default)) (uuid "a6f18deb-1c64-4afe-8a04-2cf227c64c8a"))
+	(wire (pts (xy 252.73 96.52) (xy 259.08 96.52)) (stroke (width 0) (type default)) (uuid "7a537877-a486-493c-be5c-d938d1c668c1"))
+	(wire (pts (xy 259.08 104.14) (xy 259.08 106.68)) (stroke (width 0) (type default)) (uuid "acd5c53a-8d13-4537-9335-130dcce82a43"))
+	(wire (pts (xy 259.08 106.68) (xy 259.08 107.95)) (stroke (width 0) (type default)) (uuid "5093da1e-11d5-410d-86f4-0aa6b21d7510"))
+	(wire (pts (xy 259.08 106.68) (xy 261.62 106.68)) (stroke (width 0) (type default)) (uuid "43c8bb95-b471-4566-91a5-02fdd7400977"))
+	(wire (pts (xy 259.08 115.57) (xy 259.08 118.11)) (stroke (width 0) (type default)) (uuid "a51ed2a7-863b-4d0c-a1fe-27985482ca05"))
+	(wire (pts (xy 269.24 111.76) (xy 269.24 118.11)) (stroke (width 0) (type default)) (uuid "4c535e73-c472-4f14-bbc5-aad13c55feaf"))
+	(wire (pts (xy 269.24 93.98) (xy 269.24 91.44)) (stroke (width 0) (type default)) (uuid "30374ba5-85f2-4132-93da-79b6b62526a8"))
+	(wire (pts (xy 269.24 101.6) (xy 274.32 101.6)) (stroke (width 0) (type default)) (uuid "62655562-3bd0-41a5-b5cb-acd0cdd1dd00"))
+	(wire (pts (xy 274.32 101.6) (xy 279.4 101.6)) (stroke (width 0) (type default)) (uuid "dcbd39fc-d16f-452d-b969-6abc0ea10322"))
+	(wire (pts (xy 274.32 101.6) (xy 274.32 104.14)) (stroke (width 0) (type default)) (uuid "efed6e63-18cf-4388-ab0b-3c21f639ca0f"))
+	(wire (pts (xy 274.32 111.76) (xy 274.32 114.3)) (stroke (width 0) (type default)) (uuid "6f4caa65-e5cf-48bd-8a59-3641d843984f"))
+	(junction (at 259.08 106.68) (diameter 0) (color 0 0 0 0) (uuid "97976cbd-9e8e-4c7c-85ca-42951344bbba"))
+	(global_label "RELAY_CTRL" (shape input) (at 55.88 106.68 0) (fields_autoplaced yes)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "10de6515-461e-402b-affb-5d8e98f90f40")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 55.88 106.68 0) (effects (font (size 1.27 1.27)) (hide yes)))
+	)
+	(global_label "E_STOP_SENSE" (shape input) (at 279.4 101.6 0) (fields_autoplaced yes)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "74c6ed90-cfcc-42b1-bbee-cdd4aff28485")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 279.4 101.6 0) (effects (font (size 1.27 1.27)) (hide yes)))
+	)
+	(global_label "RELAY_RET" (shape input) (at 252.73 96.52 0) (fields_autoplaced yes)
+		(effects (font (size 1.27 1.27)) (justify left))
+		(uuid "a72c9508-4f12-42fd-9e6b-29cfa0ff4713")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}" (at 252.73 96.52 0) (effects (font (size 1.27 1.27)) (hide yes)))
 	)
 	(global_label "RELAY_RET"
 		(shape input)
@@ -2187,24 +2619,8 @@
 			)
 		)
 	)
-	(global_label "E_STOP_SENSE"
-		(shape input)
-		(at 154.94 104.14 180)
-		(fields_autoplaced yes)
-		(effects
-			(font (size 1.27 1.27))
-			(justify right)
-		)
-		(uuid "20cf4aee-0e8f-4285-8b1e-0086419af898")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 154.94 104.14 0)
-			(effects
-				(font (size 1.27 1.27))
-				(hide yes)
-			)
-		)
-	)
-	(text "TABEL KEBENARAN §57 — SEMUA KONDISI GAGAL → K1 DE-ENERGIZED (SAFETY REVIEW):\n 1. ESP32 OFF / reset / boot / crash / watchdog → GPIO27 floating-LOW\n    → PC817 mati → Q20 OFF (R71 pulldown) → K1 OFF\n 2. GPIO27 stuck-LOW (fault MCU) → PC817 mati → Q20 OFF → K1 OFF\n 3. Rail +3V3 hilang → LED PC817 mati → Q20 OFF → K1 OFF\n 4. Rail +5V / +5V_RELAY hilang (DC/DC gagal / F2 putus) → coil\n    tanpa suplai → K1 OFF\n 5. E-STOP DITEKAN (loop NC terbuka) → jalur SUPPLAI coil terputus\n    FISIK — TANPA firmware (kriteria utama §57) → K1 OFF\n 6. Kabel loop E-stop putus / konektor lepas → loop open → K1 OFF\n 7. Drive gate hilang (CTR PC817 turun / R70 putus) → R71\n    default-OFF → Q20 OFF → K1 OFF\n 8. Coil K1 putus / sambungan gagal → kontak NO tetap terbuka → K1 OFF\n 9. Suplai baterai 48 V hilang → board mati total → K1 OFF\n CATATAN FAULT: Q20 short D-S → coil tetap bisa energized, TAPI\n    E-stop TETAP memutus sisi SUPPLAI (bukan drain) → pemutus\n    darurat tetap efektif — inilah alasan topologi."
+
+	(text "TABEL KEBENARAN §57 — SEMUA KONDISI GAGAL → K1 DE-ENERGIZED (SAFETY REVIEW):\n 1. ESP32 OFF / reset / boot / crash / watchdog → GPIO27 floating → R78\n    pull-up +3V3 → LED PC817 MATI → Q20 OFF (R71) → K1 OFF (fail-safe)\n 2. GPIO27 stuck-HIGH (fault MCU) → LED mati (aktif-LOW!) → Q20 OFF → K1 OFF\n 3. Rail +3V3 hilang → LED + R78 mati → Q20 OFF → K1 OFF\n 4. Rail +5V / +5V_RELAY hilang (DC/DC gagal / F2 putus) → coil tanpa\n    suplai → K1 OFF; divider R75/R77 = 0 V → Q21 OFF → sense HIGH = ALARM\n 5. E-STOP DITEKAN (loop NC terbuka) → jalur SUPPLAI coil terputus FISIK —\n    TANPA firmware (kriteria utama §57) → K1 OFF; sense HIGH = ALARM\n 6. Kabel loop E-stop putus / konektor lepas → loop open → K1 OFF; sense\n    HIGH = ALARM (divider melihat 0 V → Q21 OFF → R76 pull-up)\n 7. Drive gate hilang (CTR PC817 turun / R70 putus) → R71 default-OFF →\n    Q20 OFF → K1 OFF\n 8. Coil K1 putus / sambungan gagal → kontak NO tetap terbuka → K1 OFF\n    (sense TETAP LOW — divider tap di RELAY_RET sisi suplai: alarm\n    mismatch GPIO27-LOW-vs-sense-LOW dari firmware)\n 9. Suplai baterai 48 V hilang → board mati total → K1 OFF\n FAULT SENSE (R2): jalur E_STOP_SENSE putus → GPIO14 INPUT_PULLUP internal\n    → HIGH = ALARM (fail-safe); Q21 short D-S → sense LOW palsu → mismatch\n    check firmware menangkap; R76 putus → sense LOW → mismatch alarm.\n CATATAN FAULT: Q20 short D-S → coil tetap bisa energized, TAPI E-stop\n    TETAP memutus sisi SUPPLAI (bukan drain) → pemutus darurat tetap\n    efektif — inilah alasan topologi."
 		(exclude_from_sim no)
 		(at 20 145 0)
 		(effects
@@ -2212,7 +2628,7 @@
 			(justify left bottom)
 		)
 		(uuid "ffab2287-aef5-440c-b0f6-8d5be65e37e3")	)
-	(text "TOPOLOGI TERKUNCI §11.1 AUDIT — TIDAK BOLEH DIUBAH (LARANGAN #7):\n E-STOP MEMUTUS SISI SUPPLAI COIL — BUKAN SISI DRAIN — JANGAN\n DIPINDAH. GPIO27 HIGH = energized (kontrak repo): (3,3 − 1,2)/330\n = 6,4 mA (IF maks PC817 50 mA; CTR ≥ 50% → arus output ≥ 3,2 mA\n memadai utk gate Q20).\n +5V → F2 0,5A + FB50 (SHEET 01) → +5V_RELAY → J_ESTOP.1 → loop\n NC eksternal → J_ESTOP.2 = RELAY_RET → K1 COIL → drain Q20 → PGND\n (star BATTERY−). D21 SS14 flyback: katoda=RELAY_RET, anoda=drain\n (40 V/1 A vs arus coil ~125 mA = margin 8×; audit §11.1).\n TVS FIELD D22/D23 SMAJ5.0A (unidirectional; VRWM 5 V; VC ~9,2 V @\n IPP): D22 di J_ESTOP.1 (+5V_RELAY), D23 di J_ESTOP.2 (RELAY_RET),\n kathoda ke jalur + anoda ke PGND — proteksi transien kabel field.\n SENSE (audit §11.1): loop tertutup + suplai normal → RELAY_RET ≈\n 5 V − I×R_loop → node = 5 × 68/(47+68) = 2,96 V (HIGH = E-stop OK;\n < 3,6 V abs.maks ADC); loop terbuka → node ≈ 0 V (LOW). τ = 27,9k\n × 100nF ≈ 2,8 ms → DEBOUNCE SOFTWARE WAJIB (HW hanya RC). Mismatch\n firmware: RELAY_CTRL HIGH + sense LOW = ALARM (loop gagal)."
+	(text "TOPOLOGI R1+R2 (FIX 2026-09-05) — KONTRAK FIRMWARE AKTIF-LOW:\n E-STOP MEMUTUS SISI SUPPLAI COIL — BUKAN SISI DRAIN — TIDAK DIUBAH.\n GPIO27 = AKTIF-LOW (kontrak EmergencyRelayDriver repo): +3V3 → R72 330R\n → anoda PC817; katoda → RELAY_CTRL (IO27 SINK, (3,3−1,2)/330 = 6,4 mA;\n IF maks PC817 50 mA). R78 10k pull-up +3V3 di RELAY_CTRL: GPIO27\n floating/boot/reset → LED MATI → K1 OFF (fail-safe). LOW = energized.\n +5V → F2 0,5A + FB50 (SHEET 01) → +5V_RELAY → J_ESTOP.1 → loop NC\n eksternal → J_ESTOP.2 = RELAY_RET → K1 COIL → drain Q20 → PGND (star\n BATTERY−). D21 SS14 flyback: katoda=RELAY_RET, anoda=drain (margin 8×\n vs arus coil ~125 mA). TVS D22/D23 SMAJ5.0A: D22 di J_ESTOP.1\n (+5V_RELAY), D23 di J_ESTOP.2 (RELAY_RET), anoda PGND — proteksi\n transien kabel field.\n SENSE R2 (INVERTING, kontrak GPIO14 INPUT_PULLUP): RELAY_RET → R75 47k\n → node gate Q21 BSS138 → R77 100k → DGND. E-stop sehat: RELAY_RET≈5V\n → Vgs = 5×100/147 = 3,4 V (> Vth maks 2 V, ON kuat) → Q21 ON → drain\n LOW → IO14 = LOW = SEHAT. E-stop terbuka / rail hilang / kabel putus:\n divider 0 V → Q21 OFF → R76 10k pull-up +3V3 → IO14 = HIGH = TRIP\n (fail-safe: jalur sense putus → INPUT_PULLUP → HIGH = trip). C75 100nF:\n τ = 10k×100nF = 1 ms (filter, debounce SW tetap wajib ≥ 10 ms)."
 		(exclude_from_sim no)
 		(at 20 205 0)
 		(effects
@@ -2220,7 +2636,7 @@
 			(justify left bottom)
 		)
 		(uuid "3946b3c4-0a11-49b6-94f8-2608a89c39b6")	)
-	(text "KOMPONEN KUNCI + ITEM VERIFIKASI BOM (GATE e SAFETY REVIEW):\n OPT1 PC817 (DIP-4; Vce 80 V, CTR 50–300%): isolasi drive — domain\n   LED = DGND (return GPIO27), domain output = +5V/PGND (DN-S6-02).\n Q20 AO3400A (SOT-23; 30 V/5,7 A; Vgs(th) 0,7–1,4 V; Rds ~28 mΩ @\n   4,5 V): low-side switch coil; margin Vds 30 V ≫ clamp TVS 9,2 V.\n K1 = HF115F-1/5V-H Hongfa PRELIM (1 Form A SPST-NO; kontak ≥ 5 A/\n   30 VDC per audit §11.1). ASUMSI #6: VERIFIKASI rating kontak +\n   INRUSH kontaktor aktual = ITEM BOM S10 — bila inrush > 5 A →\n   naik kelas (Omron G6RL / Hongfa HFE10) atau relai antara.\n   Pemetaan pin simbol (1=COIL+ 2=COIL− 3=COM 4=NO) ke pin fisik\n   HF115F-1 = VERIFIKASI DATASHEET BOM S10 (footprint parametrik\n   turunan pola keluarga HF115F resmi 2Z-x4; pad 2,3 / drill 1,3).\n R72 330R / R70 100R / R71 100k / R75 47k / R76 68k / C75 100nF\n   (0603 1% X7R). D21 SS14 + D22/D23 SMAJ5.0A (SMA).\n J_ESTOP & J_RELAY = Phoenix MKDS-1,5-2 P5,08 (SELV; dry contact)."
+	(text "KOMPONEN KUNCI + ITEM VERIFIKASI BOM (GATE e SAFETY REVIEW):\n OPT1 PC817 (DIP-4; Vce 80 V, CTR 50–300%): isolasi drive — LED:\n   anoda dari +3V3 via R72 (domain ESP32), katoda ke RELAY_CTRL (IO27\n   SINK 6,4 mA — dalam rating GPIO ESP32); output C=+5V, E=R70 (DN-S6-02).\n Q20 AO3400A (SOT-23; 30 V/5,7 A; Vgs(th) 0,7–1,4 V; Rds ~28 mΩ @4,5 V):\n   low-side switch coil; margin Vds 30 V ≫ clamp TVS 9,2 V.\n Q21 BSS138 (SOT-23; 50 V, 220 mA; Vgs(th) 0,8–2,0 V): inverter sense —\n   G=divider R75/R77, S=DGND, D=E_STOP_SENSE (R2 fix).\n K1 = HF115F-1/5V-H Hongfa PRELIM (1 Form A SPST-NO; kontak ≥ 5 A/30 VDC\n   per audit §11.1). ASUMSI #6: VERIFIKASI rating kontak + INRUSH\n   kontaktor aktual = ITEM BOM S10 — bila inrush > 5 A → naik kelas\n   (Omron G6RL / Hongfa HFE10) atau relai antara. Pemetaan pin simbol\n   (1=COIL+ 2=COIL− 3=COM 4=NO) ke pin fisik HF115F-1 = VERIFIKASI\n   DATASHEET BOM S10.\n R72 330R / R70 100R / R71 100k / R75 47k / R76 10k (revalue R2) /\n   R77 100k (baru R2) / R78 10k (baru R1) / C75 100nF (0603 1% X7R).\n   D21 SS14 + D22/D23 SMAJ5.0A (SMA).\n J_ESTOP & J_RELAY = Phoenix MKDS-1,5-2 P5,08 (SELV; dry contact)."
 		(exclude_from_sim no)
 		(at 225 145 0)
 		(effects
@@ -2228,7 +2644,7 @@
 			(justify left bottom)
 		)
 		(uuid "1264837f-8ced-405a-a57f-b4af8e01783b")	)
-	(text "PENEMPATAN (S9): rantai E-stop di zona power dekat tepi board;\n   loop J_ESTOP pendek & jauh dari antenna ESP32; K1 kontak\n   menjauh dari zona analog; jalur PGND source Q20 langsung ke\n   star; D21 dekat pin coil K1; D22/D23 < 10 mm dari J_ESTOP.\n FW-SYNC: GPIO27 floating saat boot → R71 menjamin Q20 OFF → K1\n   OFF sampai firmware HIGH; E_STOP_SENSE dibaca dgn debounce\n   ≥ 10 ms + alarm mismatch GPIO27-vs-sense; tabel 9 kondisi =\n   basis TEST_PLAN rantai E-stop (S11 §57).\n CATATAN ERC: label RELAY_CTRL & E_STOP_SENSE kini ber-kontrapart\n   (dangling 7→5; sisa GPIO13/23/33/36/39 = J_EXP S7). Ground\n   katoda PC817 + bawah divider = DGND (domain referensi ADC\n   GPIO14 — DN-S6-02; equipotensial PGND via NT2 arsitektur §3.4,\n   penempatan S9; arus divider 43 µA); source Q20 + R71 + TVS =\n   PGND (domain daya, arus coil ~125 mA kembali ke star)."
+	(text "PENEMPATAN (S9): rantai E-stop di zona power dekat tepi board; loop\n   J_ESTOP pendek & jauh dari antenna ESP32; K1 kontak menjauh dari zona\n   analog; jalur PGND source Q20 langsung ke star; D21 dekat pin coil K1;\n   D22/D23 < 10 mm dari J_ESTOP; cluster sense Q21/R75/R76/R77/C75\n   dekat TP_ESTOP (sheet 11) — hindari jalur clock.\n FW-SYNC: GPIO27 floating saat boot → R78 pull-up menjamin LED PC817\n   MATI → Q20 OFF → K1 OFF sampai firmware menulis LOW (aktif-LOW);\n   E_STOP_SENSE = GPIO14 INPUT_PULLUP dibaca dgn debounce ≥ 10 ms;\n   alarm mismatch: GPIO27=LOW (command ON) + sense=LOW (relay hidup) —\n   jika command ON tapi sense HIGH持续 = e-stop/rail bermasalah; tabel 9\n   kondisi = basis TEST_PLAN rantai E-stop (S11 §57).\n CATATAN ERC: RELAY_CTRL & E_STOP_SENSE ber-kontrapart global (02/11).\n   Ground: R77/Q21.S/C75 = DGND (domain referensi ADC GPIO14 — DN-S6-02;\n   equipotensial PGND via NT2, arus divider 34 µA); source Q20 + R71 +\n   TVS = PGND (domain daya, arus coil ~125 mA kembali ke star)."
 		(exclude_from_sim no)
 		(at 225 205 0)
 		(effects
@@ -2236,7 +2652,7 @@
 			(justify left bottom)
 		)
 		(uuid "edd4248a-1a19-4744-9cd4-dff51c01e80d")	)
-	(text_box "09_EMERGENCY — rantai E-stop SAFETY-CRITICAL (S6, §57/§11.1 audit).\nDrive: GPIO27 (RELAY_CTRL) → R72 330R → OPT1 PC817 (katoda DGND;\n  HIGH=energized, 6,4 mA) → R70 100R → gate Q20 AO3400A; R71 100k\n  gate→PGND (default OFF saat floating).\nLoop daya: +5V → F2+FB50 (sheet 01) → +5V_RELAY → J_ESTOP.1 → loop\n  NC eksternal → J_ESTOP.2 = RELAY_RET → K1 coil → drain Q20 → PGND.\n  D21 SS14 flyback (K=RELAY_RET, A=drain); TVS D22/D23 SMAJ5.0A di\n  J_ESTOP.1/.2 ke PGND (transien field).\nSense: RELAY_RET → R75 47k → E_STOP_SENSE → R76 68k → DGND + C75\n  100nF → GPIO14 (2,96 V loop-OK / 0 V terbuka; DN-S6-02).\nKontak K1 COM+NO → J_RELAY (dry — aktuator kontaktor darurat).\nE-STOP MEMUTUS SISI SUPPLAI COIL — bukan sisi drain — JANGAN\n  DIPINDAH. Tabel kebenaran 9 kondisi §57 di sheet ini (WAJIB).\nGATE S6: 9 kondisi §57 → K1 de-energized; R71 default-OFF; flyback\n  hadir; sense 2,96 V/0 V (hitung ulang); rating K1 = item BOM S10."
+	(text_box "09_EMERGENCY — rantai E-stop SAFETY-CRITICAL (rev R1+R2, §57/§11.1).\nDrive AKTIF-LOW (R1 — kontrak firmware): +3V3 → R72 330R → OPT1 PC817\n  anoda; KATODA → RELAY_CTRL = GPIO27 (IO27 SINK 6,4 mA; LOW = ON);\n  R78 10k pull-up +3V3 → boot/reset/floating = LED OFF = K1 OFF.\n  Output opto: C=+5V → R70 100R → gate Q20 AO3400A; R71 100k gate→PGND.\nLoop daya: +5V → F2+FB50 (sheet 01) → +5V_RELAY → J_ESTOP.1 → loop NC\n  eksternal → J_ESTOP.2 = RELAY_RET → K1 coil → drain Q20 → PGND.\n  D21 SS14 flyback (K=RELAY_RET, A=drain); TVS D22/D23 SMAJ5.0A di\n  J_ESTOP.1/.2 ke PGND (transien field).\nSense INVERTING (R2 — kontrak GPIO14 INPUT_PULLUP): RELAY_RET → R75 47k\n  → R77 100k → DGND (divider 3,4 V) → gate Q21 BSS138; drain Q21 →\n  E_STOP_SENSE + R76 10k pull-up +3V3 + C75 100nF → GPIO14.\n  E-stop SEHAT → Q21 ON → sense 0 V (LOW). E-stop TERBUKA / rail relay\n  hilang / kabel putus → Q21 OFF → sense 3,3 V (HIGH = TRIP, fail-safe\n  INPUT_PULLUP). τ = 1 ms.\nKontak K1 COM+NO → J_RELAY (dry — aktuator kontaktor darurat).\nE-STOP MEMUTUS SISI SUPPLAI COIL — bukan sisi drain — JANGAN DIPINDAH.\nGATE S6: 9 kondisi §57 → K1 de-energized; R71+R78 default-OFF ganda;\n  flyback hadir; sense 0 V/3,3 V inverted; rating K1 = item BOM S10."
 		(exclude_from_sim no)
 		(at 20 20 0)
 		(size 190 46)
@@ -2621,117 +3037,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Device:R")
-		(at 170.18 100.33 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "674683be-946c-4353-a3cd-898bf260e74a")
-		(property "Reference" "R75"
-			(at 157.48 100.33 0)
-			(effects (font (size 1.27 1.27)) (justify right))
-		)
-		(property "Value" "47k 1%"
-			(at 182.88 100.33 0)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
-			(at 170.18 100.33 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Datasheet" "~"
-			(at 170.18 100.33 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-			(pin "1" (uuid "7a046f91-591a-45af-9af0-3fc0ea8eac94"))
-			(pin "2" (uuid "987f1591-a383-430d-a4b7-31a083f900f6"))
-		(instances
-			(project ""
-				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "R75")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:R")
-		(at 170.18 107.95 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "6b4a2c0a-d1c3-445b-a955-2770dc6a6442")
-		(property "Reference" "R76"
-			(at 157.48 107.95 0)
-			(effects (font (size 1.27 1.27)) (justify right))
-		)
-		(property "Value" "68k 1%"
-			(at 182.88 107.95 0)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
-			(at 170.18 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Datasheet" "~"
-			(at 170.18 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-			(pin "1" (uuid "39487c12-d64e-444e-9f73-82157ba9859e"))
-			(pin "2" (uuid "44bb86df-1dc8-430b-8440-fa8938bb8721"))
-		(instances
-			(project ""
-				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "R76")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C")
-		(at 162.56 107.95 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "853a3da2-6e88-4bf4-83a8-865a931d8f45")
-		(property "Reference" "C75"
-			(at 149.86 107.95 0)
-			(effects (font (size 1.27 1.27)) (justify right))
-		)
-		(property "Value" "100nF 25V X7R"
-			(at 175.26 107.95 0)
-			(effects (font (size 1.27 1.27)) (justify left))
-		)
-		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
-			(at 162.56 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Datasheet" "~"
-			(at 162.56 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-			(pin "1" (uuid "284953d2-7173-4aae-94a8-c1c826643855"))
-			(pin "2" (uuid "7757efef-f14c-4923-864a-b365245bf559"))
-		(instances
-			(project ""
-				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "C75")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Connector:Screw_Terminal_01x02")
 		(at 243.84 101.6 0)
 		(unit 1)
@@ -2763,34 +3068,6 @@
 			(project ""
 				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
 					(reference "J_RELAY")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "plts-custom:DGND")
-		(at 81.28 111.76 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "0943f218-c474-4e6b-b000-4a688dbb72de")
-		(property "Reference" "#PWR0901"
-			(at 81.28 105.41 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Value" "DGND"
-			(at 81.28 107.95 0)
-			(effects (font (size 1.27 1.27)))
-		)
-		(pin "1" (uuid "e5282e9c-e28c-4dd6-81ff-34d6e8401610"))
-		(instances
-			(project ""
-				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "#PWR0901")
 					(unit 1)
 				)
 			)
@@ -2965,28 +3242,327 @@
 		)
 	)
 	(symbol
-		(lib_id "plts-custom:DGND")
-		(at 170.18 114.3 0)
+		(lib_id "Device:R")
+		(at 55.88 114.3 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
 		(fields_autoplaced yes)
-		(uuid "c6f4563a-307d-4d0a-b030-9c75f1822403")
-		(property "Reference" "#PWR0908"
-			(at 170.18 107.95 0)
-			(effects (font (size 1.27 1.27)) (hide yes))
-		)
-		(property "Value" "DGND"
-			(at 170.18 110.49 0)
+		(uuid "9d10079c-a082-4447-885c-863d0322aa17")
+		(property "Reference" "R78"
+			(at 55.88 114.3 0)
 			(effects (font (size 1.27 1.27)))
 		)
-		(pin "1" (uuid "c69b6b2b-faba-430a-a54f-0f747b0cc16f"))
+		(property "Value" "10k 1%"
+			(at 55.88 114.3 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 55.88 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 55.88 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Pull-up fail-safe RELAY_CTRL aktif-LOW (R1)"
+			(at 55.88 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "94edae89-1242-4cfa-981d-e9ff3bfa70a1"))
+			(pin "2" (uuid "188d3d45-1a7b-4d6a-b702-32cb8f1e2a8e"))
 		(instances
 			(project ""
 				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "#PWR0908")
+					(reference "R78")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 64.77 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "54062a2d-188e-4c74-b4f5-8416d9153b8c")
+		(property "Reference" "#PWR0910"
+			(at 64.77 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 64.77 93.98 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 64.77 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 64.77 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 64.77 93.98 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "8e53c16e-8c3d-4fde-b662-5bda6477cec3"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "#PWR0910")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 55.88 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "81fe79c9-5b3f-4caf-87bc-18fa10a8083c")
+		(property "Reference" "#PWR0911"
+			(at 55.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 55.88 118.11 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 55.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 55.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 55.88 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "304c1ce3-6ee7-4b4f-845f-1e38a5705d9f"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "#PWR0911")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 259.08 100.33 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "ae56aa51-a87b-4b57-80fa-4fab3563bb89")
+		(property "Reference" "R75"
+			(at 259.08 100.33 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "47k 1%"
+			(at 259.08 100.33 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 259.08 100.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 259.08 100.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Divider top e-stop sense (R2)"
+			(at 259.08 100.33 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "808e6bee-2c5b-45fa-8b15-b586229945b8"))
+			(pin "2" (uuid "34bd5b3b-928c-49f0-ab2c-0c6bebf5983b"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "R75")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 259.08 111.76 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "258de455-d289-4602-bb3c-26811aa065b3")
+		(property "Reference" "R77"
+			(at 259.08 111.76 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100k 1%"
+			(at 259.08 111.76 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 259.08 111.76 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 259.08 111.76 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Divider bottom e-stop sense (R2)"
+			(at 259.08 111.76 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "929b077d-1634-4957-88de-4187414d4c24"))
+			(pin "2" (uuid "65cfc717-bb26-4007-97fd-7e193db63d49"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "R77")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 269.24 97.79 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "b3d36c6c-2f70-42a8-9e3f-85a2d8a96291")
+		(property "Reference" "R76"
+			(at 269.24 97.79 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "10k 1%"
+			(at 269.24 97.79 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 269.24 97.79 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 269.24 97.79 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Pull-up drain Q1 inverting sense (R2)"
+			(at 269.24 97.79 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "00d15901-c455-473d-8108-3faf8147450b"))
+			(pin "2" (uuid "f5caba84-0ead-49a9-85c8-9375794b1f5c"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "R76")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 274.32 107.95 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "024f0f54-0024-484b-9286-b574c6e221d0")
+		(property "Reference" "C75"
+			(at 274.32 107.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "100nF 25V X7R"
+			(at 274.32 107.95 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 274.32 107.95 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 274.32 107.95 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Filter sense 1ms"
+			(at 274.32 107.95 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "ac7ab708-7968-4622-a3b5-7530150888be"))
+			(pin "2" (uuid "6d50a2c2-0c73-40bd-84b9-94bf2e1e5091"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "C75")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Transistor_FET:BSS138")
+		(at 266.7 106.68 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "d4436ae8-a0e1-4dbf-8019-6fe31c138c20")
+		(property "Reference" "Q21"
+			(at 266.7 106.68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Value" "BSS138"
+			(at 266.7 106.68 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23"
+			(at 266.7 106.68 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 266.7 106.68 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" "Inverter sense aktif-HIGH alarm (R2)"
+			(at 266.7 106.68 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "e199759d-b4a7-439d-be16-0dfac4329b18"))
+			(pin "2" (uuid "5c4095a9-804d-43dd-bdd9-66341b5c806a"))
+			(pin "3" (uuid "8fbc506a-8468-444f-af58-7c645396e75a"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "Q21")
 					(unit 1)
 				)
 			)
@@ -2994,27 +3570,159 @@
 	)
 	(symbol
 		(lib_id "plts-custom:DGND")
-		(at 162.56 114.3 0)
+		(at 259.08 118.11 0)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(dnp no)
 		(fields_autoplaced yes)
-		(uuid "b4de866f-f121-40d8-aaeb-22b783d1763d")
-		(property "Reference" "#PWR0909"
-			(at 162.56 107.95 0)
+		(uuid "be699a9c-c55d-4c34-b84d-9ba6b4d4b5f3")
+		(property "Reference" "#PWR0912"
+			(at 259.08 118.11 0)
 			(effects (font (size 1.27 1.27)) (hide yes))
 		)
 		(property "Value" "DGND"
-			(at 162.56 110.49 0)
+			(at 259.08 118.11 0)
 			(effects (font (size 1.27 1.27)))
 		)
-		(pin "1" (uuid "80db6318-cf06-4881-9f7e-36b3d7ae6302"))
+		(property "Footprint" ""
+			(at 259.08 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 259.08 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 259.08 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "c49aeb76-1a1d-48e2-a6c3-27e20aa4a19a"))
 		(instances
 			(project ""
 				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
-					(reference "#PWR0909")
+					(reference "#PWR0912")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:DGND")
+		(at 269.24 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "55cbc024-c3ce-4272-a4b0-bd7bcf14bc2e")
+		(property "Reference" "#PWR0913"
+			(at 269.24 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "DGND"
+			(at 269.24 118.11 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 269.24 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 269.24 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 269.24 118.11 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "12809105-bc98-4b0d-9707-f32a5e4b2472"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "#PWR0913")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "plts-custom:DGND")
+		(at 274.32 114.3 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "ac785a5d-aaf2-4eff-83bf-db8e79613e62")
+		(property "Reference" "#PWR0914"
+			(at 274.32 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "DGND"
+			(at 274.32 114.3 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 274.32 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 274.32 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 274.32 114.3 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "064332db-c8d2-41c0-80cb-231eb1b59ac5"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "#PWR0914")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3V3")
+		(at 269.24 91.44 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "dd161014-4897-461f-a35d-2606cf41c169")
+		(property "Reference" "#PWR0915"
+			(at 269.24 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Value" "+3V3"
+			(at 269.24 91.44 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(property "Footprint" ""
+			(at 269.24 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Datasheet" "~"
+			(at 269.24 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+		(property "Description" ""
+			(at 269.24 91.44 0)
+			(effects (font (size 1.27 1.27)) (hide yes))
+		)
+			(pin "1" (uuid "6f218575-412d-44c9-932e-0c9973a3896e"))
+		(instances
+			(project ""
+				(path "/00000000-0000-4000-8000-000000000001/ccbe9716-7845-43c4-8422-38342314f3ba"
+					(reference "#PWR0915")
 					(unit 1)
 				)
 			)

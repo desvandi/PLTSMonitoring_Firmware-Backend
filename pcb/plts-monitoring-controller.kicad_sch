@@ -9,7 +9,7 @@
 		(date "2026-09-03")
 		(rev "1.0")
 		(company "PLTS Monitoring Project")
-		(comment 1 "Hierarki 12 sheet §45 — S0 skeleton; konten per sheet diisi tahap S1-S11")
+		(comment 1 "Hierarki 13 sheet §45 + S12 relay-exp — S0 skeleton; konten per sheet diisi tahap S1-S11")
 		(comment 2 "Sumber: Brief v1.1 + Audit Report v1.0 + Task Spec v1.0")
 	)
 	(lib_symbols)
@@ -260,6 +260,28 @@
 			(project "plts-monitoring-controller"
 				(path "/00000000-0000-4000-8000-000000000001"
 					(page "12")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 400 330)
+		(size 80 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 0 0 0 0.0000))
+		(uuid "a7e2f9c1-3b84-4d16-9f2a-c0d5e81b12a7")
+		(property "Sheetname" "12_RELAY_EXP"
+			(at 400 328.73 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "12_RELAY_EXP.kicad_sch"
+			(at 400 361.27 0)
+			(effects (font (size 1.27 1.27)) (justify left top))
+		)
+		(instances
+			(project "plts-monitoring-controller"
+				(path "/00000000-0000-4000-8000-000000000001"
+					(page "13")
 				)
 			)
 		)
