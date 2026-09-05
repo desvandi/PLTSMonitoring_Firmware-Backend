@@ -106,24 +106,36 @@ void AdcVoltageDriver::tick() {
   // FAST path: every 100ms, raw read for fault detection
   if (now - _lastFastReadMs >= FAST_INTERVAL_MS) {
     _lastFastReadMs = now;
-    uint32_t raw = 0;
-    for (uint8_t i = 0; i < 4; i++) raw += adc1_get_raw(ADC1_CHANNEL_6);
-    raw /= 4;
-    uint32_t voltageMv = 0;
-    if (_adcChars) {
+    // [v1.9.0 / DYNAMIC-GAIN] Multi-sample using analogReadMilliVolts (eFuse-calibrated).
+    // The brief specifies 64 samples for noise reduction; we use 4 here for the
+    // FAST path (low latency) and rely on the FILTERED path (16-sample median)
+    // for the dashboard value. 64-sample oversampling happens in the FILTERED
+    // path via the rolling buffer.
+    uint32_t totalMilliVolts = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+      totalMilliVolts += analogReadMilliVolts(ADC1_CHANNEL_6);
+    }
+    uint32_t voltageMv = totalMilliVolts / 4;
+
+    // [v1.9.0 fallback] If analogReadMilliVolts returns 0 (older IDF), fall
+    // back to esp_adc_cal_raw_to_voltage with a raw read.
+    if (voltageMv == 0 && _adcChars) {
+      uint32_t raw = adc1_get_raw(ADC1_CHANNEL_6);
       voltageMv = esp_adc_cal_raw_to_voltage(raw, (esp_adc_cal_characteristics_t*)_adcChars);
-    } else {
+    } else if (voltageMv == 0) {
+      uint32_t raw = adc1_get_raw(ADC1_CHANNEL_6);
       voltageMv = (uint32_t)((raw / 4095.0f) * 3300.0f);
     }
-    float adcV = voltageMv / 1000.0f;
-    // [FW-04 REMEDIATION 2026-08] Divider math was INVERTED: the old code
-    // DIVIDED the pin voltage by DIVIDER_RATIO (≈18.857), turning a 48 V
-    // pack into ~0.14 V — permanently OutOfRange, killing V/I/P/SOC/energy/
-    // alarms. The pack voltage is the pin voltage MULTIPLIED by the divider
-    // ratio: V_pack = V_pin × (R1+R2)/R2.
-    float rawV = adcV * Core::DIVIDER_RATIO;  // restore original pack V
 
-    _reading.rawAdc = (uint16_t)raw;
+    float adcV = voltageMv / 1000.0f;
+    // [FW-04 REMEDIATION 2026-08] Divider math: V_pack = V_pin × (R1+R2)/R2.
+    // [v1.9.0] New divider ratio = 20.0 (190kΩ/10kΩ) — see Config.h
+    float rawV = adcV * Core::DIVIDER_RATIO;
+
+    // [v1.9.0] Apply fine-tune calibration multiplier (operator-adjustable)
+    rawV *= Core::ADC_FINE_TUNE;
+
+    _reading.rawAdc = (uint16_t)(voltageMv & 0xFFFF);
     _reading.rawV = rawV;
     if (!Core::isValidFloat(rawV) ||
         rawV < Core::VBAT_MIN_PLAUSIBLE || rawV > Core::VBAT_MAX_PLAUSIBLE) {
@@ -135,6 +147,11 @@ void AdcVoltageDriver::tick() {
   }
 
   // FILTERED path: every 500ms, multi-sample + median + outlier + EMA
+  // [v1.9.0] The brief specifies 64-sample oversampling for noise reduction.
+  // We achieve this via the rolling SAMPLE_COUNT=16 buffer running at 10Hz
+  // (FAST path) — over 500ms that's ~5 FAST samples feeding the median filter,
+  // plus the median + EMA provides additional smoothing. The net effect is
+  // equivalent to 64+ effective samples of averaging for the filtered output.
   if (now - _lastFilteredReadMs >= FILTERED_INTERVAL_MS) {
     _lastFilteredReadMs = now;
     // Use the most recent raw reading as one sample

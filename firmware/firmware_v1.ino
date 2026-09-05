@@ -941,6 +941,10 @@ void energyTask(void* pv) {
         latestStatus.battery.current = snap.batteryCurrent;
         latestStatus.battery.power = snap.batteryPower;
         latestStatus.battery.direction = snap.direction;
+        // [v1.9.0 / DYNAMIC-GAIN] Expose INA219 PGA mode for telemetry visibility
+        latestStatus.battery.pgaMode = Drivers::ina219Battery.isAvailable()
+            ? Drivers::ina219Battery.getPgaModeStr()
+            : nullptr;
         // SOC snapshot — [P1-011/P1-012] NaN when UNKNOWN; provenance-marked.
         if (bmsAuthoritative) {
           // BMS SOC: measured by the battery's own gauge. Quality is Valid

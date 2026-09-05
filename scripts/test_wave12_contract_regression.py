@@ -316,9 +316,13 @@ check("X9b", "Honesty gate: meter power stored ONLY when connected=true",
 # --- X10: columns + appendRow + LATEST meter block ---------------------------
 hdr_m = re.search(r"const TELEMETRY_HEADER = \[(.*?)\n\];", gas_src, re.S)
 hdr_cols = re.findall(r"'([a-z0-9_]+)'", hdr_m.group(1))
+# [v1.9.0] TELEMETRY_HEADER now has 40 columns: the original 39 (indices 0..38
+# ending at meter_connected) + ina219_pga_mode at index 39. The X10a check
+# verifies the meter trio is at indices 36..38 — the total column count is
+# flexible (new columns are append-only).
 check("X10a", "TELEMETRY_HEADER carries p_ac_meter/meter_v/meter_connected "
       "at indices 36..38",
-      len(hdr_cols) == 39 and hdr_cols[36:39] == ["p_ac_meter", "meter_v", "meter_connected"],
+      len(hdr_cols) >= 39 and hdr_cols[36:39] == ["p_ac_meter", "meter_v", "meter_connected"],
       f"cols={len(hdr_cols)} tail={hdr_cols[36:]}")
 append_m = re.search(r"norm\.iAcGen, norm\.emgState, norm\.emgReason, "
     r"norm\.emgEstop, norm\.emgTrips,\s*\n\s*// v1\.7\.0 \[W12-2\][^\n]*\n"

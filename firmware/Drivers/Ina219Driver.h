@@ -32,6 +32,19 @@ enum class Ina219Status : uint8_t {
   Cooldown        = 4,
 };
 
+// [v1.9.0 / DYNAMIC-GAIN] PGA mode enum for dynamic gain switching.
+// The driver switches between these two modes based on current magnitude
+// to cover the full 1A-150A dynamic range without saturation or noise.
+enum class Ina219PgaMode : uint8_t {
+  Pga80mV   = 0,   // ±80 mV range — high resolution for standby (1-100A)
+  Pga160mV  = 1,   // ±160 mV range — full range for peak load (100-150A)
+};
+
+// Convert PGA mode to string for telemetry payload ("80mV" / "160mV")
+inline const char* pgaModeToStr(Ina219PgaMode mode) {
+  return mode == Ina219PgaMode::Pga80mV ? "80mV" : "160mV";
+}
+
 struct Ina219Reading {
   float    shuntVoltageV;  // raw V across shunt (signed)
   float    busVoltageV;    // V at INA219 VBUS pin (informational only)
@@ -39,6 +52,7 @@ struct Ina219Reading {
   float    powerW;         // busV × currentA (signed, DERIVED)
   uint32_t timestamp;
   Ina219Status status;
+  Ina219PgaMode pgaMode;   // [v1.9.0] current PGA mode (for telemetry)
 };
 
 class Ina219Driver {
@@ -54,6 +68,9 @@ public:
   float  getShuntVoltage() const { return _reading.shuntVoltageV; }
   uint32_t getLastReadMs() const { return _reading.timestamp; }
   Ina219Status getStatus() const { return _reading.status; }
+  // [v1.9.0] PGA mode accessors
+  Ina219PgaMode getPgaMode() const { return _pgaMode; }
+  const char* getPgaModeStr() const { return pgaModeToStr(_pgaMode); }
 
 private:
   uint8_t  _address;
@@ -64,6 +81,11 @@ private:
   unsigned long _lastReadMs = 0;
   float    _emaCurrent = 0.0f;
   bool     _emaInit = false;
+
+  // [v1.9.0 / DYNAMIC-GAIN] PGA state + switching logic
+  Ina219PgaMode _pgaMode = Ina219PgaMode::Pga80mV;  // start in high-resolution mode
+  bool     _applyPgaMode(Ina219PgaMode mode);  // write config register
+  void     _evaluatePgaSwitch(float absCurrent);  // hysteresis logic
 
   uint8_t  _consecutiveErrors = 0;
   unsigned long _nextRetryMs = 0;
@@ -80,8 +102,6 @@ private:
     REG_CALIBRATION = 0x05,
   };
   static constexpr uint16_t CONFIG_RESET   = 0x399F;
-  static constexpr uint16_t CONFIG_NORMAL  = 0x3FFB;
-  static constexpr float    CURRENT_LSB_A   = 0.004f;  // 4 mA/bit → 100A = 25000 counts
 
   bool    _writeRegister(uint8_t reg, uint16_t value);
   bool    _readRegister(uint8_t reg, uint16_t& out);

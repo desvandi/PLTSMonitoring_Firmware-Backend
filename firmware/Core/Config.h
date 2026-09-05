@@ -198,16 +198,60 @@ static constexpr float    INA219_SIGN_CORRECTION = -1.0f;
 // Idle deadband (brief §5) — ±0.5 A configurable at runtime via cfgIdleCurrentThreshold
 static constexpr float    IDLE_CURRENT_THRESHOLD_A = 0.5f;
 
-// Battery voltage divider (brief §7)
-// R1 = 100kΩ ±5% (high side), R2 = 5.6kΩ ±5% (low side), series 2.2kΩ
-static constexpr float DIVIDER_R1       = 100000.0f;
-static constexpr float DIVIDER_R2       = 5600.0f;
-static constexpr float ADC_SERIES_R     = 2200.0f;
+// [v1.9.0 / DYNAMIC-GAIN] INA219 PGA dynamic gain switching
+// -----------------------------------------------------------------------------
+// The PLTS bus spans 1 A (standby) to 150 A (peak load). A single PGA range
+// cannot cover both: ±80 mV saturates at ~106 A (150 A × 0.75 mΩ = 112.5 mV),
+// ±160 mV has poor resolution at 1–2 A. Solution: switch PGA on-the-fly.
+//
+// Two PGA modes:
+//   PGA_80MV  — ±80 mV range (gain /8,  10 µV/bit). High resolution for standby.
+//               Max measurable: 80 mV / 0.75 mΩ = 106.7 A
+//   PGA_160MV — ±160 mV range (gain /4, 10 µV/bit). Full range for peak load.
+//               Max measurable: 160 mV / 0.75 mΩ = 213.3 A (shunt saturates first)
+//
+// Hysteresis thresholds (prevent chattering at the boundary):
+//   Switch UP   (80mV → 160mV) when |I| >= 100 A
+//   Switch DOWN (160mV → 80mV) when |I| < 90 A
+// The 10 A gap prevents rapid oscillation when load hovers near the threshold.
+static constexpr float    INA219_PGA_SWITCH_UP_A    = 100.0f;  // switch to 160mV
+static constexpr float    INA219_PGA_SWITCH_DOWN_A  = 90.0f;   // switch back to 80mV
+// Max current the shunt can measure in each PGA mode (for saturation detection)
+static constexpr float    INA219_PGA_80MV_MAX_A     = 106.0f;  // 80mV / 0.75mΩ
+static constexpr float    INA219_PGA_160MV_MAX_A    = 150.0f;  // shunt physical limit (75mV@100A → 112.5mV@150A)
+// INA219 config register values for each PGA mode
+// Bits 13-12 (PGA): 00 = ±320mV, 01 = ±160mV, 10 = ±80mV, 11 = ±40mV
+// Bits 11-7  (BADC): 1000 = 12-bit, 128 samples (oversampling for noise reduction)
+// Bits 6-2   (SADC): 1000 = 12-bit, 128 samples
+// Bits 1-0   (mode): 11 = shunt+bus continuous
+// 0x3FFB = 32V FSR, ±320mV, 16-sample avg (legacy default — kept for backwards compat)
+// 0x3BFF = 32V FSR, ±80mV,  12-bit/128-sample (standby mode — high resolution)
+// 0x39FF = 32V FSR, ±160mV, 12-bit/128-sample (peak mode — full range)
+static constexpr uint16_t INA219_CONFIG_PGA_80MV   = 0x3BFF;
+static constexpr uint16_t INA219_CONFIG_PGA_160MV  = 0x39FF;
+static constexpr uint16_t INA219_CONFIG_LEGACY     = 0x3FFB;   // ±320mV, 16-sample (old default)
+
+// Battery voltage divider (brief §7 + v1.9.0 update)
+// [v1.9.0 / DYNAMIC-GAIN] New divider for high-side battery measurement:
+//   R1 = 190 kΩ (high side, battery+ to ADC pin)
+//   R2 = 10 kΩ  (low side, ADC pin to GND)
+//   Ratio = (R1+R2)/R2 = 200/10 = 20.0
+//   At Vbat=57.5V → Vpin = 2.875V (safe for ESP32 ADC with 11dB attenuation)
+//   0.1 µF ceramic cap parallel to R2 for high-freq noise filtering
+// Previous: R1=100kΩ, R2=5.6kΩ, ratio ≈18.857 (legacy, kept as fallback)
+static constexpr float DIVIDER_R1       = 190000.0f;  // 190 kΩ (was 100 kΩ)
+static constexpr float DIVIDER_R2       = 10000.0f;   // 10 kΩ  (was 5.6 kΩ)
+static constexpr float ADC_SERIES_R     = 0.0f;       // no series resistor (was 2.2 kΩ)
 static constexpr float ADC_VREF          = 3.3f;
 static constexpr uint16_t ADC_RESOLUTION = 4095;     // 12-bit
 static constexpr uint8_t  ADC_ATTENUATION_DB = 11;    // 11 dB → ~3.3V full-scale
 // Computed divider ratio (R1 + R2) / R2 — used by AdcVoltageDriver
-static constexpr float DIVIDER_RATIO    = (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;  // ≈ 18.857
+static constexpr float DIVIDER_RATIO    = (DIVIDER_R1 + DIVIDER_R2) / DIVIDER_R2;  // = 20.0
+// Fine-tune calibration multiplier (operator adjusts after multimeter comparison)
+// Example: if true=50.0V but reads 49.8V → set to (50.0/49.8) = 1.004016
+static constexpr float ADC_FINE_TUNE    = 1.000000f;
+// Number of ADC samples to average per reading (noise reduction for standby V)
+static constexpr uint8_t  ADC_NUM_SAMPLES = 64;
 // Plausibility bounds for battery voltage (brief §9 — software must detect implausible)
 static constexpr float VBAT_MIN_PLAUSIBLE = 30.0f;   // below this = OUT_OF_RANGE
 static constexpr float VBAT_MAX_PLAUSIBLE = 60.0f;   // above this = OUT_OF_RANGE
@@ -215,7 +259,10 @@ static constexpr float VBAT_MAX_PLAUSIBLE = 60.0f;   // above this = OUT_OF_RANG
 static constexpr float ADC_FILTER_ALPHA   = 0.2f;
 
 // Current processing
-static constexpr float CURRENT_SPIKE_REJECT_A = 120.0f;  // reject |I| > this (shunt rating)
+// [v1.9.0 / DYNAMIC-GAIN] Raised from 120A to 160A to accommodate peak load
+// up to 150A (PGA 160mV mode supports up to 213A theoretically, but the shunt
+// physical rating is 100A @ 75mV continuous, 150A peak short-duration).
+static constexpr float CURRENT_SPIKE_REJECT_A = 160.0f;  // reject |I| > this (was 120A)
 static constexpr float CURRENT_SMOOTH_ALPHA    = 0.3f;     // EMA smoothing
 
 // ACS712 (brief §26-27)

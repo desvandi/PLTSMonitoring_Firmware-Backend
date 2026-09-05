@@ -80,6 +80,11 @@ inline String serialize(const Core::SystemStatus& s) {
 
   bat["direction"] = Core::directionToStr(s.battery.direction);
 
+  // [v1.9.0 / DYNAMIC-GAIN] INA219 PGA mode — telemetry visibility for the
+  // dynamic gain switching. "80mV" = high-resolution standby, "160mV" = peak load.
+  // Absent in <= v1.8.x payloads — consumers treat missing as UNKNOWN/legacy.
+  bat["pgaMode"] = s.battery.pgaMode ? s.battery.pgaMode : "";
+
   JsonObject soc = bat.createNestedObject("soc");
   soc["value"]    = s.battery.soc.value;
   soc["quality"]  = Core::qualityToStr(s.battery.soc.quality);
