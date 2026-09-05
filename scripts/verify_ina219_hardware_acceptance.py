@@ -59,10 +59,24 @@ REQUIRED_SIGNOFFS = [
     "releaseManager",
 ]
 
-# INA219 config register constants — verified against datasheet
-# (must match firmware/Core/Config.h)
-EXPECTED_CONFIG_80MV  = 0x152B
-EXPECTED_CONFIG_160MV = 0x252B
+# INA219 config register constants — CORRECTED per TI datasheet SBOS448G (v1.9.2)
+# These are the CANONICAL correct values. The v1.9.1 values (0x152B/0x252B) were
+# wrong — they used an incorrect bit-field layout that caused the register to
+# actually decode to ±160mV/±40mV with 10-bit SADC and triggered (one-shot) mode.
+# Verified via scripts/test_ina219_config_registers.py (canonical cross-check
+# with datasheet reset value 0x399F confirms the bit-field layout is correct).
+EXPECTED_CONFIG_80MV  = 0x0FFF   # ±80mV,  12b/128s, shunt+bus cont, 16V FSR
+EXPECTED_CONFIG_160MV = 0x17FF   # ±160mV, 12b/128s, shunt+bus cont, 16V FSR
+
+# Known buggy values — if the readback matches any of these, BLOCK immediately
+# with a clear message that the firmware is running old/wrong constants.
+KNOWN_BUGGY_VALUES = {
+    0x152B: "v1.9.1 wrong bit-field layout (actually ±160mV/10-bit-SADC/triggered)",
+    0x252B: "v1.9.1 wrong bit-field layout (actually ±40mV/32V/10-bit-SADC/triggered)",
+    0x3BFF: "v1.9.0 inverted PGA mapping (actually ±320mV)",
+    0x39FF: "v1.9.0 inverted PGA mapping (actually ±320mV)",
+    0x3FFB: "v1.9.0 legacy (actually ±320mV + triggered mode)",
+}
 
 
 def run() -> int:
@@ -193,19 +207,23 @@ def run() -> int:
         try:
             readback_val = int(readback_hex, 16)
             if readback_val == EXPECTED_CONFIG_80MV:
-                print(f"[PASS] configReadbackHex: 0x{readback_hex} == expected 0x{EXPECTED_CONFIG_80MV:04X} (±80mV, PGA=01)")
+                print(f"[PASS] configReadbackHex: 0x{readback_hex} == expected 0x{EXPECTED_CONFIG_80MV:04X} (±80mV, 12b/128s, continuous)")
             elif readback_val == EXPECTED_CONFIG_160MV:
-                print(f"[PASS] configReadbackHex: 0x{readback_hex} == expected 0x{EXPECTED_CONFIG_160MV:04X} (±160mV, PGA=10)")
-            elif readback_val == 0x3BFF or readback_val == 0x39FF or readback_val == 0x3FFB:
+                print(f"[PASS] configReadbackHex: 0x{readback_hex} == expected 0x{EXPECTED_CONFIG_160MV:04X} (±160mV, 12b/128s, continuous)")
+            elif readback_val in KNOWN_BUGGY_VALUES:
+                bug_reason = KNOWN_BUGGY_VALUES[readback_val]
                 blockers.append(
-                    f"configReadbackHex 0x{readback_hex} is a KNOWN BUGGY value (v1.9.0 inverted PGA mapping). "
-                    f"The firmware is still running the old buggy constants. Reflash with v1.9.1+."
+                    f"configReadbackHex 0x{readback_hex} is a KNOWN BUGGY value ({bug_reason}). "
+                    f"The firmware is still running old/wrong constants. Reflash with v1.9.2+ "
+                    f"(correct values: 0x{EXPECTED_CONFIG_80MV:04X} for ±80mV, 0x{EXPECTED_CONFIG_160MV:04X} for ±160mV)."
                 )
-                print(f"[FAIL] configReadbackHex: 0x{readback_hex} is a BUGGY v1.9.0 value!")
+                print(f"[FAIL] configReadbackHex: 0x{readback_hex} is a KNOWN BUGGY value!")
+                print(f"       Reason: {bug_reason}")
             else:
                 blockers.append(
                     f"configReadbackHex 0x{readback_hex} does not match any expected value "
-                    f"(0x{EXPECTED_CONFIG_80MV:04X} for ±80mV or 0x{EXPECTED_CONFIG_160MV:04X} for ±160mV)"
+                    f"(0x{EXPECTED_CONFIG_80MV:04X} for ±80mV or 0x{EXPECTED_CONFIG_160MV:04X} for ±160mV) "
+                    f"and is not a known buggy value. Unknown register configuration."
                 )
                 print(f"[FAIL] configReadbackHex: 0x{readback_hex} is unexpected")
         except ValueError:
@@ -261,9 +279,76 @@ def run() -> int:
         else:
             print(f"[PASS] signoff-{signoff_field}: '{signoff_val}'")
 
-    # --- 12. Measurement accuracy spot-checks (CRITICAL — these prove measurement correctness) ---
+    # --- 12. Measurement accuracy spot-checks (CRITICAL — P0-B: MANDATORY, not optional) ---
+    # [v1.9.2 / P0-B] These fields are MANDATORY. Missing → BLOCK (not WARN).
+    # The v1.9.1 verifier allowed empty measurement fields to pass with a warning,
+    # creating a false-green path where checks=all PASS + verdict=PASS + signoffs
+    # complete but NO actual measurement evidence existed. This is unacceptable
+    # for measurement certification — the auditor correctly identified that
+    # "only Criteria 2, 6, and 10 can prove measurement correctness" and these
+    # are NOT optional.
     obs = hw.get("observed", {})
-    # Low current: |PWA - ref| should be <= 0.5A
+
+    # Define mandatory measurement fields with their validators
+    MANDATORY_MEASUREMENTS = [
+        # (field_name, display_name, tolerance_check_fn)
+        ("lowCurrentPwa", "lowCurrentPwa (PWA reading at 1.5A)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("lowCurrentRef", "lowCurrentRef (reference meter at 1.5A)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("midCurrentPwa", "midCurrentPwa (PWA reading at 50A)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("midCurrentRef", "midCurrentRef (reference meter at 50A)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("peakCurrent150Pwa", "peakCurrent150Pwa (PWA reading at 150A)",
+         lambda v: v is not None and isinstance(v, (int, float)) and v >= 140),
+        ("peakCurrent150Ref", "peakCurrent150Ref (reference meter at 150A)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("voltagePwa", "voltagePwa (PWA battery voltage)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("voltageRef", "voltageRef (reference meter voltage)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("voltageDelta", "voltageDelta (|PWA - ref|)",
+         lambda v: v is not None and isinstance(v, (int, float)) and v <= 0.5),
+        ("powerPwa", "powerPwa (PWA power reading)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("powerExpected", "powerExpected (V×I calculated)",
+         lambda v: v is not None and isinstance(v, (int, float))),
+        ("powerDeltaPct", "powerDeltaPct (|PWA - expected| / expected × 100)",
+         lambda v: v is not None and isinstance(v, (int, float)) and v <= 5.0),
+        ("hysteresisChatterCount", "hysteresisChatterCount (PGA switches in 30s at 95A)",
+         lambda v: v is not None and isinstance(v, int) and v <= 2),
+        ("transitionUpObserved", "transitionUpObserved (PGA UP at 100A)",
+         lambda v: v is True),
+        ("transitionDownObserved", "transitionDownObserved (PGA DOWN at 90A)",
+         lambda v: v is True),
+        ("dischargeSignCorrect", "dischargeSignCorrect (discharge = negative)",
+         lambda v: v is True),
+        ("telemetryPgaModeMatchesHardware", "telemetryPgaModeMatchesHardware",
+         lambda v: v is True),
+    ]
+
+    print()
+    print("--- MANDATORY measurement evidence (P0-B: missing = BLOCK) ---")
+    for field_name, display_name, validator in MANDATORY_MEASUREMENTS:
+        val = obs.get(field_name)
+        if val is None:
+            blockers.append(
+                f"MANDATORY measurement field '{field_name}' is MISSING. "
+                f"Measurement evidence is NOT optional (P0-B). "
+                f"Record the {display_name} in the evidence JSON."
+            )
+            print(f"[FAIL] {field_name}: MISSING (mandatory — BLOCK)")
+        elif not validator(val):
+            blockers.append(
+                f"MANDATORY measurement field '{field_name}' = {val} FAILED validation. "
+                f"Expected: {display_name}"
+            )
+            print(f"[FAIL] {field_name}: {val} (validation failed)")
+        else:
+            print(f"[PASS] {field_name}: {val}")
+
+    # Additional accuracy cross-checks (delta calculations)
     low_pwa = obs.get("lowCurrentPwa")
     low_ref = obs.get("lowCurrentRef")
     if low_pwa is not None and low_ref is not None:
@@ -273,9 +358,16 @@ def run() -> int:
             print(f"[FAIL] lowCurrent-accuracy: delta={delta:.2f}A > 0.5A")
         else:
             print(f"[PASS] lowCurrent-accuracy: delta={delta:.2f}A ≤ 0.5A")
-    else:
-        warnings.append("lowCurrent values not recorded — cannot verify accuracy")
-        print(f"[WARN] lowCurrent-accuracy: values not recorded")
+
+    mid_pwa = obs.get("midCurrentPwa")
+    mid_ref = obs.get("midCurrentRef")
+    if mid_pwa is not None and mid_ref is not None:
+        delta = abs(mid_pwa - mid_ref)
+        if delta > 1.0:
+            blockers.append(f"midCurrent accuracy FAILED: |PWA({mid_pwa}) - ref({mid_ref})| = {delta:.2f}A > 1.0A tolerance")
+            print(f"[FAIL] midCurrent-accuracy: delta={delta:.2f}A > 1.0A")
+        else:
+            print(f"[PASS] midCurrent-accuracy: delta={delta:.2f}A ≤ 1.0A")
 
     # Peak current 150A: must NOT cap at ~106A (that would indicate ±80mV mode is still active)
     peak150 = obs.get("peakCurrent150Pwa")
@@ -283,14 +375,14 @@ def run() -> int:
         if peak150 < 140:
             blockers.append(
                 f"peakCurrent150Pwa={peak150}A — reading caps below 150A. "
-                f"If near 106A, the PGA switch to ±160mV is NOT working (v1.9.0 bug symptom). "
+                f"If near 106A, the PGA switch to ±160mV is NOT working (v1.9.0/v1.9.1 bug symptom). "
                 f"Verify criterion 5 (PGA UP transition) actually occurred."
             )
             print(f"[FAIL] peakCurrent150: {peak150}A (capped — PGA switch may not be working)")
         else:
             print(f"[PASS] peakCurrent150: {peak150}A (no saturation — ±160mV mode active)")
 
-    # Voltage accuracy: |PWA - ref| should be <= 0.5V
+    # Voltage accuracy
     v_pwa = obs.get("voltagePwa")
     v_ref = obs.get("voltageRef")
     if v_pwa is not None and v_ref is not None:
@@ -300,9 +392,6 @@ def run() -> int:
             print(f"[FAIL] voltage-accuracy: delta={v_delta:.2f}V > 0.5V")
         else:
             print(f"[PASS] voltage-accuracy: delta={v_delta:.2f}V ≤ 0.5V")
-    else:
-        warnings.append("voltage values not recorded — cannot verify accuracy")
-        print(f"[WARN] voltage-accuracy: values not recorded")
 
     # --- Summary ---
     print()

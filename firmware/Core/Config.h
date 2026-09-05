@@ -189,10 +189,11 @@ static constexpr const char* BMS_PROTOCOL_DEFAULT = "auto";
 static constexpr uint8_t  INA219_ADDRESS        = 0x40;
 static constexpr float    INA219_SHUNT_OHM      = 0.00075f;   // 75mV @ 100A → 0.75 mΩ
 static constexpr float    INA219_MAX_CURRENT_A  = 100.0f;
-// [v1.9.1 FIX] Legacy INA219_CONFIG constant updated to use valid register
-// fields (was 0x3FFB which had RESERVED BADC/SADC values). Now uses the
-// corrected ±80mV PGA config. See INA219_CONFIG_PGA_80MV below for details.
-static constexpr uint16_t INA219_CONFIG         = 0x152B;     // 16V FSR, ±80mV PGA, 12-bit/128-sample avg
+// [v1.9.2 FIX] Legacy INA219_CONFIG constant updated to the correct canonical
+// value 0x0FFF (was 0x152B in v1.9.1 which had wrong bit-field layout; was
+// 0x3FFB in v1.9.0 which had inverted PGA mapping + triggered mode).
+// 0x0FFF = 16V FSR, ±80mV PGA, 12-bit/128-sample, shunt+bus continuous.
+static constexpr uint16_t INA219_CONFIG         = 0x0FFF;     // 16V FSR, ±80mV PGA, 12b/128s, shunt+bus cont
 // Sign correction: raw INA219 shunt voltage is POSITIVE when current leaves
 // battery (discharge). Canonical software semantics require positive = charging.
 // Therefore signCorrection = -1.0f inverts the raw reading.
@@ -223,40 +224,52 @@ static constexpr float    INA219_PGA_SWITCH_DOWN_A  = 90.0f;   // switch back to
 static constexpr float    INA219_PGA_80MV_MAX_A     = 106.0f;  // 80mV / 0.75mΩ
 static constexpr float    INA219_PGA_160MV_MAX_A    = 150.0f;  // shunt physical limit (75mV@100A → 112.5mV@150A)
 
-// [v1.9.1 FIX / INA-01] INA219 config register values — CORRECTED per TI datasheet SBOS397D.
+// [v1.9.2 FIX / INA-01 CANONICAL] INA219 config register values — CORRECTED per TI datasheet SBOS448G.
 // -----------------------------------------------------------------------------
-// INA219 Configuration Register (0x00) layout (16 bits):
-//   Bit 15     : RST (1 = reset)
-//   Bit 14     : BRNG (0 = 16V FSR, 1 = 32V FSR)
-//   Bits 13:12 : PGA (shunt voltage gain)
+// INA219 Configuration Register (0x00) layout (16 bits) — VERIFIED against
+// TI datasheet SBOS448G (Rev. G, Dec 2015), section 8.6.2.1 + Figure 19.
+// The reset value 0x399F decodes to the documented defaults (32V, ±320mV,
+// 12-bit/1-sample, shunt+bus continuous), confirming this layout is correct.
+//
+//   Bit 15     : RST (1 = reset, self-clears)
+//   Bit 14     : RESERVED (must be 0)
+//   Bit 13     : BRNG (0 = 16V FSR, 1 = 32V FSR)
+//   Bits 12:11 : PG (PGA gain — 2 bits)
 //                00 = ±40mV  (gain /1)
 //                01 = ±80mV  (gain /2)  ← standby mode
 //                10 = ±160mV (gain /4)  ← peak load mode
-//                11 = ±320mV (gain /8)  ← legacy default
-//   Bits 11:7  : BADC[4:0] (bus ADC resolution + averaging)
-//                00000 = 9-bit, 1 sample (84µs)
-//                00011 = 12-bit, 1 sample (532µs)
-//                00111 = 12-bit, 16 samples (8.51ms)
-//                01001 = 12-bit, 64 samples (34.05ms)
-//                01010 = 12-bit, 128 samples (68.10ms)  ← oversampling for noise
-//                01011..11111 = RESERVED (do not use)
-//   Bits 6:2   : SADC[4:0] (shunt ADC — same encoding as BADC)
-//   Bits 1:0   : MODE (11 = shunt+bus continuous)
+//                11 = ±320mV (gain /8)  ← default
+//   Bits 10:7  : BADC[3:0] (bus ADC — 4 bits)
+//                0000 = 9-bit, 1 sample (84µs)
+//                0011 = 12-bit, 1 sample (532µs)
+//                1001 = 12-bit, 2 samples (1.06ms)
+//                1011 = 12-bit, 8 samples (4.26ms)
+//                1100 = 12-bit, 16 samples (8.51ms)
+//                1110 = 12-bit, 64 samples (34.05ms)
+//                1111 = 12-bit, 128 samples (68.10ms)  ← oversampling for noise
+//   Bits 6:3   : SADC[3:0] (shunt ADC — 4 bits, same encoding as BADC)
+//   Bits 2:0   : MODE (3 bits)
+//                000 = power-down
+//                001 = shunt voltage, triggered
+//                011 = shunt + bus, triggered  ← DO NOT USE (one-shot!)
+//                101 = shunt voltage, continuous
+//                111 = shunt + bus, continuous (default)  ← USE THIS
 //
-// PREVIOUS (BUGGY) values had PGA=11 (±320mV) for BOTH modes due to inverted
-// bit-mapping in the comment. The comment said "00=±320mV, 11=±40mV" but the
-// datasheet says "00=±40mV, 11=±320mV". This meant dynamic gain switching
-// never actually changed the PGA range — both modes used ±320mV.
+// CORRECT VALUES (v1.9.2):
+//   0x0FFF = 16V FSR, ±80mV (PG=01), 12b/128s (BADC=1111), 12b/128s (SADC=1111), cont (MODE=111)
+//   0x17FF = 16V FSR, ±160mV (PG=10), 12b/128s (BADC=1111), 12b/128s (SADC=1111), cont (MODE=111)
 //
-// VERIFIED via scripts/decode_ina219_config.py:
-//   0x152B → PGA=01 (±80mV), BADC=01010 (12-bit/128-sample), SADC=01010, MODE=11 ✅
-//   0x252B → PGA=10 (±160mV), BADC=01010 (12-bit/128-sample), SADC=01010, MODE=11 ✅
+// VERIFIED via scripts/decode_ina219_config_v2.py (canonical decoder).
+// The v1.9.1 values (0x152B/0x252B) were WRONG — they used an incorrect
+// bit-field layout (BRNG=14, PG=13:12, BADC=11:7, SADC=6:2, MODE=1:0) that
+// caused: PGA wrong (±160mV/±40mV instead of ±80mV/±160mV), SADC=10-bit/1-sample
+// instead of 12-bit/128-sample, and MODE=triggered (one-shot) instead of continuous.
 //
-// BRNG=0 (16V FSR) is correct for low-side sensing: VBUS pin ≈ 0V (shunt on
-// GND line), well within 16V range. The "32V FSR" in old comments was wrong.
-static constexpr uint16_t INA219_CONFIG_PGA_80MV   = 0x152B;  // ±80mV,  12-bit/128-sample, 16V FSR
-static constexpr uint16_t INA219_CONFIG_PGA_160MV  = 0x252B;  // ±160mV, 12-bit/128-sample, 16V FSR
-static constexpr uint16_t INA219_CONFIG_LEGACY     = 0x152B;  // default = ±80mV (high-res standby)
+// The v1.9.0 values (0x3BFF/0x39FF) were also wrong — inverted PGA mapping
+// (both modes used ±320mV).
+static constexpr uint16_t INA219_CONFIG_PGA_80MV   = 0x0FFF;  // ±80mV,  12b/128s, shunt+bus cont, 16V FSR
+static constexpr uint16_t INA219_CONFIG_PGA_160MV  = 0x17FF;  // ±160mV, 12b/128s, shunt+bus cont, 16V FSR
+static constexpr uint16_t INA219_CONFIG_LEGACY     = 0x0FFF;  // default = ±80mV (high-res standby)
 
 // Battery voltage divider (brief §7 + v1.9.0 update)
 // [v1.9.0 / DYNAMIC-GAIN] New divider for high-side battery measurement:

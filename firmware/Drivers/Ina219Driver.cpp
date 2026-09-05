@@ -57,6 +57,9 @@ bool Ina219Driver::_readRegister(uint8_t reg, uint16_t& out) {
 // reading it back. The INA219 config register is read/write, so we can
 // confirm the PGA bits + BADC/SADC fields match what we intended.
 // Returns true if the readback matches the expected value.
+//
+// [v1.9.2 FIX] Bit-field extraction corrected per TI datasheet SBOS448G:
+//   BRNG = bit 13, PG = bits 12:11, BADC = bits 10:7, SADC = bits 6:3, MODE = bits 2:0
 bool Ina219Driver::_verifyConfigRegister(uint16_t expected) {
   uint16_t readback = 0;
   if (!_readRegister(REG_CONFIG, readback)) {
@@ -66,18 +69,32 @@ bool Ina219Driver::_verifyConfigRegister(uint16_t expected) {
   if (readback != expected) {
     Serial.printf("[INA219 0x%02X] config MISMATCH: wrote 0x%04X, read back 0x%04X\n",
                   _address, expected, readback);
-    // Decode the mismatch for diagnostics
-    uint8_t pga_written = (expected >> 12) & 0b11;
-    uint8_t pga_read    = (readback  >> 12) & 0b11;
-    Serial.printf("[INA219 0x%02X]   PGA written=%d (expected), read=%d (actual)\n",
-                  _address, pga_written, pga_read);
+    // [v1.9.2] Decode the mismatch for diagnostics using CORRECT bit-field layout
+    uint8_t pga_written = (expected >> 11) & 0b11;    // bits 12:11
+    uint8_t pga_read    = (readback  >> 11) & 0b11;
+    uint8_t badc_written = (expected >> 7) & 0b1111;  // bits 10:7
+    uint8_t badc_read    = (readback  >> 7) & 0b1111;
+    uint8_t sadc_written = (expected >> 3) & 0b1111;  // bits 6:3
+    uint8_t sadc_read    = (readback  >> 3) & 0b1111;
+    uint8_t mode_written = expected & 0b111;           // bits 2:0
+    uint8_t mode_read    = readback & 0b111;
+    Serial.printf("[INA219 0x%02X]   PGA: wrote=%d, read=%d | BADC: wrote=%d, read=%d | SADC: wrote=%d, read=%d | MODE: wrote=%d, read=%d\n",
+                  _address, pga_written, pga_read, badc_written, badc_read,
+                  sadc_written, sadc_read, mode_written, mode_read);
     return false;
   }
-  Serial.printf("[INA219 0x%02X] config readback OK: 0x%04X (PGA=%d, BADC=%d, SADC=%d)\n",
+  // [v1.9.2] Decode readback for diagnostics using CORRECT bit-field layout
+  uint8_t pga  = (readback >> 11) & 0b11;    // bits 12:11
+  uint8_t brng = (readback >> 13) & 0b1;     // bit 13
+  uint8_t badc = (readback >> 7) & 0b1111;   // bits 10:7
+  uint8_t sadc = (readback >> 3) & 0b1111;   // bits 6:3
+  uint8_t mode = readback & 0b111;           // bits 2:0
+  const char* pga_str[] = {"±40mV", "±80mV", "±160mV", "±320mV"};
+  Serial.printf("[INA219 0x%02X] config readback OK: 0x%04X (BRNG=%d %s, PGA=%d %s, BADC=%d, SADC=%d, MODE=%d)\n",
                 _address, readback,
-                (readback >> 12) & 0b11,
-                (readback >> 7) & 0b11111,
-                (readback >> 2) & 0b11111);
+                brng, brng ? "32V" : "16V",
+                pga, pga_str[pga],
+                badc, sadc, mode);
   return true;
 }
 
