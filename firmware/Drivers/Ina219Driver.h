@@ -9,7 +9,9 @@
 //   - Positive raw current = DISCHARGE (current leaving battery)
 //   - Polarity correction in software: positive output = CHARGING
 //
-// Config 0x3FFB (32V FSR, ±320mV PGA, 16-sample averaging, shunt+bus continuous)
+// Config 0x152B (16V FSR, ±80mV PGA, 12-bit/128-sample averaging, shunt+bus continuous)
+// [v1.9.1 FIX] Corrected from 0x3FFB which had RESERVED BADC/SADC values.
+// Dynamic PGA switching now actually changes the gain (was broken in v1.9.0).
 //
 // Failure handling:
 //   - 10 consecutive I2C errors → 60s cooldown (frees bus for other sensors)
@@ -84,8 +86,12 @@ private:
 
   // [v1.9.0 / DYNAMIC-GAIN] PGA state + switching logic
   Ina219PgaMode _pgaMode = Ina219PgaMode::Pga80mV;  // start in high-resolution mode
-  bool     _applyPgaMode(Ina219PgaMode mode);  // write config register
+  bool     _applyPgaMode(Ina219PgaMode mode);  // write config register + verify + set discard flag
   void     _evaluatePgaSwitch(float absCurrent);  // hysteresis logic
+  // [v1.9.1 FIX / INA-01] Verify config register via readback after write
+  bool     _verifyConfigRegister(uint16_t expected);
+  // [v1.9.1 FIX / INA-02] Discard first sample after PGA switch (settling time)
+  bool     _discardNextSample = false;
 
   uint8_t  _consecutiveErrors = 0;
   unsigned long _nextRetryMs = 0;
