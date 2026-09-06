@@ -120,6 +120,10 @@
 #if PLTS_ENABLE_EMERGENCY
 #include "Network/GasEmergencyChannel.h"
 #endif
+// [PARITY-3 2026-09-06] GAS OTA_STATUS bridge — modular OTA lifecycle events
+// into the GAS OtaEvents sheet (PWA authoritative OTA log). Independent of
+// PLTS_ENABLE_EMERGENCY: OTA exists in every build configuration.
+#include "Network/GasOtaReporter.h"
 #include "AI/GasAdvisor.h"
 
 #include "Web/HttpServer.h"
@@ -388,6 +392,10 @@ void setup() {
   // running locally regardless.
   Network::gasEmergency.begin();
 #endif
+  // [PARITY-3] Fail-closed GAS OTA_STATUS reporter: disabled (logged once)
+  // when GAS_INGEST_URL / secret / deviceId are unset — OTA never depends
+  // on it. Outside the emergency guard: independent feature.
+  Network::gasOtaReporter.begin();
 
   // HTTP server
   Web::server.begin();
@@ -1453,9 +1461,17 @@ void otaTask(void* pv) {
   while (true) {
     esp_task_wdt_reset();
 
+    // [PARITY-3 2026-09-06] GAS OTA_STATUS flush pump — ALWAYS runs (not
+    // only while an OTA is in progress): boot-time ACTIVATED/ROLLBACK and
+    // web-task REST OTA events land in the ring and need this pump even
+    // when OtaState is Idle. One event per cadence, 7 s HTTP cap — the
+    // blocking TLS POST is why this lives in its own task (see
+    // GasOtaReporter.h threading notes).
+    Network::gasOtaReporter.tick();
+
     // Only do work when OTA is actively downloading or checking.
     // (In Idle/Verifying/Applying/Done/Failed states, this task sleeps.)
-    // [WAVE-6 / FW6-4] Checking = ota.check manifest fetch (pumped here so
+    // [WAVE-6 / FW6-4] Checking = ota.check manifest fetch (pumped so
     // the MQTT callback stays non-blocking).
     if (Services::ota.getState() == Services::OtaState::Downloading) {
       Services::ota.tickDownload();

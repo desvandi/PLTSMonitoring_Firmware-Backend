@@ -7,6 +7,9 @@
 #include "../Core/Common.h"
 #include "../Utils/Crypto.h"
 #include "../Network/MqttTelemetryPublisher.h"
+// [PARITY-3 2026-09-06] GAS OTA_STATUS bridge — every lifecycle event is
+// ALSO queued for the OtaEvents sheet (the PWA's authoritative OTA log).
+#include "../Network/GasOtaReporter.h"
 #include "LogService.h"
 #include "TimeManager.h"   // [CI fix] needed for Services::timeManager
 #include <Preferences.h>
@@ -761,14 +764,22 @@ void OtaManager::_emitLifecycle(const char* state, const char* detail) {
   // _jobId may be empty on a fresh boot (no OTA in progress this session).
   // Use a sentinel so GAS can still group the event by device.
   const char* jobId = _jobId.length() ? _jobId.c_str() : "boot-verify";
+  const char* ver = _expectedVersion.length() ? _expectedVersion.c_str()
+                                              : Core::FIRMWARE_VERSION;
   Network::mqttTelemetry.publishOtaLifecycle(
     jobId,
     state,
-    _expectedVersion.length() ? _expectedVersion.c_str() : Core::FIRMWARE_VERSION,
+    ver,
     detail,
     (uint32_t)_bytesProcessed,
     (uint32_t)_totalBytes
   );
+  // [PARITY-3 2026-09-06] Mirror the SAME lifecycle into the GAS OTA_STATUS
+  // bridge (audit-grade OtaEvents sheet — the PWA's "Authoritative —
+  // GAS OTA_LOG" panel, previously fed only by firmware-generic). Non-
+  // blocking ring push; the TLS flush runs in otaTask. Best-effort
+  // observability — never a safety or release gate.
+  Network::gasOtaReporter.report(state, ver, detail);
   // Terminal states — clear jobId so next session starts fresh.
   if (strcmp(state, "ACTIVATED") == 0 ||
       strcmp(state, "ROLLBACK")  == 0 ||

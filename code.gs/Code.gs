@@ -3,7 +3,9 @@
  * ============================================================================
  * REMEDIATION 2026-08 — Consolidated Directive (Audit #1+#2+#3):
  *   [P0-001] Canonical API contract: PING, TELEMETRY, LATEST, HISTORY, DAILY,
- *            SEQ_STATUS, OTA_*, CALIBRATION_* — one documented surface.
+ *            SEQ_STATUS, INSIGHTS, OTA_*, CALIBRATION_* — one documented
+ *            surface. ([PARITY-3 2026-09-06] INSIGHTS added — the action the
+ *            firmware GasAdvisor + PWA AiView expected but never had.)
  *   [P0-002] Canonical TelemetryEnvelope accepted AND returned (nested);
  *            Sheets is a persistence ADAPTER only (flat rows in, canonical
  *            envelope out — never the source of semantic truth).
@@ -211,6 +213,18 @@ const DEFAULT_CONFIG = [
   // queue was the last unbounded one (full-sheet reads on EVERY emergency
   // touch grow linearly with history).
   ['EMERGENCY_QUEUE_MAX_ROWS', '200'],
+  // [PARITY-3 AUDIT 2026-09-06] AI Insights (action INSIGHTS). The modular
+  // firmware's GasAdvisor has called action=INSIGHTS since WAVE-7 (GET +
+  // HMAC query envelope) and the PWA AiView renders the InsightsEnvelope —
+  // but the server side never existed (GasAdvisor.cpp: "contract-ready,
+  // not claim-ready"). These keys close that gap. GEMINI_API_KEY empty =
+  // fail-closed honest 503 — a mock insight is NEVER served (directive §3.1).
+  // Deployments that predate these keys get the same defaults via
+  // safeConfig_ fallbacks — no migration step needed.
+  ['GEMINI_API_KEY', ''],
+  ['INSIGHTS_CACHE_MIN', '360'],
+  ['INSIGHTS_MAX_COUNT', '10'],
+  ['INSIGHTS_TELEMETRY_ROWS', '48'],
 ];
 
 // Flat persistence columns (the ADAPTER representation — not the contract).
@@ -362,6 +376,18 @@ function doPost(e) {
       if (gate) return json_(gate);
       return json_(seqStatus_(dk));
     }
+    // [PARITY-3 AUDIT 2026-09-06] INSIGHTS — advisory-only AI insights for
+    // ONE device, generated from its recent telemetry via Google Gemini.
+    // Callers: (a) modular firmware GasAdvisor (doGet + HMAC query envelope,
+    // data = ''), (b) the PWA directly (POST, token auth + device_key —
+    // browser→GAS, same transport as LATEST/EMERGENCY_LOG). Fail-closed
+    // honest error when GEMINI_API_KEY is unset — never a mock insight.
+    if (action === 'INSIGHTS') {
+      const dk = resolveDeviceKey_(body, auth);
+      const gate = requireRegisteredDevice_(dk);
+      if (gate) return json_(gate);
+      return json_(insightsForDevice_(dk));
+    }
     if (action === 'OTA_MANIFEST') {
       // [WAVE-6 / FW6-9] Resolve the caller's device + firmware version so
       // the manifest hmac can be keyed per-device for fw >= 1.5.4. Legacy
@@ -378,9 +404,19 @@ function doPost(e) {
       // action: a device credential (or the legacy AUTH_TOKEN that firmware
       // holds) must never be enough to push firmware to the whole fleet.
       // Fail-closed while Config!ADMIN_TOKEN is unset.
-      const admin = verifyAdminToken_(body.admin_token);
+      // [PARITY-3 2026-09-06 FIX] Dual acceptance for admin_token, like
+      // every other field: token clients send it top-level, HMAC clients
+      // ride it INSIDE the signed data string. Reading only body.admin_token
+      // made operator tooling on the HMAC envelope structurally unable to
+      // pass this gate (the token was verified-but-ignored). The caller
+      // still must POSSESS the ADMIN_TOKEN value — placement does not
+      // change the secret-knowledge requirement (see bodyPayload_ note).
+      const publishPayload = bodyPayload_(body);
+      const admin = verifyAdminToken_(
+        body.admin_token !== undefined ? body.admin_token : publishPayload.admin_token);
       if (!admin.ok) return json_(resp_(401, 'Unauthorized: ' + admin.reason, null));
-      return json_(otaPublishManifest_(body.manifest || {}));
+      return json_(otaPublishManifest_(
+        (body.manifest !== undefined ? body.manifest : publishPayload.manifest) || {}));
     }
     if (action === 'OTA_STATUS') {
       const dk = resolveDeviceKey_(body, auth);
@@ -443,10 +479,22 @@ function doPost(e) {
       // Operator-only (same gate as OTA_PUBLISH): a device credential must
       // never be able to ARM/DISARM the fleet's safety relay. Fail-closed
       // while Config!ADMIN_TOKEN is unset.
-      const admin = verifyAdminToken_(body.admin_token);
+      // [PARITY-3 2026-09-06 FIX] Dual acceptance for admin_token (same as
+      // OTA_PUBLISH above): token clients send it top-level, HMAC clients
+      // ride it inside the signed data string.
+      const emgPayload = bodyPayload_(body);
+      const admin = verifyAdminToken_(
+        body.admin_token !== undefined ? body.admin_token : emgPayload.admin_token);
       if (!admin.ok) return json_(resp_(401, 'Unauthorized: ' + admin.reason, null));
       const dk = resolveDeviceKey_(body, auth);
-      if (dk && String(body.device_key) != null && String(body.device_key).trim() !== '' &&
+      // [PARITY-3 2026-09-06 FIX] `String(body.device_key) != null` is ALWAYS
+      // true in JS — an absent device_key produced String(undefined)='undefined',
+      // passed the non-empty check and 400'd against the resolved identity even
+      // for a correctly HMAC-authenticated operator. The guard's intent is:
+      // ONLY reject when an EXPLICIT body device_key names a DIFFERENT device;
+      // an absent field means "use the authenticated identity" (resolveDeviceKey_).
+      if (dk && body.device_key !== undefined &&
+          String(body.device_key).trim() !== '' &&
           String(body.device_key).trim() !== String(dk).trim()) {
         return json_(resp_(400,
           'Unauthorized: body device_key "' + body.device_key +
@@ -526,6 +574,29 @@ function doGet(e) {
         seqLedger: !!getOrCreateSheet_(SEQ_LEDGER_SHEET, SEQ_LEDGER_HEADER)
       }
     }));
+  }
+  // [PARITY-3 AUDIT 2026-09-06] INSIGHTS over GET — the modular firmware's
+  // GasAdvisor::fetchInsights() signs a QUERY-PARAMETER HMAC envelope
+  // (GET has no body). The canonical string is byte-identical to
+  // verifyHmac_ with data = '' (sha256hex of the empty string). Until now
+  // this request fell through to the 400 "use POST" answer — the client
+  // was contract-ready, the server was not.
+  if (action === 'INSIGHTS') {
+    const p = (e && e.parameter) || {};
+    const auth = {
+      method: 'HMAC-SHA256',
+      timestamp: p.auth_timestamp,
+      nonce: p.auth_nonce,
+      deviceId: p.auth_device_id,
+      signature: p.auth_signature
+    };
+    const ver = verifyHmac_(auth, { action: 'INSIGHTS' }, 'INSIGHTS');
+    if (!ver.ok) {
+      return json_(resp_(401, 'Unauthorized: ' + ver.reason, null));
+    }
+    const gate = requireRegisteredDevice_(ver.deviceKey);
+    if (gate) return json_(gate);
+    return json_(insightsForDevice_(ver.deviceKey));
   }
   return json_(resp_(400, 'Please use POST for API calls', null));
 }
@@ -693,6 +764,12 @@ function recordTelemetry_(body, deviceKey) {
   // [WAVE-7] Piggyback the device's pending emergency command on the ingest
   // response — the firmware consumes commands on its EXISTING cadence (zero
   // extra polls). Read-only scan of a small bounded sheet, outside the lock.
+  // [PARITY-3 2026-09-06 FIX] A piggybacked command is DELIVERED by
+  // definition (the device received it in this very response) — the row is
+  // now marked DELIVERED exactly like the explicit EMERGENCY_PENDING read,
+  // instead of lingering PENDING until the TTL expires it. The write is
+  // idempotent (PENDING→DELIVERED only), so a concurrent settle can never
+  // lose state. A queue hiccup never breaks ingest.
   if (out && out.resp && out.resp.data && typeof out.resp.data === 'object') {
     try {
       const pending = emergencyPendingFor_(deviceKey);
@@ -700,6 +777,13 @@ function recordTelemetry_(body, deviceKey) {
         command_id: pending.command_id, command: pending.command,
         note: pending.note, config: pending.config
       } : null;
+      if (pending) {
+        try {
+          emergencySheet_().getRange(pending.row, 7).setValue('DELIVERED');
+        } catch (errDelivered) {
+          // Idempotent status write only — failure never breaks ingest.
+        }
+      }
     } catch (err) {
       out.resp.data.pendingEmergency = null;   // queue hiccup never breaks ingest
     }
@@ -1079,7 +1163,10 @@ function historyTelemetry_(body, deviceKeyOverride) {
 function dailyReport_(body, deviceKeyOverride) {
   const deviceKey = deviceKeyOverride || body.device_key;
   if (!deviceKey) return resp_(400, 'Missing device_key', null);
-  const days = Math.min(Number(body.days) || 7, 31);
+  // [PARITY-3 2026-09-06] Cap raised 31 → 90 so the PWA's monthly range
+  // (90 d) is servable. Bounded by HISTORY_MAX_ROWS regardless — a day
+  // beyond retention simply has no samples and is not returned.
+  const days = Math.min(Number(body.days) || 7, 90);
 
   const hist = historyTelemetry_({ device_key: deviceKey, limit: 5000 });
   if (!hist || hist.status !== 'SUCCESS' || !hist.data || !hist.data.records.length) {
@@ -1123,12 +1210,25 @@ function dailyReport_(body, deviceKeyOverride) {
                    chargeAh.resets + dischargeAh.resets;
     const expected = Math.round((24 * 3600) / 3600); // 1 sample/hour default cadence
     const completeness = Math.min(1, day.length / expected);
+    // [PARITY-3 2026-09-06] Daily peak currents — HONEST peaks only: derived
+    // from the same rows the report already aggregates (rowToEnvelope_'
+    // battery.current.value). peakChargeA = highest positive (charging)
+    // current, null if no positive sample; peakDischargeA = |lowest negative|
+    // (discharging) current, null if never negative. No interpolation.
+    const currents = day
+      .map(function (r) { return r.battery && r.battery.current && r.battery.current.value; })
+      .filter(function (v) { return v !== null && v !== undefined && v !== '' && !isNaN(Number(v)); })
+      .map(Number);
+    const maxCurrent = currents.length ? Math.max.apply(null, currents) : 0;
+    const minCurrent = currents.length ? Math.min.apply(null, currents) : 0;
     out.push({
       date: d,
       chargeWh: chargeWh.total,
       dischargeWh: dischargeWh.total,
       chargeAh: chargeAh.total,
       dischargeAh: dischargeAh.total,
+      peakChargeA: maxCurrent > 0 ? round2_(maxCurrent) : null,
+      peakDischargeA: minCurrent < 0 ? round2_(Math.abs(minCurrent)) : null,
       socMin: minOf_(day.map(function (r) { return r.battery && r.battery.soc && r.battery.soc.value; })),
       socMax: maxOf_(day.map(function (r) { return r.battery && r.battery.soc && r.battery.soc.value; })),
       samples: day.length,
@@ -1374,10 +1474,21 @@ function pingHandshakeData_(body, auth) {
   if (last < 2) {
     return { device_key: String(dk), device_registered: true, legacy_mode: true };
   }
-  const keys = sheet.getRange(2, 1, last - 1, 1).getValues();
-  for (let i = 0; i < keys.length; i++) {
-    if (String(keys[i][0]).trim() === String(dk).trim()) {
-      return { device_key: String(dk), device_registered: true };
+  // [PARITY-3 2026-09-06] Read the FULL device row so the handshake can
+  // report firmware_type (col 6: '' | 'generic' | 'modular'). The PWA uses
+  // it to gate device-type-specific flows — e.g. the multiplier calibration
+  // wizard only applies to firmware-generic; a modular device must use the
+  // 3-point voltage calibration center instead. Null when the operator has
+  // not declared a type yet (honest, never guessed).
+  const rows = sheet.getRange(2, 1, last - 1, DEVICES_HEADER.length).getValues();
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]).trim() === String(dk).trim()) {
+      const fwType = String(rows[i][5] || '').trim().toLowerCase();
+      return {
+        device_key: String(dk),
+        device_registered: true,
+        firmware_type: fwType || null
+      };
     }
   }
   return { device_key: String(dk), device_registered: false };
@@ -1481,13 +1592,21 @@ function rotateCalibrationHistory_() {
  * a per-sample error loop either. Telegram alerting stays optional and
  * best-effort; fetch failures remain silent.
  */
-function maybeSendTelegramAlert_(message, cooldownKey) {
+function maybeSendTelegramAlert_(message, cooldownKey, cooldownMinKey) {
   const token = safeConfig_('TELEGRAM_BOT_TOKEN');
   const chat = safeConfig_('TELEGRAM_CHAT_ID');
   if (!token || !chat) return;
   let cache = null;
   if (cooldownKey) {
-    const cooldownMin = parseInt(safeConfig_('LOW_BATTERY_ALERT_COOLDOWN_MIN'), 10) || 30;
+    // [PARITY-3 2026-09-06 FIX] Per-topic cooldown config. Previously EVERY
+    // topic read LOW_BATTERY_ALERT_COOLDOWN_MIN (30 min) — the emergency
+    // key EMERGENCY_ALERT_COOLDOWN_MIN (2 min) existed in DEFAULT_CONFIG
+    // since WAVE-7 but was never read: a live emergency TRIP could stay
+    // silent for half an hour on the default cadence. Fallbacks keep the
+    // documented defaults for sheets that predate the key.
+    const key = cooldownMinKey || 'LOW_BATTERY_ALERT_COOLDOWN_MIN';
+    const fallback = key === 'EMERGENCY_ALERT_COOLDOWN_MIN' ? 2 : 30;
+    const cooldownMin = parseInt(safeConfig_(key), 10) || fallback;
     cache = CacheService.getScriptCache();
     if (cache.get(cooldownKey)) return;
     cache.put(cooldownKey, '1', Math.max(1, cooldownMin) * 60);
@@ -1703,8 +1822,15 @@ function otaLogStatus_(payload) {
   // [W13-3] VERIFICATION_FAILED joins the set: the modular tree's OTA state
   // machine documents it (SHA-256 / Ed25519 failure) — a documented event
   // that the word list rejected with 400 would split the contract again.
+  // [PARITY-3 2026-09-06] Modular lifecycle states join the set: the modular
+  // tree's new GAS OTA bridge (Network/GasOtaReporter) reports the full
+  // lifecycle ACCEPTED / DOWNLOADING / VERIFIED / FLASHED / FAILED in
+  // addition to the terminal vocabulary, so the PWA OTA history is filled
+  // with progress AND terminal states. ONE word list on both sides prevents
+  // the 400-split-contract failure mode called out in W13-3.
   const validEvents = ['ACTIVATED', 'ROLLBACK', 'BOOT_FAILED', 'DOWNLOAD_FAILED',
-                       'REFUSED', 'VERIFICATION_FAILED'];
+                       'REFUSED', 'VERIFICATION_FAILED',
+                       'ACCEPTED', 'DOWNLOADING', 'VERIFIED', 'FLASHED', 'FAILED'];
   if (validEvents.indexOf(event) === -1) {
     return resp_(400, 'Invalid OTA event: ' + event, null);
   }
@@ -1746,6 +1872,251 @@ function otaReadEvents_(deviceKey, limit) {
     });
   }
   return resp_(200, 'OTA events', { deviceKey: deviceKey, events: events });
+}
+
+// ----------------------------------------------------------------------------
+// [PARITY-3 AUDIT 2026-09-06] AI Insights — advisory-only, per-device, honest
+// -----------------------------------------------------------------------------
+// This closes the last three-layer contract hole: the PWA AiView renders an
+// InsightsEnvelope and the modular firmware's GasAdvisor signs GET
+// action=INSIGHTS envelopes — but until now no server action existed, so
+// /api/insights on the device proxied a GAS 400 forever and the PWA AiView
+// could only ever show the demo mock. Design mirrors the rest of the file:
+// sheets for persistence, CacheService for cooldowns, resp_ envelopes out,
+// NEVER fabricated content (a missing GEMINI_API_KEY is an honest 503).
+// ----------------------------------------------------------------------------
+
+const INSIGHTS_CATEGORIES = ['battery_analysis', 'energy_analysis', 'energy_anomaly',
+                             'maintenance_suggestion', 'environment_alert'];
+const INSIGHTS_SEVERITIES = ['info', 'warning', 'critical'];
+
+/**
+ * INSIGHTS — generate advisory insights for ONE device from its recent
+ * telemetry history, via Google Gemini (gemini-2.0-flash).
+ *
+ * Honesty contract (directive §3.1 — never fabricate certainty):
+ *   - GEMINI_API_KEY unset       → honest fail-closed 503, never a mock.
+ *   - No telemetry rows          → honest 404 "no data to analyze".
+ *   - Cache hit (same input set) → same payload, cached:true.
+ *   - Gemini HTTP/parse/quota    → honest 502 with the reason, no fallback.
+ *   - advisoryOnly:true and source:'gemini' are FORCED server-side; the
+ *     prompt forbids control instructions — insights are advisory only.
+ *
+ * Response `data` shape = the PWA InsightsEnvelope contract
+ * (pwa/src/lib/types.ts): { success, insights[], cached, generatedAt } on
+ * success; { success:false, error, message } on failure.
+ */
+function insightsForDevice_(deviceKey) {
+  const apiKey = String(safeConfig_('GEMINI_API_KEY') || '').trim();
+  if (!apiKey) {
+    return resp_(503, 'AI insights unavailable: GEMINI_API_KEY not configured (fail-closed — never a mock)', {
+      success: false,
+      error: 'GEMINI_API_KEY_NOT_CONFIGURED',
+      message: 'AI insights are disabled. Set GEMINI_API_KEY in the Config sheet to enable Gemini analysis. No mock insights are ever served.'
+    });
+  }
+
+  const rowBudget = Math.max(4, parseInt(safeConfig_('INSIGHTS_TELEMETRY_ROWS'), 10) || 48);
+  const hist = historyTelemetry_({ device_key: deviceKey, limit: rowBudget });
+  if (!hist || hist.status !== 'SUCCESS' || !hist.data || !hist.data.records.length) {
+    return resp_(404, 'No telemetry to analyze yet', {
+      success: false,
+      error: 'NO_TELEMETRY',
+      message: 'AI insights need telemetry rows first — none found for this device.'
+    });
+  }
+  const records = hist.data.records;
+
+  // Cache key = device + fingerprint of the INPUT row set (not the output):
+  // a fresh sample set naturally invalidates the cache, a repeated view of
+  // the same data is served from cache within INSIGHTS_CACHE_MIN.
+  const fingerprint = records.map(function (r) {
+    return String(r.sequence || '') + '@' + String(r.eventTime || '');
+  }).join('|');
+  const cacheMin = Math.max(1, parseInt(safeConfig_('INSIGHTS_CACHE_MIN'), 10) || 360);
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'PLTS_INSIGHTS_' + String(deviceKey);
+  let cachedEnvelope = null;
+  try {
+    const raw = cache.get(cacheKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.fingerprint === fingerprint && parsed.payload) {
+        cachedEnvelope = parsed.payload;
+      }
+    }
+  } catch (err) {
+    cachedEnvelope = null;   // corrupt cache entry — regenerate honestly
+  }
+  if (cachedEnvelope) {
+    const replay = JSON.parse(JSON.stringify(cachedEnvelope));
+    replay.cached = true;
+    return resp_(200, 'AI insights (cached)', replay);
+  }
+
+  const prompt = insightsPrompt_(deviceKey, records);
+  const gemini = callGeminiInsights_(apiKey, prompt);
+  if (!gemini.ok) {
+    return resp_(502, 'AI insights failed: ' + gemini.reason, {
+      success: false,
+      error: 'GEMINI_ERROR',
+      message: 'Gemini request failed — ' + gemini.reason + '. No fallback insights are served.'
+    });
+  }
+
+  const maxCount = Math.max(1, parseInt(safeConfig_('INSIGHTS_MAX_COUNT'), 10) || 10);
+  const insights = validateInsights_(gemini.text, maxCount);
+  if (!insights) {
+    return resp_(502, 'AI insights response failed validation', {
+      success: false,
+      error: 'GEMINI_RESPONSE_INVALID',
+      message: 'Gemini returned a response that failed the insight contract validation (category/severity/title/body). No fallback insights are served.'
+    });
+  }
+
+  const payload = {
+    success: true,
+    insights: insights,
+    cached: false,
+    generatedAt: new Date().toISOString()
+  };
+  try {
+    cache.put(cacheKey, JSON.stringify({ fingerprint: fingerprint, payload: payload }),
+              cacheMin * 60);
+  } catch (err) {
+    // Cache write failure is non-fatal — the payload is still returned.
+  }
+  return resp_(200, 'AI insights', payload);
+}
+
+/** Compact honest per-row summary for the prompt (nulls stay null). */
+function insightsRowSummary_(r) {
+  const bat = r.battery || {};
+  const env = r.environment || {};
+  const ac = r.ac || {};
+  const num = function (v) { return (v === null || v === undefined || v === '') ? null : v; };
+  return {
+    t: r.eventTime || null,
+    vBat: num(bat.voltage && bat.voltage.value),
+    iBat: num(bat.current && bat.current.value),
+    pBat: num(bat.power && bat.power.value),
+    soc: num(bat.soc && bat.soc.value),
+    socQuality: (bat.soc && bat.soc.quality) || null,
+    socProvenance: (bat.soc && bat.soc.provenance) || null,
+    chargeWh: num(bat.chargeWh),
+    dischargeWh: num(bat.dischargeWh),
+    iAcLoad: num(ac.rmsCurrent && ac.rmsCurrent.value),
+    temp: num(env.temperature && env.temperature.value),
+    humidity: num(env.humidity && env.humidity.value),
+    overallQuality: r.overallQuality || null
+  };
+}
+
+/** Deterministic prompt — every value carries its honest null/quality state. */
+function insightsPrompt_(deviceKey, records) {
+  const rows = records.map(insightsRowSummary_);
+  return [
+    'You are an advisory-only analyst for a 48V LiFePO4 solar (PLTS) battery monitoring system.',
+    'Device: ' + deviceKey + '. Below is the most recent telemetry (oldest to newest).',
+    'Values may be null (sensor absent/offline) — treat nulls honestly, never guess or invent values.',
+    'Fields: t=time, vBat=battery volts, iBat=amps (positive=charging, negative=discharging),',
+    'pBat=watts, soc=state of charge %, socQuality/socProvenance=SOC trust metadata,',
+    'chargeWh/dischargeWh=cumulative energy counters, iAcLoad=AC load amps, temp/humidity=ambient,',
+    'overallQuality=row quality flag.',
+    '',
+    'Telemetry JSON: ' + JSON.stringify(rows),
+    '',
+    'Task: return 1-5 short advisory insights, prioritized by operational value.',
+    'STRICT output contract — a single JSON object, no markdown, no prose outside JSON:',
+    '{"insights":[{"category":"battery_analysis|energy_analysis|energy_anomaly|maintenance_suggestion|environment_alert",',
+    '"severity":"info|warning|critical","title":"max 80 chars","body":"1-3 sentences, cite the numbers you used"}]}',
+    'Rules: English output. Use ONLY numbers present in the telemetry — if a field is null for all',
+    'rows, do NOT discuss it. Insights are ADVISORY ONLY — never issue control or actuation',
+    'instructions. If everything is unremarkable, say so honestly in one info insight.',
+    ''
+  ].join('\n');
+}
+
+/** Gemini call with responseMimeType=application/json. Returns {ok,text} or {ok:false,reason}. */
+function callGeminiInsights_(apiKey, prompt) {
+  try {
+    const resp = UrlFetchApp.fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='
+        + encodeURIComponent(apiKey),
+        {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.2,
+              maxOutputTokens: 2048,
+              responseMimeType: 'application/json'
+            }
+          }),
+          muteHttpExceptions: true
+        });
+    const code = resp.getResponseCode();
+    if (code !== 200) {
+      return { ok: false, reason: 'HTTP ' + code + ': ' + String(resp.getContentText()).slice(0, 180) };
+    }
+    const parsed = JSON.parse(resp.getContentText());
+    const cand = parsed && parsed.candidates && parsed.candidates[0];
+    const parts = cand && cand.content && cand.content.parts;
+    if (!parts || !parts.length) {
+      return { ok: false, reason: 'empty candidates content' };
+    }
+    return { ok: true, text: parts.map(function (p) { return p.text || ''; }).join('') };
+  } catch (err) {
+    return { ok: false, reason: String(err && err.message ? err.message : err) };
+  }
+}
+
+/**
+ * Validate the model output against the PWA AiInsight contract. Accepts
+ * either a bare array or {"insights":[...]}. Returns the validated array
+ * (capped at maxCount, advisoryOnly/source forced) or null on any breach —
+ * a partial acceptance would silently drop the contract's honesty guarantees.
+ */
+function validateInsights_(text, maxCount) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(String(text));
+  } catch (err) {
+    return null;
+  }
+  let arr = null;
+  if (Array.isArray(parsed)) {
+    arr = parsed;
+  } else if (parsed && Array.isArray(parsed.insights)) {
+    arr = parsed.insights;
+  } else {
+    return null;
+  }
+  const out = [];
+  for (let i = 0; i < arr.length && out.length < maxCount; i++) {
+    const item = arr[i];
+    if (!item || typeof item !== 'object') return null;
+    const category = String(item.category || '');
+    const severity = String(item.severity || '');
+    const title = String(item.title || '').trim();
+    const body = String(item.body || '').trim();
+    if (INSIGHTS_CATEGORIES.indexOf(category) === -1) return null;
+    if (INSIGHTS_SEVERITIES.indexOf(severity) === -1) return null;
+    if (!title || title.length > 120) return null;
+    if (!body || body.length > 600) return null;
+    out.push({
+      id: 'gas-' + Date.now() + '-' + i,
+      category: category,
+      severity: severity,
+      title: title,
+      body: body,
+      generatedAt: new Date().toISOString(),
+      source: 'gemini',
+      advisoryOnly: true
+    });
+  }
+  return out.length ? out : null;
 }
 
 // ----------------------------------------------------------------------------
@@ -1940,14 +2311,21 @@ function expireStaleEmergencyCommands_() {
  */
 function emergencyCommand_(body, deviceKey) {
   if (!deviceKey) return resp_(400, 'Missing device_key', null);
-  const command = String(body.command || '').toUpperCase();
+  // [PARITY-3 2026-09-06] Dual acceptance (bodyPayload_ pattern): token
+  // clients send command/note/config top-level; HMAC clients ride them
+  // inside the signed data string (already unwrapped centrally).
+  const payload = bodyPayload_(body);
+  const command = String(
+    (body.command !== undefined ? body.command : payload.command) || '').toUpperCase();
   if (EMERGENCY_COMMANDS.indexOf(command) < 0) {
     return resp_(400, 'command must be one of ' + EMERGENCY_COMMANDS.join('/'), null);
   }
-  const note = String(body.note || '').slice(0, 200);
+  const note = String(
+    (body.note !== undefined ? body.note : payload.note) || '').slice(0, 200);
   let paramsJson = '';
   if (command === 'CONFIG') {
-    const v = validateEmergencyConfig_(body.config || {});
+    const rawConfig = (body.config !== undefined ? body.config : payload.config) || {};
+    const v = validateEmergencyConfig_(rawConfig);
     if (!v.ok) return resp_(400, 'Invalid emergency config: ' + v.error, null);
     paramsJson = JSON.stringify(v.config);
   }
@@ -1962,7 +2340,7 @@ function emergencyCommand_(body, deviceKey) {
     lock.releaseLock();
   }
   if (out.alert) {
-    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_CMD_' + deviceKey);
+    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_CMD_' + deviceKey, 'EMERGENCY_ALERT_COOLDOWN_MIN');
   }
   return out.resp;
 }
@@ -2102,7 +2480,7 @@ function emergencyAck_(commandId, result, message, state, deviceKey) {
     lock.releaseLock();
   }
   if (out.alert) {
-    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_ACK_' + deviceKey);
+    maybeSendTelegramAlert_(out.alert, 'PLTS_TG_EMG_ACK_' + deviceKey, 'EMERGENCY_ALERT_COOLDOWN_MIN');
   }
   return out.resp;
 }
@@ -2162,7 +2540,7 @@ function emergencyEvent_(payload, deviceKey) {
   maybeSendTelegramAlert_(
     'EMERGENCY ' + type + ' [' + deviceKey + ']' +
     (payload.reason ? ' — ' + String(payload.reason).slice(0, 120) : ''),
-    'PLTS_TG_EMG_EVT_' + deviceKey + '_' + type);
+    'PLTS_TG_EMG_EVT_' + deviceKey + '_' + type, 'EMERGENCY_ALERT_COOLDOWN_MIN');
   return resp_(200, 'Emergency event logged', { type: type });
 }
 
