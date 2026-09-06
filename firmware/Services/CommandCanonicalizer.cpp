@@ -15,7 +15,9 @@ namespace Services {
 struct CommandDef {
   const char* type;
   const char* action;
-  const char* fields[12];  // null-terminated list of allowed payload fields
+  // [PARITY-4] 12 → 32 slots: config.update now carries 10 base + 5 BMS +
+  // 11 alarm-threshold fields (the PWA AlarmThresholds schema names).
+  const char* fields[32];  // null-terminated list of allowed payload fields
 };
 
 static const CommandDef COMMAND_REGISTRY[] = {
@@ -23,7 +25,21 @@ static const CommandDef COMMAND_REGISTRY[] = {
     {"batteryCapacityAh","batteryNominalV","fullVoltage","lowVoltage",
      "idleCurrentThreshold","fullChargeCurrentThreshold",
      "fullChargePersistenceSec","telemetryIntervalSec",
-     "deviceName","timezone", nullptr}},
+     "deviceName","timezone",
+     // v1.6.0 BMS comm fields — REST handlePostConfig + MqttConfigReceiver
+     // both apply these; the whitelist omission made every REST/MQTT config
+     // update carrying them fail with "unknown field" (latent parity bug).
+     "bmsProtocol","bmsPollIntervalMs","bmsModbusSlaveId",
+     "bmsModbusTcpHost","bmsModbusTcpPort",
+     // [PARITY-4] two-tier alarm thresholds (PWA AlarmThresholds names).
+     "voltageLowWarn","voltageLowCritical","voltageHighWarn",
+     "voltageHighCritical","currentHighWarn","currentHighCritical",
+     "temperatureHighWarn","temperatureHighCritical","humidityHighWarn",
+     "socLowWarn","socLowCritical", nullptr}},
+  // [PARITY-4] password change is a durable config mutation — same canonical
+  // transaction path (requestId + journal + dedup) as every other mutation.
+  {"config", "password",
+    {"current","next", nullptr}},
   {"calibration", "update",
     {"version","voltageLow","voltageNominal","voltageFull",
      "acs712Offset","acs712Sensitivity","sht31TempOffset","sht31HumOffset",
@@ -86,7 +102,7 @@ bool CommandCanonicalizer::isFieldAllowed(const String& type, const String& fiel
   String t = type; t.toLowerCase();
   for (size_t i = 0; i < COMMAND_REGISTRY_COUNT; i++) {
     if (t == COMMAND_REGISTRY[i].type) {
-      for (size_t j = 0; j < 12 && COMMAND_REGISTRY[i].fields[j]; j++) {
+      for (size_t j = 0; j < 32 && COMMAND_REGISTRY[i].fields[j]; j++) {
         if (field == COMMAND_REGISTRY[i].fields[j]) return true;
       }
     }
@@ -175,7 +191,7 @@ String CommandCanonicalizer::buildCanonicalString(JsonDocument& doc,
     }
   }
   // Emit fields in canonical order
-  for (size_t j = 0; j < 12 && def->fields[j]; j++) {
+  for (size_t j = 0; j < 32 && def->fields[j]; j++) {
     const char* fieldName = def->fields[j];
     if (!payload.containsKey(fieldName)) continue;
     JsonVariant v = payload[fieldName];

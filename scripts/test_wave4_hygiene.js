@@ -20,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 // ---------------------------------------------------------------------------
 // GAS service mocks (same fidelity as test_wave1_integration.js, plus:
@@ -171,7 +172,7 @@ function hmacHex(msg, key) { return crypto.createHmac('sha256', Buffer.from(Stri
 console.log('\n=== WAVE-4 HYGIENE TEST (real Code.gs + real crypto) ===\n');
 
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const DEVICE = 'PLTS_MONITOR_01';
@@ -360,7 +361,7 @@ console.log('\n[Q] GAS-2-Q credential cache TTL:');
 console.log('\n[T] GAS-2-T duplicate window covers full retention:');
 {
   const envT = createGasContext();
-  envT.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(envT);
   setConfig(envT, 'LOG_ROTATION_MAX_ROWS', '3500');   // window becomes 3600
 
   const tel = envT.ss.sheets['Telemetry'];
@@ -391,7 +392,7 @@ console.log('\n[T] GAS-2-T duplicate window covers full retention:');
 console.log('\n[U] GAS-2-U HISTORY/LATEST scan windows:');
 {
   const envU = createGasContext();
-  envU.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(envU);
   setConfig(envU, 'LOG_ROTATION_MAX_ROWS', '6000');   // window becomes 6100
   setConfig(envU, 'HISTORY_MAX_ROWS', '8000');
 
@@ -412,7 +413,7 @@ console.log('\n[U] GAS-2-U HISTORY/LATEST scan windows:');
 
   // LATEST: true newest by event_time sits 3300 rows back (later rows carry OLDER event_time)
   const envU2 = createGasContext();
-  envU2.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(envU2);
   setConfig(envU2, 'LOG_ROTATION_MAX_ROWS', '6000');
   const tel2 = envU2.ss.sheets['Telemetry'];
   for (let s = 1; s <= 5500; s++) {
@@ -500,7 +501,7 @@ console.log('\n[V] GAS-2-V Ota/OtaEvents/Calibration rotations:');
 console.log('\n[X] GAS-2-X verifyHmac_ write-back removed:');
 {
   const envX = createGasContext();
-  envX.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(envX);
   const devices = envX.ss.sheets['Devices'];
   devices.rows.push(['HMAC_DEV', 'hmac_secret_w4', 'H', '', '']);
 

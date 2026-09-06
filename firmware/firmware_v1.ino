@@ -162,6 +162,20 @@ namespace Core {
   uint8_t  cfgBmsModbusSlaveId           = BMS_MODBUS_SLAVE_ID;
   char     cfgBmsModbusTcpHost[64]       = "";       // empty = Modbus TCP off
   uint16_t cfgBmsModbusTcpPort           = BMS_MODBUS_TCP_PORT;
+  // [PARITY-4 2026-09-06] — operator-configurable alarm thresholds (two-tier,
+  // NVS "plts_alarm", PWA AlarmThresholds schema names verbatim). Loaded by
+  // Storage::config.loadAlarmConfig(); applied live by AnomalyDetector.
+  float    cfgAlarmVoltageLowWarnV        = ALARM_VOLTAGE_LOW_WARN_V;
+  float    cfgAlarmVoltageLowCriticalV    = ALARM_VOLTAGE_LOW_CRITICAL_V;
+  float    cfgAlarmVoltageHighWarnV       = ALARM_VOLTAGE_HIGH_WARN_V;
+  float    cfgAlarmVoltageHighCriticalV   = ALARM_VOLTAGE_HIGH_CRITICAL_V;
+  float    cfgAlarmCurrentHighWarnA       = ALARM_CURRENT_HIGH_WARN_A;
+  float    cfgAlarmCurrentHighCriticalA   = ALARM_CURRENT_HIGH_CRITICAL_A;
+  float    cfgAlarmTemperatureHighWarnC   = ALARM_TEMP_HIGH_WARN_C;
+  float    cfgAlarmTemperatureHighCriticalC = ALARM_TEMP_HIGH_CRITICAL_C;
+  float    cfgAlarmHumidityHighWarnPct    = ALARM_HUMIDITY_HIGH_WARN_PCT;
+  float    cfgAlarmSocLowWarnPct          = ALARM_SOC_LOW_WARN_PCT;
+  float    cfgAlarmSocLowCriticalPct      = ALARM_SOC_LOW_CRITICAL_PCT;
   // v1.7.0 — E-WAVE emergency trigger config (NVS "plts_emg", loaded by
   // Storage::config.loadEmergencyConfig(); GAS CONFIG command rewrites it)
 #if PLTS_ENABLE_EMERGENCY
@@ -261,6 +275,7 @@ void setup() {
   Storage::config.loadUserConfig();
   Storage::config.loadDeviceConfig();
   Storage::config.loadBatteryConfig();  // populates cfg* runtime globals
+  Storage::config.loadAlarmConfig();    // [PARITY-4] alarm thresholds (NVS plts_alarm)
 #if PLTS_ENABLE_EMERGENCY
   Storage::config.loadEmergencyConfig(); // v1.7.0 — E-WAVE trigger config
 #endif
@@ -1101,28 +1116,13 @@ void energyTask(void* pv) {
         Services::anomalyDetector.tick(actx, snap.timestamp);
       }
 
-      // Voltage Services::alarms (brief §24 — hysteresis)
-      if (snap.batteryVoltage.isValid()) {
-        static bool lowAlarmActive = false;
-        static bool highAlarmActive = false;
-        float v = snap.batteryVoltage.value;
-        if (!lowAlarmActive && v < Core::cfgLowVoltage) {
-          Services::alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_LOW, Core::AlarmSeverity::Critical,
-                       "Battery voltage below low threshold");
-          lowAlarmActive = true;
-        } else if (lowAlarmActive && v > Core::BATTERY_LOW_CLEAR_V) {
-          Services::alarms.clear(Core::AlarmCode::BATTERY_VOLTAGE_LOW);
-          lowAlarmActive = false;
-        }
-        if (!highAlarmActive && v > Core::BATTERY_HIGH_V) {
-          Services::alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_HIGH, Core::AlarmSeverity::Warning,
-                       "Battery voltage above high threshold");
-          highAlarmActive = true;
-        } else if (highAlarmActive && v < Core::BATTERY_HIGH_CLEAR_V) {
-          Services::alarms.clear(Core::AlarmCode::BATTERY_VOLTAGE_HIGH);
-          highAlarmActive = false;
-        }
-      }
+      // Voltage alarms (brief §24 — hysteresis)
+      // [PARITY-4 2026-09-06] This second, conflicting evaluator for
+      // BATTERY_VOLTAGE_LOW/HIGH was REMOVED: AnomalyDetector::tick() (called
+      // above) is now the SINGLE evaluator with the configurable two-tier
+      // thresholds + hysteresis. Two state machines on one registry caused
+      // dueling severities (Critical here, Warning there) and chattering
+      // clears (no hysteresis on the AnomalyDetector path).
     }
     vTaskDelayUntil(&lastWake, period);
   }

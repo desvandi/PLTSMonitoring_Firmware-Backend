@@ -1,6 +1,16 @@
 // =============================================================================
 // Services/AnomalyDetector.h — Deterministic anomaly detection (brief §59)
 // -----------------------------------------------------------------------------
+// [PARITY-4 2026-09-06] SINGLE evaluator for the LEVEL-threshold alarm codes
+// (BATTERY_VOLTAGE_LOW/HIGH, BATTERY_OVERCURRENT_*, TEMPERATURE_*,
+// HUMIDITY_HIGH, BATTERY_SOC_LOW). Thresholds are OPERATOR CONFIG (NVS
+// "plts_alarm", REST /api/config + MQTT config.update — see Core/Globals.h
+// cfgAlarm*). The duplicate voltage-alarm block that used to live in
+// firmware_v1.ino was removed (it fought this evaluator on severity and
+// clear semantics).
+// Rate-based thresholds below (dV/dt, dI/dt, dT/dt, dSOC/dt) remain
+// engineering constants — they characterize sensor health, not operator
+// alarm policy.
 // Detects:
 //   - current spike (|dI/dt| > threshold)
 //   - current stuck (no variation over window)

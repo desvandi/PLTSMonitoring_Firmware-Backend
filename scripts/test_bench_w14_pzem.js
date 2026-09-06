@@ -50,6 +50,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createGasContext } = require('./bench_w14_gasenv');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 const FWB = path.join(__dirname, '..');
 const FW = path.join(FWB, 'firmware');
@@ -484,7 +485,7 @@ console.log('\n[PZ-6] GAS ingest — REAL Code.gs in vm sandbox:');
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 {
   const g = createGasContext();
-  g.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(g);
   g.registerDevice('PLTS-BENCH-PZEM', 'modular');
   const envelope = (seq, ts, acBlock) => ({
     protocolVersion: 1, firmwareVersion: '1.7.1', deviceId: 'PLTS-BENCH-PZEM',
@@ -573,7 +574,14 @@ const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 // ---- PZ-7 static: PWA gasEnvelope meter contract -------------------------------
 console.log('\n[PZ-7] PWA gasEnvelope meter mapping (source contract):');
 {
-  const ge = fs.readFileSync(path.join(PWA, 'src', 'lib', 'gasEnvelope.ts'), 'utf-8');
+  // [PARITY-4] Cross-repo section: SKIP (not FAIL) when the PWA repo is not
+  // checked out alongside (same convention as test_alarm_ack_contract.py —
+  // the cross-repo contract is covered by the PWA CI otherwise).
+  const gePath = path.join(PWA, 'src', 'lib', 'gasEnvelope.ts');
+  if (!fs.existsSync(gePath)) {
+    console.log('  SKIP — PLTSMonitoring_PWA not present next to the firmware repo');
+  } else {
+  const ge = fs.readFileSync(gePath, 'utf-8');
   check('PZ-7c gasEnvelope: nested ac.meter first, flat fallback (W12)',
     /meter\.power\s*\?\?\s*d\.p_ac_meter/.test(ge) &&
     /meter\.voltage\s*\?\?\s*d\.meter_v/.test(ge) &&
@@ -588,6 +596,7 @@ console.log('\n[PZ-7] PWA gasEnvelope meter mapping (source contract):');
     /p_ac_meter: number \| null/.test(geTypes) &&
     /meter_v: number \| null/.test(geTypes) &&
     /meter_connected: boolean \| null/.test(geTypes));
+  }
 }
 
 // ---- PZ-8: static flag gates ----------------------------------------------------

@@ -58,7 +58,10 @@ void HttpServer::begin() {
         }
       }
       http.sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-      http.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token");
+      // [PARITY-4] X-Request-Id allowed: the PWA sends it on POST
+      // /api/config/import (transaction identity for the journal — the body
+      // itself is CRC32-verified and cannot carry the id).
+      http.sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token, X-Request-Id");
       http.sendHeader("Access-Control-Allow-Credentials", "true");
       http.send(204, "text/plain", "");
       return;
@@ -86,9 +89,10 @@ void HttpServer::begin() {
   // only — closes the dead-end where nothing ever wrote wifi_ssid/wifi_pass).
   ProvisionHandlers::registerRoutes();
 
-  // Collect headers we need
+  // Collect headers we need ([PARITY-4] + X-Request-Id for the journaled
+  // config-import transaction identity)
   const char* headers[] = {
-    "Origin", "Authorization", "X-CSRF-Token", "Content-Type", "Content-Length"
+    "Origin", "Authorization", "X-CSRF-Token", "Content-Type", "Content-Length", "X-Request-Id"
   };
   _server.collectHeaders(headers, sizeof(headers) / sizeof(headers[0]));
 

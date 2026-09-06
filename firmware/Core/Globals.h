@@ -104,6 +104,26 @@ extern char     cfgBmsProtocol[16];        // "auto"|"none"|protocol id
 extern uint8_t  cfgBmsModbusSlaveId;       // Modbus RTU/TCP unit id
 extern char     cfgBmsModbusTcpHost[64];   // empty = Modbus TCP slot off
 extern uint16_t cfgBmsModbusTcpPort;       // default 502
+
+// ===========================================================================
+// [PARITY-4 2026-09-06] OPERATOR-CONFIGURABLE ALARM THRESHOLDS (two-tier).
+// Persisted in NVS "plts_alarm" (Storage::ConfigStore::load/saveAlarmConfig);
+// mutated via REST /api/config + MQTT config.update through the canonical
+// command path (CommandCanonicalizer whitelist: fail-closed); consumed LIVE
+// by Services::AnomalyDetector — the single alarm evaluator. Field names are
+// the PWA AlarmThresholds schema verbatim (cross-layer contract).
+// ===========================================================================
+extern float    cfgAlarmVoltageLowWarnV;        // [40,50]   default 46
+extern float    cfgAlarmVoltageLowCriticalV;    // [40,50]   default 45 (< warn)
+extern float    cfgAlarmVoltageHighWarnV;       // [50,60]   default 55
+extern float    cfgAlarmVoltageHighCriticalV;   // [50,60]   default 56 (> warn)
+extern float    cfgAlarmCurrentHighWarnA;       // [10,150]  |I| default 60
+extern float    cfgAlarmCurrentHighCriticalA;   // [10,160]  |I| default 100
+extern float    cfgAlarmTemperatureHighWarnC;   // [-20,80]  default 40
+extern float    cfgAlarmTemperatureHighCriticalC; // [-20,90] default 50 (> warn)
+extern float    cfgAlarmHumidityHighWarnPct;    // [50,100]  default 85
+extern float    cfgAlarmSocLowWarnPct;          // [5,50]    default 20
+extern float    cfgAlarmSocLowCriticalPct;      // [2,50]    default 10 (< warn)
 #if PLTS_ENABLE_EMERGENCY
 // v1.7.0 — E-WAVE emergency trigger config (persisted in NVS "plts_emg"
 // via Storage::ConfigStore; GAS EMERGENCY_CONFIG command rewrites it after

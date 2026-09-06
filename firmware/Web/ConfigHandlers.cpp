@@ -20,7 +20,9 @@ namespace ConfigHandlers {
 
 void handleGetConfig() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
-  StaticJsonDocument<2048> doc;
+  // [PARITY-4] 2048 → 3072: the alarm-threshold readback (flat + nested)
+  // roughly doubles the serialized size.
+  StaticJsonDocument<3072> doc;
   doc["configVersion"] = Core::calibration.version;
   doc["batteryCapacityAh"] = Core::cfgBatteryCapacityAh;
   doc["batteryNominalV"] = Core::cfgBatteryNominalVoltage;
@@ -38,6 +40,33 @@ void handleGetConfig() {
   doc["bmsModbusTcpPort"] = Core::cfgBmsModbusTcpPort;
   doc["deviceName"] = Core::deviceName;
   doc["timezone"] = Core::cfgTimezone;
+  // [PARITY-4] operator alarm thresholds — flat keys (mutation surface, same
+  // names as the canonicalizer whitelist) AND a nested `alarmThresholds`
+  // object (read surface, the exact PWA Configuration Center schema that
+  // previously rendered nothing because no firmware ever served it).
+  doc["voltageLowWarn"] = Core::cfgAlarmVoltageLowWarnV;
+  doc["voltageLowCritical"] = Core::cfgAlarmVoltageLowCriticalV;
+  doc["voltageHighWarn"] = Core::cfgAlarmVoltageHighWarnV;
+  doc["voltageHighCritical"] = Core::cfgAlarmVoltageHighCriticalV;
+  doc["currentHighWarn"] = Core::cfgAlarmCurrentHighWarnA;
+  doc["currentHighCritical"] = Core::cfgAlarmCurrentHighCriticalA;
+  doc["temperatureHighWarn"] = Core::cfgAlarmTemperatureHighWarnC;
+  doc["temperatureHighCritical"] = Core::cfgAlarmTemperatureHighCriticalC;
+  doc["humidityHighWarn"] = Core::cfgAlarmHumidityHighWarnPct;
+  doc["socLowWarn"] = Core::cfgAlarmSocLowWarnPct;
+  doc["socLowCritical"] = Core::cfgAlarmSocLowCriticalPct;
+  JsonObject alarm = doc.createNestedObject("alarmThresholds");
+  alarm["voltageLowWarn"] = Core::cfgAlarmVoltageLowWarnV;
+  alarm["voltageLowCritical"] = Core::cfgAlarmVoltageLowCriticalV;
+  alarm["voltageHighWarn"] = Core::cfgAlarmVoltageHighWarnV;
+  alarm["voltageHighCritical"] = Core::cfgAlarmVoltageHighCriticalV;
+  alarm["currentHighWarn"] = Core::cfgAlarmCurrentHighWarnA;
+  alarm["currentHighCritical"] = Core::cfgAlarmCurrentHighCriticalA;
+  alarm["temperatureHighWarn"] = Core::cfgAlarmTemperatureHighWarnC;
+  alarm["temperatureHighCritical"] = Core::cfgAlarmTemperatureHighCriticalC;
+  alarm["humidityHighWarn"] = Core::cfgAlarmHumidityHighWarnPct;
+  alarm["socLowWarn"] = Core::cfgAlarmSocLowWarnPct;
+  alarm["socLowCritical"] = Core::cfgAlarmSocLowCriticalPct;
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);
 }
@@ -162,6 +191,87 @@ void handlePostConfig() {
   if (doc.containsKey("timezone")) {
     const char* t = doc["timezone"];
     if (t) { strncpy(Core::cfgTimezone, t, 39); Core::cfgTimezone[39] = '\0'; }
+  }
+  // [PARITY-4] two-tier alarm thresholds — validated + persisted + applied
+  // live by AnomalyDetector on the next tick. Cross-field rule: within each
+  // direction the warn tier must sit on the safe side of the critical tier
+  // (low: warn > critical; high: warn < critical), mirroring the range +
+  // tier-order sanitize in ConfigStore::loadAlarmConfig.
+  {
+    bool alarmChanged = false;
+    if (doc.containsKey("voltageLowWarn")) {
+      float v = doc["voltageLowWarn"];
+      if (v < 40 || v > 50) { sendError(400, "voltageLowWarn must be 40..50"); return; }
+      Core::cfgAlarmVoltageLowWarnV = v; alarmChanged = true;
+    }
+    if (doc.containsKey("voltageLowCritical")) {
+      float v = doc["voltageLowCritical"];
+      if (v < 40 || v > 50) { sendError(400, "voltageLowCritical must be 40..50"); return; }
+      Core::cfgAlarmVoltageLowCriticalV = v; alarmChanged = true;
+    }
+    if (doc.containsKey("voltageHighWarn")) {
+      float v = doc["voltageHighWarn"];
+      if (v < 50 || v > 60) { sendError(400, "voltageHighWarn must be 50..60"); return; }
+      Core::cfgAlarmVoltageHighWarnV = v; alarmChanged = true;
+    }
+    if (doc.containsKey("voltageHighCritical")) {
+      float v = doc["voltageHighCritical"];
+      if (v < 50 || v > 60) { sendError(400, "voltageHighCritical must be 50..60"); return; }
+      Core::cfgAlarmVoltageHighCriticalV = v; alarmChanged = true;
+    }
+    if (doc.containsKey("currentHighWarn")) {
+      float v = doc["currentHighWarn"];
+      if (v < 10 || v > 150) { sendError(400, "currentHighWarn must be 10..150"); return; }
+      Core::cfgAlarmCurrentHighWarnA = v; alarmChanged = true;
+    }
+    if (doc.containsKey("currentHighCritical")) {
+      float v = doc["currentHighCritical"];
+      if (v < 10 || v > 160) { sendError(400, "currentHighCritical must be 10..160"); return; }
+      Core::cfgAlarmCurrentHighCriticalA = v; alarmChanged = true;
+    }
+    if (doc.containsKey("temperatureHighWarn")) {
+      float v = doc["temperatureHighWarn"];
+      if (v < -20 || v > 80) { sendError(400, "temperatureHighWarn must be -20..80"); return; }
+      Core::cfgAlarmTemperatureHighWarnC = v; alarmChanged = true;
+    }
+    if (doc.containsKey("temperatureHighCritical")) {
+      float v = doc["temperatureHighCritical"];
+      if (v < -20 || v > 90) { sendError(400, "temperatureHighCritical must be -20..90"); return; }
+      Core::cfgAlarmTemperatureHighCriticalC = v; alarmChanged = true;
+    }
+    if (doc.containsKey("humidityHighWarn")) {
+      float v = doc["humidityHighWarn"];
+      if (v < 50 || v > 100) { sendError(400, "humidityHighWarn must be 50..100"); return; }
+      Core::cfgAlarmHumidityHighWarnPct = v; alarmChanged = true;
+    }
+    if (doc.containsKey("socLowWarn")) {
+      float v = doc["socLowWarn"];
+      if (v < 5 || v > 50) { sendError(400, "socLowWarn must be 5..50"); return; }
+      Core::cfgAlarmSocLowWarnPct = v; alarmChanged = true;
+    }
+    if (doc.containsKey("socLowCritical")) {
+      float v = doc["socLowCritical"];
+      if (v < 2 || v > 50) { sendError(400, "socLowCritical must be 2..50"); return; }
+      Core::cfgAlarmSocLowCriticalPct = v; alarmChanged = true;
+    }
+    // Tier order (only enforced when BOTH tiers were provided or both are
+    // in RAM after the partial update — cheap and unambiguous).
+    if (Core::cfgAlarmVoltageLowCriticalV >= Core::cfgAlarmVoltageLowWarnV) {
+      sendError(400, "voltageLowCritical must be < voltageLowWarn"); return;
+    }
+    if (Core::cfgAlarmVoltageHighCriticalV <= Core::cfgAlarmVoltageHighWarnV) {
+      sendError(400, "voltageHighCritical must be > voltageHighWarn"); return;
+    }
+    if (Core::cfgAlarmCurrentHighCriticalA <= Core::cfgAlarmCurrentHighWarnA) {
+      sendError(400, "currentHighCritical must be > currentHighWarn"); return;
+    }
+    if (Core::cfgAlarmTemperatureHighCriticalC <= Core::cfgAlarmTemperatureHighWarnC) {
+      sendError(400, "temperatureHighCritical must be > temperatureHighWarn"); return;
+    }
+    if (Core::cfgAlarmSocLowCriticalPct >= Core::cfgAlarmSocLowWarnPct) {
+      sendError(400, "socLowCritical must be < socLowWarn"); return;
+    }
+    if (alarmChanged) Storage::config.saveAlarmConfig();
   }
   Storage::config.saveBatteryConfig();
   Storage::config.saveDeviceConfig();

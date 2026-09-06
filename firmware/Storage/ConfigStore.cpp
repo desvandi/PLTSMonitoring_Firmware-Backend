@@ -342,6 +342,74 @@ void ConfigStore::saveBatteryConfig() {
   Services::Log.append(Core::LogType::ConfigurationChanged, "Battery config saved", 0);
 }
 
+// ============================================================================
+// [PARITY-4 2026-09-06] — OPERATOR ALARM THRESHOLD CONFIG (NVS "plts_alarm",
+// short keys). Defaults-on-read + range sanitize on load (same upgrade
+// pattern as plts_emg). Ranges mirror Web::ConfigHandlers + MqttConfigReceiver
+// validation — all three surfaces must stay byte-for-byte consistent.
+// ============================================================================
+void ConfigStore::loadAlarmConfig() {
+  Preferences p;
+  p.begin("plts_alarm", true);
+  Core::cfgAlarmVoltageLowWarnV          = p.getFloat("vLoW",  Core::ALARM_VOLTAGE_LOW_WARN_V);
+  Core::cfgAlarmVoltageLowCriticalV      = p.getFloat("vLoC",  Core::ALARM_VOLTAGE_LOW_CRITICAL_V);
+  Core::cfgAlarmVoltageHighWarnV         = p.getFloat("vHiW",  Core::ALARM_VOLTAGE_HIGH_WARN_V);
+  Core::cfgAlarmVoltageHighCriticalV     = p.getFloat("vHiC",  Core::ALARM_VOLTAGE_HIGH_CRITICAL_V);
+  Core::cfgAlarmCurrentHighWarnA         = p.getFloat("iW",    Core::ALARM_CURRENT_HIGH_WARN_A);
+  Core::cfgAlarmCurrentHighCriticalA     = p.getFloat("iC",    Core::ALARM_CURRENT_HIGH_CRITICAL_A);
+  Core::cfgAlarmTemperatureHighWarnC     = p.getFloat("tW",    Core::ALARM_TEMP_HIGH_WARN_C);
+  Core::cfgAlarmTemperatureHighCriticalC = p.getFloat("tC",    Core::ALARM_TEMP_HIGH_CRITICAL_C);
+  Core::cfgAlarmHumidityHighWarnPct      = p.getFloat("hW",    Core::ALARM_HUMIDITY_HIGH_WARN_PCT);
+  Core::cfgAlarmSocLowWarnPct            = p.getFloat("socW",  Core::ALARM_SOC_LOW_WARN_PCT);
+  Core::cfgAlarmSocLowCriticalPct        = p.getFloat("socC",  Core::ALARM_SOC_LOW_CRITICAL_PCT);
+  p.end();
+  // Sanitize — a corrupt/old NVS image must never arm a nonsense alarm band.
+  // Each tier is clamped to its validated range AND the warn/critical order
+  // is enforced (warn strictly less/greater than critical per direction).
+  auto clampf = [](float v, float lo, float hi, float dflt) {
+    return (!std::isfinite(v) || v < lo || v > hi) ? dflt : v;
+  };
+  Core::cfgAlarmVoltageLowWarnV = clampf(Core::cfgAlarmVoltageLowWarnV, 40.0f, 50.0f, Core::ALARM_VOLTAGE_LOW_WARN_V);
+  Core::cfgAlarmVoltageLowCriticalV = clampf(Core::cfgAlarmVoltageLowCriticalV, 40.0f, 50.0f, Core::ALARM_VOLTAGE_LOW_CRITICAL_V);
+  if (Core::cfgAlarmVoltageLowCriticalV >= Core::cfgAlarmVoltageLowWarnV)
+    Core::cfgAlarmVoltageLowCriticalV = Core::ALARM_VOLTAGE_LOW_CRITICAL_V;
+  Core::cfgAlarmVoltageHighWarnV = clampf(Core::cfgAlarmVoltageHighWarnV, 50.0f, 60.0f, Core::ALARM_VOLTAGE_HIGH_WARN_V);
+  Core::cfgAlarmVoltageHighCriticalV = clampf(Core::cfgAlarmVoltageHighCriticalV, 50.0f, 60.0f, Core::ALARM_VOLTAGE_HIGH_CRITICAL_V);
+  if (Core::cfgAlarmVoltageHighCriticalV <= Core::cfgAlarmVoltageHighWarnV)
+    Core::cfgAlarmVoltageHighCriticalV = Core::ALARM_VOLTAGE_HIGH_CRITICAL_V;
+  Core::cfgAlarmCurrentHighWarnA = clampf(Core::cfgAlarmCurrentHighWarnA, 10.0f, 150.0f, Core::ALARM_CURRENT_HIGH_WARN_A);
+  Core::cfgAlarmCurrentHighCriticalA = clampf(Core::cfgAlarmCurrentHighCriticalA, 10.0f, 160.0f, Core::ALARM_CURRENT_HIGH_CRITICAL_A);
+  if (Core::cfgAlarmCurrentHighCriticalA <= Core::cfgAlarmCurrentHighWarnA)
+    Core::cfgAlarmCurrentHighCriticalA = Core::ALARM_CURRENT_HIGH_CRITICAL_A;
+  Core::cfgAlarmTemperatureHighWarnC = clampf(Core::cfgAlarmTemperatureHighWarnC, -20.0f, 80.0f, Core::ALARM_TEMP_HIGH_WARN_C);
+  Core::cfgAlarmTemperatureHighCriticalC = clampf(Core::cfgAlarmTemperatureHighCriticalC, -20.0f, 90.0f, Core::ALARM_TEMP_HIGH_CRITICAL_C);
+  if (Core::cfgAlarmTemperatureHighCriticalC <= Core::cfgAlarmTemperatureHighWarnC)
+    Core::cfgAlarmTemperatureHighCriticalC = Core::ALARM_TEMP_HIGH_CRITICAL_C;
+  Core::cfgAlarmHumidityHighWarnPct = clampf(Core::cfgAlarmHumidityHighWarnPct, 50.0f, 100.0f, Core::ALARM_HUMIDITY_HIGH_WARN_PCT);
+  Core::cfgAlarmSocLowWarnPct = clampf(Core::cfgAlarmSocLowWarnPct, 5.0f, 50.0f, Core::ALARM_SOC_LOW_WARN_PCT);
+  Core::cfgAlarmSocLowCriticalPct = clampf(Core::cfgAlarmSocLowCriticalPct, 2.0f, 50.0f, Core::ALARM_SOC_LOW_CRITICAL_PCT);
+  if (Core::cfgAlarmSocLowCriticalPct >= Core::cfgAlarmSocLowWarnPct)
+    Core::cfgAlarmSocLowCriticalPct = Core::ALARM_SOC_LOW_CRITICAL_PCT;
+}
+
+void ConfigStore::saveAlarmConfig() {
+  Preferences p;
+  p.begin("plts_alarm", false);
+  p.putFloat("vLoW", Core::cfgAlarmVoltageLowWarnV);
+  p.putFloat("vLoC", Core::cfgAlarmVoltageLowCriticalV);
+  p.putFloat("vHiW", Core::cfgAlarmVoltageHighWarnV);
+  p.putFloat("vHiC", Core::cfgAlarmVoltageHighCriticalV);
+  p.putFloat("iW",   Core::cfgAlarmCurrentHighWarnA);
+  p.putFloat("iC",   Core::cfgAlarmCurrentHighCriticalA);
+  p.putFloat("tW",   Core::cfgAlarmTemperatureHighWarnC);
+  p.putFloat("tC",   Core::cfgAlarmTemperatureHighCriticalC);
+  p.putFloat("hW",   Core::cfgAlarmHumidityHighWarnPct);
+  p.putFloat("socW", Core::cfgAlarmSocLowWarnPct);
+  p.putFloat("socC", Core::cfgAlarmSocLowCriticalPct);
+  p.end();
+  Services::Log.append(Core::LogType::ConfigurationChanged, "Alarm config saved", 0);
+}
+
 #if PLTS_ENABLE_EMERGENCY
 // ============================================================================
 // v1.7.0 — E-WAVE EMERGENCY TRIGGER CONFIG (NVS "plts_emg", short keys).
@@ -558,6 +626,20 @@ String ConfigStore::exportAll() {
   batt["endA"]       = Core::cfgFullChargeCurrentThreshold;
   batt["persistS"]   = Core::cfgFullChargePersistenceSec;
   batt["telS"]       = Core::cfgTelemetryIntervalSec;
+  // [PARITY-4] alarm thresholds ride the backup so a restored device keeps
+  // its alarm policy (same field names as /api/config alarmThresholds).
+  JsonObject al = doc.createNestedObject("alarmConfig");
+  al["voltageLowWarn"]          = Core::cfgAlarmVoltageLowWarnV;
+  al["voltageLowCritical"]      = Core::cfgAlarmVoltageLowCriticalV;
+  al["voltageHighWarn"]         = Core::cfgAlarmVoltageHighWarnV;
+  al["voltageHighCritical"]     = Core::cfgAlarmVoltageHighCriticalV;
+  al["currentHighWarn"]         = Core::cfgAlarmCurrentHighWarnA;
+  al["currentHighCritical"]     = Core::cfgAlarmCurrentHighCriticalA;
+  al["temperatureHighWarn"]     = Core::cfgAlarmTemperatureHighWarnC;
+  al["temperatureHighCritical"] = Core::cfgAlarmTemperatureHighCriticalC;
+  al["humidityHighWarn"]        = Core::cfgAlarmHumidityHighWarnPct;
+  al["socLowWarn"]              = Core::cfgAlarmSocLowWarnPct;
+  al["socLowCritical"]          = Core::cfgAlarmSocLowCriticalPct;
   JsonObject cal = doc.createNestedObject("calibration");
   cal["version"] = Core::calibration.version;
   // ... (omit for brevity — full serialization mirrors saveCalibration)
@@ -589,6 +671,26 @@ bool ConfigStore::importAll(const String& json) {
     Core::cfgFullChargePersistenceSec    = b["persistS"]   | Core::FULL_CHARGE_PERSISTENCE_SEC;
     Core::cfgTelemetryIntervalSec        = b["telS"]       | Core::cfgTelemetryIntervalSec;
     saveBatteryConfig();
+  }
+  // [PARITY-4] alarm threshold backup/restore. Range-sanitized through the
+  // SAME validator as loadAlarmConfig by write-then-reload: apply values,
+  // save, then loadAlarmConfig() re-clamps anything out-of-range/tier-order
+  // to defaults. A hostile/corrupt backup can never arm a nonsense band.
+  if (doc.containsKey("alarmConfig")) {
+    JsonObject a = doc["alarmConfig"];
+    if (a.containsKey("voltageLowWarn"))          Core::cfgAlarmVoltageLowWarnV        = a["voltageLowWarn"];
+    if (a.containsKey("voltageLowCritical"))      Core::cfgAlarmVoltageLowCriticalV    = a["voltageLowCritical"];
+    if (a.containsKey("voltageHighWarn"))         Core::cfgAlarmVoltageHighWarnV       = a["voltageHighWarn"];
+    if (a.containsKey("voltageHighCritical"))     Core::cfgAlarmVoltageHighCriticalV   = a["voltageHighCritical"];
+    if (a.containsKey("currentHighWarn"))         Core::cfgAlarmCurrentHighWarnA       = a["currentHighWarn"];
+    if (a.containsKey("currentHighCritical"))     Core::cfgAlarmCurrentHighCriticalA   = a["currentHighCritical"];
+    if (a.containsKey("temperatureHighWarn"))     Core::cfgAlarmTemperatureHighWarnC   = a["temperatureHighWarn"];
+    if (a.containsKey("temperatureHighCritical")) Core::cfgAlarmTemperatureHighCriticalC = a["temperatureHighCritical"];
+    if (a.containsKey("humidityHighWarn"))        Core::cfgAlarmHumidityHighWarnPct    = a["humidityHighWarn"];
+    if (a.containsKey("socLowWarn"))              Core::cfgAlarmSocLowWarnPct          = a["socLowWarn"];
+    if (a.containsKey("socLowCritical"))          Core::cfgAlarmSocLowCriticalPct      = a["socLowCritical"];
+    saveAlarmConfig();
+    loadAlarmConfig();   // sanitize (ranges + tier order) — see comment above
   }
   saveDeviceConfig();
   Services::Log.append(Core::LogType::ConfigurationChanged, "Configuration imported", 0);

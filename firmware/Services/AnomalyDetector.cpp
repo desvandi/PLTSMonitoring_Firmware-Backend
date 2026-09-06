@@ -27,6 +27,15 @@ void AnomalyDetector::begin() {
   _stuckIdx = 0; _stuckFull = false;
 }
 
+// [PARITY-4 2026-09-06] Level-threshold hysteresis bands (engineering
+// constants — the THRESHOLDS themselves are operator config, these offsets
+// only prevent chatter around the clear line).
+static constexpr float VOLTAGE_ALARM_HYST_V = 0.5f;
+static constexpr float CURRENT_ALARM_HYST_A = 2.0f;
+static constexpr float TEMP_ALARM_HYST_C    = 1.0f;
+static constexpr float HUMIDITY_ALARM_HYST_PCT = 2.0f;
+static constexpr float SOC_ALARM_HYST_PCT    = 2.0f;
+
 void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
   if (_lastTickSec == 0) {
     _lastVoltage = ctx.voltage;
@@ -61,17 +70,28 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
         alarms.raise("BATTERY_VOLTAGE_INVALID", Core::AlarmSeverity::Warning, buf);
       }
     }
-    if (ctx.voltage < Core::cfgLowVoltage) {
-      alarms.raise("BATTERY_VOLTAGE_LOW", Core::AlarmSeverity::Warning,
-                   "Battery voltage below low threshold");
-    } else {
-      alarms.clear("BATTERY_VOLTAGE_LOW");
+    // [PARITY-4] Two-tier voltage alarms (operator config, NVS "plts_alarm").
+    // AnomalyDetector is the SINGLE evaluator for these codes — the duplicate
+    // hysteresis block in firmware_v1.ino was removed (dueling severities +
+    // chattering clears). Severity upgrades on re-raise; the alarm clears
+    // only beyond warn + hysteresis (brief §24).
+    if (ctx.voltage < Core::cfgAlarmVoltageLowCriticalV) {
+      alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_LOW, Core::AlarmSeverity::Critical,
+                   "Battery voltage below critical threshold");
+    } else if (ctx.voltage < Core::cfgAlarmVoltageLowWarnV) {
+      alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_LOW, Core::AlarmSeverity::Warning,
+                   "Battery voltage below warn threshold");
+    } else if (ctx.voltage > Core::cfgAlarmVoltageLowWarnV + VOLTAGE_ALARM_HYST_V) {
+      alarms.clear(Core::AlarmCode::BATTERY_VOLTAGE_LOW);
     }
-    if (ctx.voltage > Core::cfgFullVoltage * 1.02f) {  // 2% above full
-      alarms.raise("BATTERY_VOLTAGE_HIGH", Core::AlarmSeverity::Warning,
-                   "Battery voltage above full threshold");
-    } else {
-      alarms.clear("BATTERY_VOLTAGE_HIGH");
+    if (ctx.voltage > Core::cfgAlarmVoltageHighCriticalV) {
+      alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_HIGH, Core::AlarmSeverity::Critical,
+                   "Battery voltage above critical threshold");
+    } else if (ctx.voltage > Core::cfgAlarmVoltageHighWarnV) {
+      alarms.raise(Core::AlarmCode::BATTERY_VOLTAGE_HIGH, Core::AlarmSeverity::Warning,
+                   "Battery voltage above warn threshold");
+    } else if (ctx.voltage < Core::cfgAlarmVoltageHighWarnV - VOLTAGE_ALARM_HYST_V) {
+      alarms.clear(Core::AlarmCode::BATTERY_VOLTAGE_HIGH);
     }
   }
 
@@ -92,14 +112,31 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
       }
     }
     // Overcurrent
-    if (ctx.current > Core::OVERCURRENT_CHARGE_A) {
-      alarms.raise("BATTERY_OVERCURRENT_CHARGE", Core::AlarmSeverity::Critical,
-                   "Overcurrent during charge");
-    } else { alarms.clear("BATTERY_OVERCURRENT_CHARGE"); }
-    if (-ctx.current > Core::OVERCURRENT_DISCHARGE_A) {
-      alarms.raise("BATTERY_OVERCURRENT_DISCHARGE", Core::AlarmSeverity::Critical,
-                   "Overcurrent during discharge");
-    } else { alarms.clear("BATTERY_OVERCURRENT_DISCHARGE"); }
+    // [PARITY-4] Overcurrent — two tiers on |I| (operator config), direction
+    // still selects the code (charge vs discharge). Legacy constants
+    // OVERCURRENT_CHARGE_A/DISCHARGE_A are retired from evaluation.
+    float absI = std::fabs(ctx.current);
+    if (ctx.current > 0) {
+      if (absI > Core::cfgAlarmCurrentHighCriticalA) {
+        alarms.raise(Core::AlarmCode::BATTERY_OVERCURRENT_CHARGE, Core::AlarmSeverity::Critical,
+                     "Overcurrent during charge (critical)");
+      } else if (absI > Core::cfgAlarmCurrentHighWarnA) {
+        alarms.raise(Core::AlarmCode::BATTERY_OVERCURRENT_CHARGE, Core::AlarmSeverity::Warning,
+                     "Overcurrent during charge (warn)");
+      } else if (absI < Core::cfgAlarmCurrentHighWarnA - CURRENT_ALARM_HYST_A) {
+        alarms.clear(Core::AlarmCode::BATTERY_OVERCURRENT_CHARGE);
+      }
+    } else {
+      if (absI > Core::cfgAlarmCurrentHighCriticalA) {
+        alarms.raise(Core::AlarmCode::BATTERY_OVERCURRENT_DISCHARGE, Core::AlarmSeverity::Critical,
+                     "Overcurrent during discharge (critical)");
+      } else if (absI > Core::cfgAlarmCurrentHighWarnA) {
+        alarms.raise(Core::AlarmCode::BATTERY_OVERCURRENT_DISCHARGE, Core::AlarmSeverity::Warning,
+                     "Overcurrent during discharge (warn)");
+      } else if (absI < Core::cfgAlarmCurrentHighWarnA - CURRENT_ALARM_HYST_A) {
+        alarms.clear(Core::AlarmCode::BATTERY_OVERCURRENT_DISCHARGE);
+      }
+    }
 
     // Current stuck detection (over 8-sample window)
     _currentSamples[_stuckIdx] = ctx.current;
@@ -129,19 +166,31 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
       alarms.raise("TEMPERATURE_HIGH", Core::AlarmSeverity::Warning, buf);
     }
   }
-  if (ctx.temperatureC > Core::TEMP_CRIT_THRESHOLD_C) {
-    alarms.raise("TEMPERATURE_CRITICAL", Core::AlarmSeverity::Critical,
-                 "Ambient temperature critical");
-  } else { alarms.clear("TEMPERATURE_CRITICAL"); }
-  if (ctx.temperatureC > Core::TEMP_HIGH_THRESHOLD_C) {
-    alarms.raise("TEMPERATURE_HIGH", Core::AlarmSeverity::Warning,
-                 "Ambient temperature high");
-  } else { alarms.clear("TEMPERATURE_HIGH"); }
-
-  if (ctx.humidityPct > Core::HUMIDITY_HIGH_PCT) {
-    alarms.raise("HUMIDITY_HIGH", Core::AlarmSeverity::Warning,
-                 "Humidity above threshold");
-  } else { alarms.clear("HUMIDITY_HIGH"); }
+  // [PARITY-4] Temperature + humidity — two-tier, operator config, with
+  // clear-side hysteresis (legacy TEMPERATURE_CRITICAL/HIGH/HUMIDITY_HIGH
+  // constants retired from evaluation).
+  if (std::isfinite(ctx.temperatureC)) {
+    if (ctx.temperatureC > Core::cfgAlarmTemperatureHighCriticalC) {
+      alarms.raise(Core::AlarmCode::TEMPERATURE_CRITICAL, Core::AlarmSeverity::Critical,
+                   "Ambient temperature critical");
+    } else {
+      alarms.clear(Core::AlarmCode::TEMPERATURE_CRITICAL);
+    }
+    if (ctx.temperatureC > Core::cfgAlarmTemperatureHighWarnC) {
+      alarms.raise(Core::AlarmCode::TEMPERATURE_HIGH, Core::AlarmSeverity::Warning,
+                   "Ambient temperature high");
+    } else if (ctx.temperatureC < Core::cfgAlarmTemperatureHighWarnC - TEMP_ALARM_HYST_C) {
+      alarms.clear(Core::AlarmCode::TEMPERATURE_HIGH);
+    }
+  }
+  if (std::isfinite(ctx.humidityPct)) {
+    if (ctx.humidityPct > Core::cfgAlarmHumidityHighWarnPct) {
+      alarms.raise(Core::AlarmCode::HUMIDITY_HIGH, Core::AlarmSeverity::Warning,
+                   "Humidity above threshold");
+    } else if (ctx.humidityPct < Core::cfgAlarmHumidityHighWarnPct - HUMIDITY_ALARM_HYST_PCT) {
+      alarms.clear(Core::AlarmCode::HUMIDITY_HIGH);
+    }
+  }
 
   // Telemetry sequence discontinuity
   if (_lastTelemetrySeq > 0 && ctx.telemetrySeq > _lastTelemetrySeq + 1) {
@@ -150,10 +199,28 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
   }
   _lastTelemetrySeq = ctx.telemetrySeq;
 
-  // SOC discontinuity (|dSOC/dt|)
+  // SOC discontinuity (|dSOC/dt|) — a DATA-QUALITY signal, NOT a low-SOC
+  // alarm. [PARITY-4] It previously reused the BATTERY_SOC_LOW code, which
+  // collided with the real SOC-low evaluation below (two meanings, one code).
   if (std::fabs(_lastSoc) > 0 && std::fabs(ctx.soc - _lastSoc) / dts > SOC_JUMP_PCT_PER_SEC) {
-    alarms.raise("BATTERY_SOC_LOW", Core::AlarmSeverity::Warning,
+    alarms.raise(Core::AlarmCode::BATTERY_SOC_DISCONTINUITY, Core::AlarmSeverity::Warning,
                  "SOC discontinuity detected (rapid jump)");
+  }
+
+  // [PARITY-4] REAL SOC-low alarm (brief §24) — two-tier, operator config.
+  // Only evaluated when SOC is a KNOWN number (SocStateMachine serves NaN
+  // while UNKNOWN — never a fabricated value that could raise a phantom
+  // alarm). Severity upgrades on re-raise; clears above warn + hysteresis.
+  if (std::isfinite(ctx.soc) && ctx.soc >= 0.0f && ctx.soc <= 100.0f) {
+    if (ctx.soc < Core::cfgAlarmSocLowCriticalPct) {
+      alarms.raise(Core::AlarmCode::BATTERY_SOC_LOW, Core::AlarmSeverity::Critical,
+                   "Battery SOC below critical threshold");
+    } else if (ctx.soc < Core::cfgAlarmSocLowWarnPct) {
+      alarms.raise(Core::AlarmCode::BATTERY_SOC_LOW, Core::AlarmSeverity::Warning,
+                   "Battery SOC below warn threshold");
+    } else if (ctx.soc > Core::cfgAlarmSocLowWarnPct + SOC_ALARM_HYST_PCT) {
+      alarms.clear(Core::AlarmCode::BATTERY_SOC_LOW);
+    }
   }
 
   _lastVoltage = ctx.voltage;
