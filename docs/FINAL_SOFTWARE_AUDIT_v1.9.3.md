@@ -114,3 +114,43 @@ placeholder) — perbaikan kodenya sudah berada di main, tidak menyentuh source
 bebas-rilis (release line) firmware/PWA, dan tidak mempengaruhi rantai rilis
 v1.9.3. Seluruh blocker yang tersisa sesuai struktur gate final audit A–F:
 evidence fisik, kredensial, dan otoritas rilis.
+
+## 8. ADDENDUM — Eksekusi optimasi Vercel (2026-09-06 ~11:25 UTC)
+
+> Melanjutkan §4b/§5 dengan token kedua yang valid (token pertama invalid —
+> 403 `invalidToken`; kronologi §5 tetap benar untuk waktunya). Scope token
+> sesuai arahan user: HANYA project PLTS (`plts-monitoring-pwa`,
+> `plts-monitor-push-alarm`; `remote-relay` & `jambisolarpanel` tak disentuh).
+
+1. **PWA utama sehat & terkonfigurasi benar**: git-link
+   `desvandi/PLTSMonitoring_PWA`@main, node 24.x, deployment READY dari
+   `9e47b4f`. Domain lama 307 → `jmse-plts-monitoring.vercel.app`.
+   SW produksi diverifikasi non-dev (`__WB_DISABLE_DEV_LOGS` aktif, mesin
+   precache serwist ada). **Env var: 9 var tersedia sejak 2026-09-02**
+   (API/MQTT/GAS/INSIGHTS/JWT/DEMO/SERWIST, target production+preview) —
+   nilai tidak terbaca token (no-decrypt scope), namun bukti tidak-langsung
+   (env dibuat sebelum deploy 09-06 + bundle tanpa URL ter-bake + health
+   false) menyimpulkan nilai kosong. **Gate A tetap menunggu nilai riil
+   milik user**; tidak ada nilai sintetis diset.
+2. **push-alarm DIPERBAIKI** (menutup temuan §4b): deployment baru
+   `dpl_DzA2PBr8uoUg5bv28hBozJJkvqgc` (target production, READY) berisi
+   `pwa-push-alarm/` repo main `9e47b4f` (API v13 file-upload, 13 file).
+   Verifikasi pasca-READY: `sw.js` live sha256 `be7fdd30fed6d05d…` ==
+   repo main — **fix audit-2 K-5 (same-origin notification URL) kini
+   LIVE**; header `vercel.json` aktif (sw.js: no-cache +
+   Service-Worker-Allowed: /); seluruh file inti 200. `js/config.js`
+   sengaja tetap placeholder (jujur: fitur push alarm belum aktif sampai
+   user mengisi URL GAS webapp + VAPID public key).
+3. **Insiden tercatat (transparansi)**: percobaan pertama deploy via
+   `gitSource` (dpl_6g7DKFkt) salah sasaran — project tak ter-link dan
+   rootDirectory null sehingga akan membangun repo ROOT; langsung
+   dibatalkan + dihapus sebelum READY. Domain tidak pernah menyajikannya
+   (sw.js stale terverifikasi kontinu sepanjang proses).
+4. **Batas API**: `PATCH /v9/projects` menolak `link` → git-link project
+   push-alarm adalah langkah dashboard user (Settings → Git → Connect
+   `desvandi/PLTSMonitoring_PWA`, Root Directory `pwa-push-alarm`, branch
+   `main`) agar push masa depan otomatis ter-deploy.
+5. **Tidak ada perubahan source**; freeze `e84798a`/`9e47b4f` utuh; daftar
+   blocker tidak berubah (Gate A nilai env + Gate B–F fisik/otoritas).
+   Detail operasional: `PRODUKSI_ENV_EVIDENCE.md` §6 (paket bench) +
+   script deploy (`scripts/deploy_push_alarm.py` workspace engineer).
