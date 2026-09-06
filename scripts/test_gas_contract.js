@@ -23,6 +23,7 @@
 'use strict';
 
 const fs = require('fs');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 const path = require('path');
 const vm = require('vm');
 
@@ -205,7 +206,7 @@ console.log('\n=== GAS CONTRACT TESTS (code.gs/Code.gs) ===\n');
 
 // --- Setup: run setupMasterTemplate ----------------------------------------
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 // --- T1: P0-007 — 48V config defaults ---------------------------------------
 console.log('[P0-007] Config defaults:');
@@ -377,7 +378,7 @@ console.log('\n[v1.6.0] Telemetry header migration:');
   // Fresh deployment with Config populated, then swap in a v1.5-shaped
   // Telemetry sheet (24-column header + one pre-1.6 row).
   const envOld = createGasContext();
-  envOld.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(envOld);
   const ss = envOld.sandbox.SpreadsheetApp.getActiveSpreadsheet();
   delete ss.sheets['Telemetry'];
   const sheet = ss.insertSheet('Telemetry');
@@ -401,7 +402,8 @@ console.log('\n[v1.6.0] Telemetry header migration:');
                              data: { v_bat: 51.1, i_bat_dc: -5.0, ina219_ok: true, sequence: 2 } });
   check('telemetry accepted after migration', r.status === 'SUCCESS', JSON.stringify(r));
   const hdr = sheet.rows[0];
-  check('header extended to 39 columns (v1.7 + W12 meter trio)', hdr.length === 39, `got ${hdr.length}`);
+  check('header extended to 40 columns (v1.7 + W12 trio + v1.9.0 ina219_pga_mode)', hdr.length === 40, `got ${hdr.length}`);
+  check('header v1.9.0 PGA column appended last', hdr[39] === 'ina219_pga_mode', String(hdr[39]));
   check('header v1.6 columns appended in order',
         hdr[24] === 'soc_source' && hdr[25] === 'bms_protocol' && hdr[26] === 'bms_connected' &&
         hdr[30] === 'bms_fault_flags');
@@ -418,8 +420,10 @@ console.log('\n[v1.6.0] Telemetry header migration:');
   check('pre-existing row keeps v1.5 length (old indices intact)',
         oldRow.length === 24, `got ${oldRow.length}`);
   const newRow = sheet.rows[2];
-  check('new row carries v1.7 columns (39 values)',
-        newRow && newRow.length === 39, `got ${newRow && newRow.length}`);
+  check('new row carries v1.9.0 columns (40 values)',
+        newRow && newRow.length === 40, `got ${newRow && newRow.length}`);
+  check('new row pga honest-empty for flat payload (legacy device)',
+        newRow[39] === '', `got ${JSON.stringify(newRow[39])}`);
   check('new row meter trio honest-empty for flat payload (no meter)',
         newRow[36] === '' && newRow[37] === '' && String(newRow[38]).toUpperCase() === 'FALSE',
         JSON.stringify(newRow.slice(36)));

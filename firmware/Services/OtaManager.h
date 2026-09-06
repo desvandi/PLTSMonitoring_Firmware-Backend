@@ -26,7 +26,9 @@
 //   The lifecycle continues OUT-OF-BAND: DOWNLOAD_FAILED / VERIFICATION_
 //   FAILED / ROLLBACK / ACTIVATED land in the DEVICE LOG + MQTT ack channel
 //   (GAS OtaEvents is served by the generic firmware's OTA_STATUS reporter;
-//   the modular tree reports locally until a GAS OTA_STATUS bridge exists).
+//   since [PARITY-3 2026-09-06] the modular tree mirrors the SAME lifecycle
+//   into GAS via Network::GasOtaReporter — see _emitLifecycle, which feeds
+//   BOTH channels from one funnel).
 //     ACCEPTED → DOWNLOADING → VERIFIED → FLASHED → ACTIVATED   (60 s healthy)
 //                                  ↘ DOWNLOAD_FAILED / VERIFICATION_FAILED
 //     FLASHED  → ROLLBACK      (3 unhealthy boots → previous partition)

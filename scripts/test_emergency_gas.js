@@ -50,6 +50,7 @@
 'use strict';
 
 const fs = require('fs');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
@@ -236,7 +237,7 @@ function setConfig(env, key, value) {
 console.log('\n=== WAVE-7 EMERGENCY LAYER TEST (real Code.gs) ===\n');
 
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const ADMIN = 'plts_admin_w7_9a3f7c2d5e8b1a6f';
@@ -271,7 +272,7 @@ console.log('[A] EMERGENCY_COMMAND operator gate:');
 
   // A4 — fail-closed on a fresh deployment with ADMIN_TOKEN unset.
   const env2 = createGasContext();
-  env2.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(env2);
   const a4 = doPost(env2, { action: 'EMERGENCY_COMMAND', token: TOKEN, admin_token: 'anything', command: 'ARM', device_key: 'PLTS_MONITOR_01' });
   check('A4 ADMIN_TOKEN unset → action DISABLED (401, honest refusal)',
     a4.code === 401 && /disabled — set ADMIN_TOKEN/.test(a4.message), a4.message);
@@ -541,7 +542,7 @@ console.log('\n[F] TELEMETRY piggyback + v1.7 columns:');
 
   // F10 — a PRE-1.7 row (no emergency columns) never fabricates a block.
   const legacyEnv = createGasContext();
-  legacyEnv.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(legacyEnv);
   legacyEnv.ss.sheets['Devices'].appendRow([DEV, '', 'Gudang', '', '']);
   doPost(legacyEnv, { action: 'TELEMETRY', token: TOKEN, device_key: DEV,
     data: { sequence: 1, v_bat: 50.0, i_bat_dc: -1.0, i_ac_load: 1.0, ina219_ok: true, fw_version: '1.5.4' } });
@@ -561,7 +562,7 @@ console.log('\n[F] TELEMETRY piggyback + v1.7 columns:');
 console.log('[G] Queue rotation + lock atomicity:');
 {
   const genv = createGasContext();
-  genv.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(genv);
   setConfig(genv, 'ADMIN_TOKEN', ADMIN);
   setConfig(genv, 'EMERGENCY_QUEUE_MAX_ROWS', '5');   // small cap for the test
   setConfig(genv, 'TELEGRAM_BOT_TOKEN', '111:tg-test');   // G4 alert delivery

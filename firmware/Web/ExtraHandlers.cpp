@@ -55,6 +55,14 @@ void handleLogAlias() {
 // /api/insights — proxied through the ESP32 HMAC signer to GAS.
 // Fail-closed: when GAS is not configured the route returns a deterministic
 // 503 with the reason (NEVER a mock insight — directive §3.1 / P0-006).
+// [PARITY-3 2026-09-06] GAS now SERVES action=INSIGHTS (doGet + HMAC query
+// envelope — this client was "contract-ready, not claim-ready" since WAVE-7).
+// Envelope transform added: GAS wraps every payload in {status, code, data,
+// message}; the PWA InsightsEnvelope contract is the INNER data object. The
+// old code forwarded the raw GAS body as route data, so the PWA read
+// envelope.insights and got undefined forever. Now:
+//   - GAS SUCCESS → forward ONLY resp.data (the InsightsEnvelope payload)
+//   - GAS ERROR   → honest HTTP error here carrying the GAS message
 // ---------------------------------------------------------------------------
 void handleInsights() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
@@ -68,7 +76,31 @@ void handleInsights() {
                AI::advisor.getLastError());
     return;
   }
-  sendSuccess("OK", body);
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    sendError(502, "AI insights unavailable — invalid GAS response");
+    return;
+  }
+  const char* status = doc["status"] | "";
+  if (strcmp(status, "SUCCESS") != 0) {
+    // Honest relay of the GAS verdict (503 = key unset / 404 = no telemetry /
+    // 502 = Gemini failure — the message names the real reason).
+    const char* msg = doc["message"] | "GAS error";
+    int code = doc["code"] | 0;
+    if (code < 400 || code > 599) code = 502;
+    sendError(code, "AI insights unavailable (GAS): " + String(msg));
+    return;
+  }
+  JsonVariant data = doc["data"];
+  if (data.isNull() || !data.is<JsonObject>()) {
+    sendError(502, "AI insights unavailable — GAS returned no data object");
+    return;
+  }
+  String inner;
+  serializeJson(data, inner);
+  sendSuccess("OK", inner);
 }
 
 // ---------------------------------------------------------------------------

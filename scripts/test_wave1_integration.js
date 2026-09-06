@@ -39,6 +39,7 @@
 'use strict';
 
 const fs = require('fs');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
@@ -345,7 +346,7 @@ function gasAdvisorDataJson(seq) {
 console.log('\n=== WAVE-1 INTEGRATION TEST (real Code.gs + real crypto) ===\n');
 
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';        // Config default set by template
 const GENERIC_DEVICE = 'PLTS_MONITOR_01';

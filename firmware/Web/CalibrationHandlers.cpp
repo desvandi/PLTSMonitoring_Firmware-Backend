@@ -13,6 +13,11 @@
 #include "../Services/TransactionJournal.h"
 #include "../Services/LogService.h"
 #include "../Drivers/Acs712Driver.h"
+// [PARITY-3 2026-09-06] Live raw voltage exposure for the PWA calibration
+// capture button (was: "the operator must enter raw manually OR the firmware
+// must expose it" — calibration-center.tsx).
+#include "../Drivers/AdcVoltageDriver.h"
+#include "../Core/Common.h"
 #include <ArduinoJson.h>
 
 namespace Web {
@@ -40,6 +45,16 @@ void handleGet() {
   doc["sht31HumOffset"] = Core::calibration.sht31HumOffset;
   doc["timestamp"] = Core::calibration.timestamp;
   doc["source"] = Core::calibration.source;
+  // [PARITY-3 2026-09-06] voltageRaw — the CURRENT live reading BEFORE
+  // 3-point calibration is applied (AdcVoltageDriver::getRawV(), volts).
+  // This is exactly the `raw` value the point routes expect, so the PWA
+  // capture button can prefill it instead of asking the operator to read a
+  // serial console. Honest null when the driver has no valid reading.
+  {
+    float rawV = Drivers::batteryAdc.getRawV();
+    if (Core::isValidFloat(rawV)) doc["voltageRaw"] = rawV;
+    else                          doc["voltageRaw"] = nullptr;
+  }
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);
 }
