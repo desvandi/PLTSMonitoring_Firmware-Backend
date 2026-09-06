@@ -14,6 +14,50 @@
 
 ---
 
+## ⚠️ RE-CUT 2026-09-06 — SRC di-pin ulang ke `e84798a` (baca dulu, ini menggantikan langkah 1–2 di bawah)
+
+**Apa berubah:** SRC untuk v1.9.3 kini **`e84798a7243bfb3e11b2398484ae66defdf9c292`**
+(main pasca-merge PARITY-4), BUKAN lagi `c2a2c1ca`. Branch `release/v1.9.3` sudah
+dibuat ulang di origin pada `e84798a` + commit re-cut ini (docs-only, nol perubahan
+source firmware).
+
+**Mengapa:** Independent Auditor men-CLOSE P0-2 (alarm threshold otoritatif),
+P1 transaction identity, dan P1 canonicalizer BMS berdasarkan **main**. PWA produksi
+(Vercel, auto-deploy dari main `9e47b4f`) sudah menjalankan sisi PWA dari fitur-fitur
+itu. Merilis firmware dari rantai lama (`c2a2c1ca`, mendahului PARITY-3/4) akan
+mengirim pasangan produksi yang TIDAK konsisten: kartu alarm BMS/alarm di PWA akan
+ditolak "unknown field" oleh canonicalizer lama, `X-Request-Id` import diabaikan,
+kartu alarm jatuh ke fallback — temuan CLOSED terbuka ulang saat runtime.
+Tree firmware `e84798a` vs rantai lama berbeda HANYA oleh commit parity-3/4
+(`git log 96cb34b..main -- firmware/ firmware-generic/` = 3 commit parity; kerja PCB
+S12/S10 (`9cbd58c`) hanya menyentuh `pcb/` — nol file firmware).
+
+**Artifact produksi sudah tersedia (tidak perlu build baru):**
+CI run **#100** (id 34014592009, event=push, ref=main, `e84798a`, conclusion=success)
+sudah membangun `plts-firmware-modular-production`:
+
+```text
+SRC      = e84798a7243bfb3e11b2398484ae66defdf9c292
+SRC_TS   = 1788673260                (committer date e84798a — untuk pinned-date evidence)
+SHA256   = 24e8ae225f53ad48c3cb2e9a0a0ebfc71cff4bbd6f7127a1d74e9425a7be424e
+buildId  = modular-1.9.3-e84798a7243b   (gitDirty=false)
+```
+
+Unduh artifact run #100 (zip artifact `plts-firmware-modular-production`), verifikasi
+`sha256sum firmware.bin` == nilai di atas, flash **binary itu** di bench. Jalankan
+verifier dengan `--source-commit e84798a7243bfb3e11b2398484ae66defdf9c292` dan
+`--release-json <artifact>/release.json`. Commit evidence dengan
+`GIT_COMMITTER_DATE="@1788673260 +0000"` (recipe byte-exact REL-03 tetap berlaku:
+hanya `PLTS_BUILD_DATE_STR` yang di-embed; gitCommit TIDAK di-embed ke binary).
+
+**Apa yang TIDAK berubah:** seluruh alur langkah 3–7 di bawah (bench 12 kriteria →
+verifier → Phase A → tag `-s` → CI chain → publish → Phase B 16 kriteria →
+provenance). Nilai `SRC`/`SRC_TS`/SHA di teks lama (`c2a2c1ca`, `6270368c…`,
+`1788633098`) digantikan oleh tiga nilai di atas. Langkah 1–2 (merge branch
+persiapan + cut branch) SUDAH SELESAI — jangan diulang.
+
+---
+
 ## 0. Ground rules (from the re-audit — read first)
 
 1. **No synthetic evidence.** `docs/hardware-acceptance/v1.9.3.json` and
