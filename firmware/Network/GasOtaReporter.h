@@ -66,7 +66,9 @@ public:
   void tick();
 
   bool    isEnabled() const { return _enabled; }
-  uint8_t pendingCount() const;
+  // NOTE: not const — portENTER_CRITICAL requires a non-const spinlock*
+  // (ESP-IDF portMUX semantics).
+  uint8_t pendingCount();
 
   static constexpr uint32_t HTTP_TIMEOUT_MS        = 7000;
   static constexpr uint32_t MIN_FLUSH_INTERVAL_MS  = 5000;

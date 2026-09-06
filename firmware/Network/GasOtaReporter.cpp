@@ -102,7 +102,7 @@ void GasOtaReporter::report(const char* state, const char* version,
 }
 
 // ---------------------------------------------------------------------------
-uint8_t GasOtaReporter::pendingCount() const {
+uint8_t GasOtaReporter::pendingCount() {
   portENTER_CRITICAL(&_mux);
   uint8_t n = _count;
   portEXIT_CRITICAL(&_mux);
