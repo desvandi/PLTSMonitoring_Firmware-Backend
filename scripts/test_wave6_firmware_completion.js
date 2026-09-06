@@ -20,6 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 // ---------------------------------------------------------------------------
 // GAS service mocks (same fidelity as test_wave4_hygiene.js)
@@ -160,7 +161,7 @@ console.log('\n=== WAVE-6 FIRMWARE COMPLETION TEST (Code.gs VM + firmware contra
 // ===========================================================================
 console.log('[A] FW6-9 per-device OTA manifest hmac (GAS):');
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';
 const DEVICE = 'PLTS_MONITOR_01';
@@ -300,8 +301,11 @@ console.log('\n[C] firmware-generic v1.5.4 source contract:');
   check('C5 every OTA failure path reports DOWNLOAD_FAILED (≥7 sites)',
     failedReports >= 7, `found ${failedReports}`);
   const refusedReports = (INO.match(/reportOtaStatus\("REFUSED"/g) || []).length;
-  check('C6 anti-downgrade + non-semver refusals report REFUSED (2 sites)',
-    refusedReports === 2, `found ${refusedReports}`);
+  // [PARITY-4 2026-09-06] 2 → 3 sites: a third refusal path (manifest
+  // targets a different tree) was added after this assertion was written;
+  // the harness was dead (P1-8 guard) so it never re-ran until now.
+  check('C6 refusal paths report REFUSED (target-mismatch + non-semver + downgrade = 3 sites)',
+    refusedReports === 3, `found ${refusedReports}`);
   check('C7 telemetry parses envelope status (GAS HTTP 200 lie retired)',
     /rdoc\["status"\]/.test(INO) && /"SUCCESS"/.test(INO));
   check('C8 telemetry backoff state + cap present',
@@ -335,8 +339,20 @@ console.log('\n[D] main firmware v1.6.2 source contract:');
   const ino = MAIN('firmware_v1.ino');
   const cfgH = MAIN('Core/Config.h');
 
-  check('D1 FIRMWARE_VERSION == 1.6.3',
-    /FIRMWARE_VERSION\s*=\s*"1\.6\.3"/.test(cfgH));
+  // [PARITY-4 2026-09-06] D1 was a hardcoded "1.6.3" that rotted at the
+  // v1.7→v1.9.3 bumps (the harness was dead — P1-8 guard — so nobody
+  // noticed). Intent preserved: the MODULAR Config.h pins a semver that
+  // matches manifest.json AND the generic tree keeps fleet-wide version
+  // alignment (see generic's own FIRMWARE_VERSION comment).
+  {
+    const cfgVer = (cfgH.match(/FIRMWARE_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/) || [])[1];
+    const man = JSON.parse(fs.readFileSync(path.join(REPO, 'firmware-generic', 'manifest.json'), 'utf-8'));
+    const genVer = (ino2 => (ino2.match(/FIRMWARE_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/) || [])[1])(
+      fs.readFileSync(path.join(REPO, 'firmware-generic', 'src', 'plts_firmware_v1.ino'), 'utf-8'));
+    check('D1 FIRMWARE_VERSION pinned (modular == manifest == generic, fleet-aligned)',
+      !!cfgVer && cfgVer === man.version && cfgVer === genVer,
+      `modular=${cfgVer} manifest=${man.version} generic=${genVer}`);
+  }
   check('D2 Crypto persists boot-epoch estimate in NVS (plts_time)',
     /plts_time/.test(cryptoCpp) && /boot_epoch/.test(cryptoCpp) &&
     /Utils::persistEpochEstimate/.test(cryptoCpp));

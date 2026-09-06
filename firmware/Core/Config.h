@@ -384,6 +384,31 @@ static constexpr float    TEMP_CRIT_THRESHOLD_C   = 50.0f;
 static constexpr float    HUMIDITY_HIGH_PCT       = 85.0f;
 
 // ---------------------------------------------------------------------------
+// [PARITY-4 2026-09-06] OPERATOR-CONFIGURABLE ALARM THRESHOLDS (two-tier).
+// Previously these were scattered hardcoded constants (BATTERY_HIGH_V,
+// OVERCURRENT_*_A, TEMP_*_THRESHOLD_C, HUMIDITY_HIGH_PCT) while the PWA
+// Configuration Center displayed an `alarmThresholds` schema that no firmware
+// ever served — a cross-layer "feature ghost". They are now AUTHORITATIVE
+// runtime config: persisted in NVS "plts_alarm" (ConfigStore), editable via
+// REST /api/config + MQTT config.update (canonical command path), applied
+// live by AnomalyDetector (the SINGLE alarm evaluator), and read back in
+// /api/config GET as a nested `alarmThresholds` object using the exact PWA
+// field names. Defaults mirror the legacy constants so behavior is unchanged
+// on first boot after upgrade.
+// ---------------------------------------------------------------------------
+static constexpr float ALARM_VOLTAGE_LOW_WARN_V      = 46.0f;   // [40,50]
+static constexpr float ALARM_VOLTAGE_LOW_CRITICAL_V  = 45.0f;   // [40,50], < warn
+static constexpr float ALARM_VOLTAGE_HIGH_WARN_V     = 55.0f;   // [50,60]
+static constexpr float ALARM_VOLTAGE_HIGH_CRITICAL_V = 56.0f;   // [50,60], > warn
+static constexpr float ALARM_CURRENT_HIGH_WARN_A     = 60.0f;   // [10,150] |I|
+static constexpr float ALARM_CURRENT_HIGH_CRITICAL_A = 100.0f;  // [10,160] |I|
+static constexpr float ALARM_TEMP_HIGH_WARN_C        = 40.0f;   // [-20,80]
+static constexpr float ALARM_TEMP_HIGH_CRITICAL_C    = 50.0f;   // [-20,90], > warn
+static constexpr float ALARM_HUMIDITY_HIGH_WARN_PCT  = 85.0f;   // [50,100]
+static constexpr float ALARM_SOC_LOW_WARN_PCT        = 20.0f;   // [5,50]
+static constexpr float ALARM_SOC_LOW_CRITICAL_PCT    = 10.0f;   // [2,50], < warn
+
+// ---------------------------------------------------------------------------
 // Telemetry (brief §39-43)
 // ---------------------------------------------------------------------------
 static constexpr uint32_t TELEMETRY_INTERVAL_MS     = 5000;     // 5s publish

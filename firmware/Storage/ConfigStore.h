@@ -28,6 +28,13 @@ public:
   void loadBatteryConfig();   // populates Core::cfg* globals
   void saveBatteryConfig();
 
+  // ---------- [PARITY-4] OPERATOR ALARM THRESHOLD CONFIG (NVS "plts_alarm") ----
+  // Two-tier alarm thresholds (PWA AlarmThresholds schema names). Defaults-on-
+  // read + range sanitize — old NVS images upgrade silently, same pattern as
+  // the emergency config. Consumed live by Services::AnomalyDetector.
+  void loadAlarmConfig();     // populates Core::cfgAlarm* globals
+  void saveAlarmConfig();
+
 #if PLTS_ENABLE_EMERGENCY
   // ---------- v1.7.0 E-WAVE EMERGENCY TRIGGER CONFIG (NVS "plts_emg") ----------
   // 13 fields, ranges mirror Code.gs EMERGENCY_CONFIG_FIELDS. Defaults-on-read

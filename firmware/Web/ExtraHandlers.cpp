@@ -23,6 +23,9 @@
 #include "../Services/AlarmRegistry.h"
 #include "../Services/LogService.h"
 #include "../Services/HealthSupervisor.h"
+#include "../Services/CommandCanonicalizer.h"   // [PARITY-4] password + import canonical path
+#include "../Services/TransactionJournal.h"     // [PARITY-4] import journal (X-Request-Id)
+#include "../Utils/Crypto.h"                    // [PARITY-4] sha256Hex over the raw import body
 #include "../Comm/BatteryCommManager.h"
 #include "../Comm/BatteryProtocol.h"
 #include "../AI/GasAdvisor.h"
@@ -250,6 +253,29 @@ void handlePasswordPost() {
   String raw = http.arg("plain");
   StaticJsonDocument<512> doc;
   if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
+  // [PARITY-4 2026-09-06] Password change joins the canonical transaction
+  // path (audit P1: durable config mutations must carry requestId + journal
+  // dedup like every other mutation). Body keys: current, next, requestId.
+  doc["type"] = "config";
+  doc["action"] = "password";
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {
+      sendError(400, expiryErr); return;
+    }
+  }
+  Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(doc);
+  if (!canon.ok) { sendError(400, canon.errorMessage); return; }
+  Services::DecisionResult d =
+    Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  if (d.decision == Services::TransactionDecision::Conflict) {
+    sendError(409, "requestId reuse with different command"); return;
+  }
+  if (d.decision == Services::TransactionDecision::Duplicate) {
+    sendSecurityHeaders();
+    http.send(200, "application/json; charset=utf-8", d.previousAckJson);
+    return;
+  }
   const char* current = doc["current"] | "";
   const char* next = doc["next"] | "";
   if (strlen(current) == 0 || strlen(next) == 0) {
@@ -288,6 +314,10 @@ void handlePasswordPost() {
   memset(newSalt, 0, sizeof(newSalt));
   Storage::config.saveUserConfig();
   Services::Log.append(Core::LogType::ConfigurationChanged, "Operator password changed", 0);
+  // [PARITY-4] journal AFTER the mutation succeeds (same 2-phase ordering as
+  // ConfigHandlers — failed attempts stay retryable, successes are idempotent).
+  String ack = "{\"success\":true,\"message\":\"Password changed\",\"data\":{\"changed\":true}}";
+  Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack);
   sendSuccess("Password changed", "{}");
 }
 
@@ -307,6 +337,47 @@ void handleImport() {
   if (!requireBody(Core::HTTP_MAX_BODY_SIZE * 2)) return;
   String raw = http.arg("plain");
   if (raw.length() == 0) { sendError(400, "Empty body"); return; }
+  // [PARITY-4 2026-09-06] Config import joins the transaction-identity policy
+  // (audit P1: a large persistent state mutation must not be a journal-less
+  // special case). The requestId rides the X-Request-Id HEADER, not the body:
+  // the body is the CRC32-verified backup payload — injecting a key would
+  // break Utils::verifyCRC. The journal hash is sha256 of the raw body, so
+  // dedup semantics cover the full backup content (a different backup with
+  // the same requestId = CONFLICT, a retry of the same bytes = replayed ACK).
+  // Missing header keeps today's behavior (apply without journaling).
+  String reqId = http.header("X-Request-Id");
+  reqId.trim();
+  if (reqId.length() > 0) {
+    String tidErr;
+    if (!Services::CommandCanonicalizer::validateTransactionId(reqId, tidErr)) {
+      sendError(400, tidErr); return;
+    }
+    String bodyHash = Utils::sha256Hex(raw);
+    String prevAck;
+    Services::TransactionDecision d = Services::journal.decide(reqId, bodyHash, prevAck);
+    if (d == Services::TransactionDecision::Conflict) {
+      sendError(409, "requestId reuse with different import payload"); return;
+    }
+    if (d == Services::TransactionDecision::Duplicate) {
+      sendSecurityHeaders();
+      http.send(200, "application/json; charset=utf-8", prevAck);
+      return;
+    }
+    bool okImp = Storage::config.importAll(raw);
+    String ack;
+    if (okImp) {
+      Services::Log.append(Core::LogType::ConfigurationChanged, "Configuration imported", 0);
+      ack = "{\"success\":true,\"message\":\"Configuration imported — reboot required\",\"data\":{\"imported\":true}}";
+    } else {
+      ack = "{\"success\":false,\"message\":\"Import failed — invalid or incompatible backup\"}";
+    }
+    // Journal both outcomes: an import attempt with this requestId must not
+    // re-apply the same large mutation on retry (replay returns the verdict).
+    Services::journal.storeTransaction(reqId, bodyHash, ack);
+    if (!okImp) { sendError(400, "Import failed — invalid or incompatible backup"); return; }
+    sendSuccess("Configuration imported — reboot required", "{}");
+    return;
+  }
   bool ok = Storage::config.importAll(raw);
   if (!ok) { sendError(400, "Import failed — invalid or incompatible backup"); return; }
   Services::Log.append(Core::LogType::ConfigurationChanged, "Configuration imported", 0);

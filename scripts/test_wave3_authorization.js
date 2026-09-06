@@ -52,6 +52,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 // ---------------------------------------------------------------------------
 // GAS service mocks (same conventions as test_wave1_integration.js).
@@ -280,7 +281,7 @@ function genericTelemetryBody(token, deviceKey, seq) {
 console.log('\n=== WAVE-3 AUTHORIZATION TEST (real Code.gs + real crypto) ===\n');
 
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 const TOKEN = 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE';               // Config default from template
 const ADMIN = 'plts_admin_w3_7f2c9e1a4d6b8a3c';   // operator-only secret
@@ -494,7 +495,7 @@ console.log('\n[C] GAS-2-K — OTA admin gate + calibration ranges:');
 
   // C5 — fail-closed while ADMIN_TOKEN is unset (fresh deployment).
   const env2 = createGasContext();
-  env2.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(env2);
   const c5 = doPost(env2, { action: 'OTA_PUBLISH', token: 'TEST_ONLY_AUTH_TOKEN_32_BYTES_FIXTURE', admin_token: 'anything', manifest });
   check('C5 ADMIN_TOKEN unset → OTA publishing DISABLED (401, honest refusal)',
     c5.code === 401 && /disabled — set ADMIN_TOKEN/.test(c5.message), c5.message);

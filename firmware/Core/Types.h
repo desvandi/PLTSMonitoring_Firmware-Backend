@@ -290,6 +290,9 @@ namespace AlarmCode {
   constexpr const char* BATTERY_CURRENT_SENSOR_ERROR  = "BATTERY_CURRENT_SENSOR_ERROR";
   constexpr const char* BATTERY_CURRENT_SENSOR_SUSPECT= "BATTERY_CURRENT_SENSOR_SUSPECT";
   constexpr const char* BATTERY_SOC_LOW                = "BATTERY_SOC_LOW";
+  // [PARITY-4] data-quality signal — rapid SOC jumps (was previously raised
+  // under BATTERY_SOC_LOW, colliding with the real SOC-low alarm).
+  constexpr const char* BATTERY_SOC_DISCONTINUITY      = "BATTERY_SOC_DISCONTINUITY";
   // BMS / external comm (v1.6.0 multi-protocol integration)
   constexpr const char* BMS_PROTOCOL_LOST            = "BMS_PROTOCOL_LOST";
   constexpr const char* BMS_CURRENT_MISMATCH         = "BMS_CURRENT_MISMATCH";

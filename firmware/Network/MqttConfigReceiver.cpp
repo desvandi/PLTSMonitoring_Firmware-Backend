@@ -17,6 +17,7 @@
 #include "../Services/AuthManager.h"
 #include "../Drivers/Acs712Driver.h"
 #include "../Drivers/Sht31Driver.h"   // [v1.6.3] live-apply calibration offsets
+#include "../Comm/BatteryCommManager.h" // [PARITY-4] BMS comm live-reconfigure (REST parity)
 #if PLTS_ENABLE_RELAYS
 #include "../Services/RelayController.h"   // [v1.8.0] relay command dispatch
 #endif
@@ -298,7 +299,120 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
       if (tz) strncpy(Core::cfgTimezone, tz, sizeof(Core::cfgTimezone) - 1);
       Core::cfgTimezone[sizeof(Core::cfgTimezone) - 1] = '\0';
     }
+    // [PARITY-4] BMS comm fields — previously the canonicalizer whitelist
+    // rejected them ("unknown field"), so MQTT could never configure BMS
+    // comm even though the REST path did. Ranges mirror Web::ConfigHandlers.
+    bool bmsConfigChanged = false;
+    if (doc.containsKey("bmsProtocol")) {
+      const char* p = doc["bmsProtocol"];
+      bool valid = p && (strcmp(p, "auto") == 0 || strcmp(p, "none") == 0 ||
+                         strcmp(p, "pylontech_can") == 0 || strcmp(p, "modbus_rtu") == 0 ||
+                         strcmp(p, "modbus_tcp") == 0);
+      if (!valid) return { false, "REJECTED", "bmsProtocol must be auto|none|pylontech_can|modbus_rtu|modbus_tcp" };
+      strncpy(Core::cfgBmsProtocol, p, sizeof(Core::cfgBmsProtocol) - 1);
+      Core::cfgBmsProtocol[sizeof(Core::cfgBmsProtocol) - 1] = '\0';
+      bmsConfigChanged = true;
+    }
+    if (doc.containsKey("bmsPollIntervalMs")) {
+      uint32_t v = doc["bmsPollIntervalMs"];
+      if (v < 1000 || v > 600000) return { false, "REJECTED", "bmsPollIntervalMs out of range [1000,600000]" };
+      Core::cfgBmsPollIntervalMs = v; bmsConfigChanged = true;
+    }
+    if (doc.containsKey("bmsModbusSlaveId")) {
+      uint8_t v = doc["bmsModbusSlaveId"];
+      if (v < 1 || v > 247) return { false, "REJECTED", "bmsModbusSlaveId out of range [1,247]" };
+      Core::cfgBmsModbusSlaveId = v; bmsConfigChanged = true;
+    }
+    if (doc.containsKey("bmsModbusTcpHost")) {
+      const char* h = doc["bmsModbusTcpHost"];
+      if (!h || strlen(h) >= sizeof(Core::cfgBmsModbusTcpHost)) return { false, "REJECTED", "bmsModbusTcpHost too long" };
+      strncpy(Core::cfgBmsModbusTcpHost, h, sizeof(Core::cfgBmsModbusTcpHost) - 1);
+      Core::cfgBmsModbusTcpHost[sizeof(Core::cfgBmsModbusTcpHost) - 1] = '\0';
+      bmsConfigChanged = true;
+    }
+    if (doc.containsKey("bmsModbusTcpPort")) {
+      uint16_t v = doc["bmsModbusTcpPort"];
+      if (v < 1 || v > 65535) return { false, "REJECTED", "bmsModbusTcpPort out of range [1,65535]" };
+      Core::cfgBmsModbusTcpPort = v; bmsConfigChanged = true;
+    }
+    // [PARITY-4] two-tier alarm thresholds — validation IDENTICAL to the REST
+    // path (Web::ConfigHandlers): ranges, then tier order on the post-update
+    // RAM state. Applied live: AnomalyDetector reads cfgAlarm* every tick.
+    {
+      bool alarmChanged = false;
+      if (doc.containsKey("voltageLowWarn")) {
+        float v = doc["voltageLowWarn"];
+        if (!(v >= 40 && v <= 50)) return { false, "REJECTED", "voltageLowWarn out of range [40,50]" };
+        Core::cfgAlarmVoltageLowWarnV = v; alarmChanged = true;
+      }
+      if (doc.containsKey("voltageLowCritical")) {
+        float v = doc["voltageLowCritical"];
+        if (!(v >= 40 && v <= 50)) return { false, "REJECTED", "voltageLowCritical out of range [40,50]" };
+        Core::cfgAlarmVoltageLowCriticalV = v; alarmChanged = true;
+      }
+      if (doc.containsKey("voltageHighWarn")) {
+        float v = doc["voltageHighWarn"];
+        if (!(v >= 50 && v <= 60)) return { false, "REJECTED", "voltageHighWarn out of range [50,60]" };
+        Core::cfgAlarmVoltageHighWarnV = v; alarmChanged = true;
+      }
+      if (doc.containsKey("voltageHighCritical")) {
+        float v = doc["voltageHighCritical"];
+        if (!(v >= 50 && v <= 60)) return { false, "REJECTED", "voltageHighCritical out of range [50,60]" };
+        Core::cfgAlarmVoltageHighCriticalV = v; alarmChanged = true;
+      }
+      if (doc.containsKey("currentHighWarn")) {
+        float v = doc["currentHighWarn"];
+        if (!(v >= 10 && v <= 150)) return { false, "REJECTED", "currentHighWarn out of range [10,150]" };
+        Core::cfgAlarmCurrentHighWarnA = v; alarmChanged = true;
+      }
+      if (doc.containsKey("currentHighCritical")) {
+        float v = doc["currentHighCritical"];
+        if (!(v >= 10 && v <= 160)) return { false, "REJECTED", "currentHighCritical out of range [10,160]" };
+        Core::cfgAlarmCurrentHighCriticalA = v; alarmChanged = true;
+      }
+      if (doc.containsKey("temperatureHighWarn")) {
+        float v = doc["temperatureHighWarn"];
+        if (!(v >= -20 && v <= 80)) return { false, "REJECTED", "temperatureHighWarn out of range [-20,80]" };
+        Core::cfgAlarmTemperatureHighWarnC = v; alarmChanged = true;
+      }
+      if (doc.containsKey("temperatureHighCritical")) {
+        float v = doc["temperatureHighCritical"];
+        if (!(v >= -20 && v <= 90)) return { false, "REJECTED", "temperatureHighCritical out of range [-20,90]" };
+        Core::cfgAlarmTemperatureHighCriticalC = v; alarmChanged = true;
+      }
+      if (doc.containsKey("humidityHighWarn")) {
+        float v = doc["humidityHighWarn"];
+        if (!(v >= 50 && v <= 100)) return { false, "REJECTED", "humidityHighWarn out of range [50,100]" };
+        Core::cfgAlarmHumidityHighWarnPct = v; alarmChanged = true;
+      }
+      if (doc.containsKey("socLowWarn")) {
+        float v = doc["socLowWarn"];
+        if (!(v >= 5 && v <= 50)) return { false, "REJECTED", "socLowWarn out of range [5,50]" };
+        Core::cfgAlarmSocLowWarnPct = v; alarmChanged = true;
+      }
+      if (doc.containsKey("socLowCritical")) {
+        float v = doc["socLowCritical"];
+        if (!(v >= 2 && v <= 50)) return { false, "REJECTED", "socLowCritical out of range [2,50]" };
+        Core::cfgAlarmSocLowCriticalPct = v; alarmChanged = true;
+      }
+      if (Core::cfgAlarmVoltageLowCriticalV >= Core::cfgAlarmVoltageLowWarnV)
+        return { false, "REJECTED", "voltageLowCritical must be < voltageLowWarn" };
+      if (Core::cfgAlarmVoltageHighCriticalV <= Core::cfgAlarmVoltageHighWarnV)
+        return { false, "REJECTED", "voltageHighCritical must be > voltageHighWarn" };
+      if (Core::cfgAlarmCurrentHighCriticalA <= Core::cfgAlarmCurrentHighWarnA)
+        return { false, "REJECTED", "currentHighCritical must be > currentHighWarn" };
+      if (Core::cfgAlarmTemperatureHighCriticalC <= Core::cfgAlarmTemperatureHighWarnC)
+        return { false, "REJECTED", "temperatureHighCritical must be > temperatureHighWarn" };
+      if (Core::cfgAlarmSocLowCriticalPct >= Core::cfgAlarmSocLowWarnPct)
+        return { false, "REJECTED", "socLowCritical must be < socLowWarn" };
+      if (alarmChanged) Storage::config.saveAlarmConfig();
+    }
     Storage::config.saveBatteryConfig();
+    if (bmsConfigChanged) {
+      Comm::batteryComm.reconfigure();
+      Services::Log.append(Core::LogType::ConfigurationChanged,
+                            String("MQTT: BMS comm reconfigured proto=") + Core::cfgBmsProtocol, -1);
+    }
     return { true, "ACCEPTED", "config updated" };
   }
 

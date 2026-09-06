@@ -58,6 +58,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { createGasContext } = require('./bench_w14_gasenv');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 const FWB = path.join(__dirname, '..');
 const INO = path.join(FWB, 'firmware-generic', 'src', 'plts_firmware_v1.ino');
@@ -383,7 +384,7 @@ console.log('='.repeat(72));
 
 // Shared GAS deployment for the whole bench.
 const g = createGasContext();
-g.sandbox.setupMasterTemplate();
+patchHarnessSetup_(g);
 g.setConfig('ADMIN_TOKEN', ADMIN);        // OTA_PUBLISH is operator-gated
 g.registerDevice(DEVICE_KEY, 'generic');  // DEVICES!firmware_type = generic
 
@@ -603,7 +604,7 @@ console.log('\n[OT-5] Boot-attempt ledger semantics:');
 console.log('\n[OT-6] Refusals (mixed-fleet + anti-downgrade):');
 {
   const g2 = createGasContext();                       // fresh sheet: only OUR manifests
-  g2.sandbox.setupMasterTemplate();
+  patchHarnessSetup_(g2);
   g2.setConfig('ADMIN_TOKEN', ADMIN);
   g2.registerDevice(DEVICE_KEY, 'generic');
   const publish2 = (version, target) => g2.doPost({
@@ -706,8 +707,11 @@ console.log('\n[OT-8] Static source locks (generic + modular + GAS):');
     /getBootRollbackVersion/.test(h) && /_bootRollbackVersion/.test(h));
 
   const gas = fs.readFileSync(GAS_SRC, 'utf-8');
+  // [PARITY-4 2026-09-06] The word list now CONTINUES past VERIFICATION_FAILED
+  // (GasOtaReporter progress vocabulary: ACCEPTED/DOWNLOADING/VERIFIED/
+  // FLASHED/FAILED — parity-3). Assert membership, not list-terminal position.
   check('OT-8j GAS: OTA_STATUS word list still accepts ROLLBACK (+ VERIFICATION_FAILED)',
-    /\['ACTIVATED', 'ROLLBACK', 'BOOT_FAILED', 'DOWNLOAD_FAILED',[\s\S]*?VERIFICATION_FAILED'\]/.test(gas));
+    /validEvents\s*=\s*\[[^\]]*'ROLLBACK'[^\]]*'VERIFICATION_FAILED'[^\]]*\]/.test(gas));
 }
 
 // ---- summary -----------------------------------------------------------------------

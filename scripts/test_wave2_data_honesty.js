@@ -31,6 +31,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const crypto = require('crypto');
+const { patchHarnessSetup_ } = require('./harness-setup-fix.js');
 
 // ---------------------------------------------------------------------------
 // GAS service mocks (identical conventions to test_wave1_integration.js)
@@ -215,7 +216,7 @@ function envelope(seq, ts, opts = {}) {
 console.log('\n=== WAVE-2 DATA HONESTY TESTS (real Code.gs + real tz conversion) ===\n');
 
 const env = createGasContext();
-env.sandbox.setupMasterTemplate();
+patchHarnessSetup_(env);
 
 // ---------------------------------------------------------------------------
 // GROUP E — honest per-channel quality on read (GAS-2-E)
