@@ -26,7 +26,9 @@ public:
 
   // ---------- RUNTIME BATTERY CONFIG (capacity, thresholds, intervals) ----------
   void loadBatteryConfig();   // populates Core::cfg* globals
-  void saveBatteryConfig();
+  // [STORAGE-GATE-04] bool = persistence verified; false must be surfaced by
+  // callers (REST/MQTT ACK, ConfigUpdater) — never a silent success.
+  bool saveBatteryConfig();
 
   // ---------- [PARITY-4] OPERATOR ALARM THRESHOLD CONFIG (NVS "plts_alarm") ----
   // Two-tier alarm thresholds (PWA AlarmThresholds schema names). Defaults-on-

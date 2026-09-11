@@ -82,10 +82,14 @@ private:
 
   // Internal dispatch — given a parsed (type, action) + JsonDocument,
   // applies the command via the canonical ConfigStore path.
+  // [PRODUCTION-GRADE 2026-09] Now also receives the transaction identity
+  // (tid + commandHash) so relay commands can carry FULL identity into the
+  // relay execution queue (RG-RELAY-02).
   // Returns {ok, code, message} for ACK body.
   struct ApplyResult { bool ok; const char* code; String message; };
   ApplyResult _applyCommand(const String& type, const String& action,
-                            JsonDocument& doc);
+                            JsonDocument& doc, const String& tid,
+                            const String& commandHash);
 
   // Publish ACK to `plts/<deviceId>/ack` topic.
   // ACK body schema (brief §51):

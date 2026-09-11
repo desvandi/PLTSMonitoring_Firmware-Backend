@@ -5,12 +5,16 @@
 // unknown types/actions/fields REJECTED. Excludes requestId/transactionId/
 // issuedAt/expiresAt from hash (envelope-only).
 //
-// Whitelisted commands (PLTS-specific — no relays, no scheduler):
-//   config.update    — update battery config (capacityAh, fullV, lowV, ...)
-//   calibration.update / calibration.point / calibration.acs712_zero
-//   alarm.acknowledge / alarm.acknowledgeAll
-//   ota.start / ota.check
-//   system.reboot / system.factory_reset_prepare / system.factory_reset_confirm
+// [PRODUCTION-GRADE CORE-01..03 2026-09] — audit p.309-317 remediation:
+//   CORE-01: field whitelist is scoped to the EXACT (type, action) tuple —
+//            a field allowed for relay.pulse is NOT allowed for relay.on.
+//   CORE-02: validateCommandEnvelope() — version, transactionId, issuedAt,
+//            expiresAt are MANDATORY for every mutation (REST + MQTT).
+//   CORE-03: every accepted semantic field participates in the canonical
+//            hash (guaranteed by the exact-tuple whitelist — a field that is
+//            allowed is always emitted, a field that is not emitted is
+//            rejected).
+//   Numeric hardening: NaN/Infinity REJECTED, -0.0 normalized to 0.0.
 // =============================================================================
 #pragma once
 #ifndef PLTS_SERVICES_COMMAND_CANONICALIZER_H
@@ -48,23 +52,35 @@ public:
 
   // [P2-1 REMEDIATION 2026-09 — retention/freshness contract]
   // Journaled commands are deduplicated ONLY while their requestId sits in
-  // the 64-slot ring (see TransactionJournal.h). A command whose expiresAt
+  // the journal ring (see TransactionJournal.h). A command whose expiresAt
   // is in the past can no longer be safely deduplicated NOR safely applied.
   // Every ingress (REST + MQTT) MUST call this BEFORE decideTransaction().
-  //   doc       — the full command envelope (expiresAt, unix-seconds)
-  //   errOut    — human-readable reason when rejected
-  // Returns TRUE when the command is fresh (or has no usable clock yet —
-  // same fallback semantics as MqttConfigReceiver: a device without RTC
-  // sync cannot enforce freshness and MUST NOT brick command handling).
+  // Returns TRUE when the command is expired (reject). A device without a
+  // usable clock cannot evaluate freshness and fails open on THIS check only
+  // (journal + HMAC auth remain in force).
   static bool isCommandExpired(JsonDocument& doc, String& errOut);
+
+  // [CORE-02] Mandatory mutation envelope: version + transactionId/requestId
+  // + issuedAt + expiresAt must ALL be present and sane. Envelope presence is
+  // enforced even when the clock is unusable — the freshness *evaluation* may
+  // be UNKNOWN, but the freshness *claim* is always required, so replay
+  // protection never silently degrades to journal-retention-only.
+  //   doc    — full command envelope
+  //   errOut — human-readable rejection reason
+  // Returns false + errOut when the envelope is incomplete/invalid.
+  static bool validateCommandEnvelope(JsonDocument& doc, String& errOut);
 
   static CanonicalResult canonicalizeAndHash(JsonDocument& doc);
   static DecisionResult decideTransaction(const String& tid, const String& hash);
 
   // Whitelist check — used by ingress to REJECT unknown (type, action) pairs
   static bool isKnownCommandType(const String& type, const String& action);
-  // Field whitelist per type — REJECT unknown fields BEFORE hashing
-  static bool isFieldAllowed(const String& type, const String& field);
+  // [CORE-01] Field whitelist scoped to the EXACT (type, action) tuple.
+  // Envelope fields (type/action/requestId/transactionId/version/issuedAt/
+  // expiresAt) are always allowed — every other field must appear in the
+  // registry entry for THIS action.
+  static bool isFieldAllowed(const String& type, const String& action,
+                              const String& field);
 
 private:
   static String buildCanonicalString(JsonDocument& doc,

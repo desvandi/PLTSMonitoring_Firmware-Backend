@@ -101,11 +101,15 @@ void handleLogin() {
 void handleLogout() {
   if (!requireCsrf()) return;
   Services::auth.rotateCsrfToken();
+  // [AUTH-GATE-07 / audit p.171-172] Logout now revokes SERVER-SIDE sessions:
+  // clearing the browser cookies alone left stolen refresh tokens valid in
+  // NVS for up to 7 days. Every refresh slot is zeroed + persisted.
+  Services::auth.revokeAllRefreshTokens();
   sendSecurityHeaders();
   http.sendHeader("Set-Cookie", "jwt=; HttpOnly; Path=/; Max-Age=0", false);
   http.sendHeader("Set-Cookie", "refresh=; HttpOnly; Path=/api/refresh; Max-Age=0", false);
   http.sendHeader("Set-Cookie", "csrf=; Path=/; Max-Age=0", false);
-  Services::Log.append(Core::LogType::Logout, "User logged out", 0);
+  Services::Log.append(Core::LogType::Logout, "User logged out (all sessions revoked)", 0);
   sendSuccess("Logged out", "{}");
 }
 
@@ -134,14 +138,14 @@ void handleRefresh() {
     }
   }
   if (refreshCookie.length() != 32) { sendError(401, "No refresh token"); return; }
-  String user;
-  if (!Services::auth.verifyRefreshToken(refreshCookie, user)) {
-    sendError(401, "Invalid or expired refresh token");
-    return;
-  }
-  String newRefresh;
-  if (!Services::auth.rotateRefreshToken(refreshCookie, newRefresh)) {
-    sendError(500, "Refresh rotation failed");
+  // [AUTH-GATE-05 / audit p.166-167] ONE atomic consume replaces the racy
+  // verify→rotate pair: two concurrent refreshes could previously BOTH pass
+  // verifyRefreshToken() on the same not-yet-used token and BOTH rotate it
+  // (A→B and A→C). consumeRefreshToken() performs find → validate → mark
+  // used → allocate new → persist under a mutex.
+  String newRefresh, user;
+  if (!Services::auth.consumeRefreshToken(refreshCookie, newRefresh, user)) {
+    sendError(401, "Invalid, expired or already-used refresh token");
     return;
   }
   String newAccess = Services::auth.issueAccessToken(user);

@@ -120,12 +120,22 @@ check("GET /api/config: nested alarmThresholds object",
       'createNestedObject("alarmThresholds")' in ch_src)
 for f in ALARM_FIELDS:
     check(f"GET /api/config emits flat {f}", f'doc["{f}"]' in ch_src)
-    check(f"POST /api/config validates {f}", f'containsKey("{f}")' in ch_src)
-check("POST /api/config persists via saveAlarmConfig",
-      "saveAlarmConfig()" in ch_src)
-check("POST /api/config enforces tier order",
-      "voltageLowCritical must be < voltageLowWarn" in ch_src and
-      "socLowCritical must be < socLowWarn" in ch_src)
+# [PRODUCTION-GRADE 2026-09] Validation moved to the SHARED two-phase
+# ConfigUpdater (audit BLOCKER B: a rejected request must not leave earlier
+# fields mutated in RAM). Both REST and MQTT MUST route through it — the
+# field-level checks + tier ordering now live in ConfigUpdater.cpp.
+cu_src = read(FW / "Services/ConfigUpdater.cpp")
+check("REST routes through shared ConfigUpdater",
+      "ConfigUpdater::applyUpdate" in ch_src)
+for f in ALARM_FIELDS:
+    check(f"ConfigUpdater validates {f}", f'containsKey("{f}")' in cu_src)
+check("ConfigUpdater persists via saveAlarmConfig",
+      "saveAlarmConfig()" in cu_src)
+check("ConfigUpdater enforces tier order",
+      "voltageLowCritical must be < voltageLowWarn" in cu_src and
+      "socLowCritical must be < socLowWarn" in cu_src)
+check("ConfigUpdater is two-phase (no RAM mutation before validation)",
+      "PHASE 1a" in cu_src and "PHASE 2" in cu_src)
 
 # --- 3. Canonical command whitelist (fail-closed) -----------------------------
 cc_src = read(FW / "Services/CommandCanonicalizer.cpp")
@@ -138,14 +148,19 @@ for f in ["bmsProtocol", "bmsPollIntervalMs", "bmsModbusSlaveId",
 check("whitelist config.password command",
       re.search(r'\{"config",\s*"password"', cc_src) is not None)
 
-# --- 4. MQTT path (identical validation) --------------------------------------
+# --- 4. MQTT path (identical validation via the SHARED ConfigUpdater) --------
+# [PRODUCTION-GRADE 2026-09] MQTT and REST share ONE validation law
+# (Services::ConfigUpdater) — identical-by-construction, not identical-by-
+# copy. The checks below verify the MQTT receiver routes through it.
 mq_src = read(FW / "Network/MqttConfigReceiver.cpp")
+check("MQTT routes through shared ConfigUpdater",
+      "ConfigUpdater::applyUpdate" in mq_src)
 for f in ["voltageLowWarn", "voltageHighCritical", "currentHighCritical",
           "humidityHighWarn", "socLowCritical"]:
-    check(f"MQTT config.update applies {f}", f'containsKey("{f}")' in mq_src)
-check("MQTT applies BMS comm fields", 'containsKey("bmsProtocol")' in mq_src)
+    check(f"ConfigUpdater validates {f} (shared with MQTT)", f'containsKey("{f}")' in cu_src)
+check("MQTT applies BMS comm fields", 'containsKey("bmsProtocol")' in cu_src)
 check("MQTT live-reconfigures BMS comm", "batteryComm.reconfigure()" in mq_src)
-check("MQTT persists alarm config", "saveAlarmConfig()" in mq_src)
+check("MQTT persists alarm config via ConfigUpdater", "saveAlarmConfig()" in cu_src)
 
 # --- 5. Runtime consumer — SINGLE evaluator, two-tier + hysteresis -------------
 ad_src = read(FW / "Services/AnomalyDetector.cpp")

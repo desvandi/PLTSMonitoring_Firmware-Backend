@@ -44,6 +44,20 @@ void handleFactoryResetConfirm() {
   }
   sendSuccess("Factory reset confirmed — executing", "{}");
   delay(500);
+  // [PRODUCTION-GRADE 2026-09 / audit p.145-146, STORAGE-GATE-06] Factory
+  // reset is now a RECOVERABLE transaction: an IN_PROGRESS marker is persisted
+  // BEFORE the first namespace is wiped. Previously a power loss mid-wipe left
+  // a HALF-reset device (some namespaces cleared, others still holding state)
+  // that booted with no indication of the partial reset. On boot, setup()
+  // detects the marker and completes the wipe + format deterministically
+  // (see firmware_v1.ino handlePendingFactoryReset()).
+  {
+    Preferences m;
+    if (m.begin("plts", false)) {   // 'plts' is wiped LAST below
+      m.putBool("ftr_p", true);      // FaCtoryReset-in-Progress marker
+      m.end();
+    }
+  }
   // [audit-2 S-16 FIX] Wipe ALL NVS namespaces — previously missed
   // plts_alarm, plts_time, plts_soc, plts_emg, plts_auth, plts_emg_calib.
   // Incomplete wipe left stale alarm state + crash-loop counters + auth
@@ -77,6 +91,15 @@ void handleFactoryResetConfirm() {
   bool auditPreserved = Services::preserveAuditLogAcrossReset();
   LittleFS.format();
   if (auditPreserved) Services::restoreAuditLogAfterReset();
+  // [STORAGE-GATE-06] Mark COMPLETE so boot does not re-run the wipe
+  // (belt-and-braces — the reboot follows immediately anyway).
+  {
+    Preferences m;
+    if (m.begin("plts", false)) {
+      m.putBool("ftr_p", false);
+      m.end();
+    }
+  }
   delay(500);
   ESP.restart();
 }

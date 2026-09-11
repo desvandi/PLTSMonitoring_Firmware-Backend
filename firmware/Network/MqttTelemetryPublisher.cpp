@@ -33,12 +33,22 @@ MqttTelemetryPublisher mqttTelemetry;
 bool MqttTelemetryPublisher::_spoolPublishTrampoline(uint8_t recordType,
                                                       const char* payload, size_t len) {
   // [FW-29] Route by record type to the canonical per-device topics.
-  // QoS 1: PubSubClient blocks for PUBACK inside publish() — the return
-  // value IS the delivery confirmation (P1-005 ACK-before-removal).
+  //
+  // [PRODUCTION-GRADE 2026-09 / audit p.5, p.55 — COMMENT ≠ CONTRACT fix]
+  // PubSubClient 2.8 publishes at QoS 0 REGARDLESS of the qos parameter
+  // (see MqttTransport.cpp — the parameter is API-compat only). publish()
+  // returning true therefore means "TCP write accepted", NOT "broker
+  // PUBACK received". The old comment claimed PUBACK delivery confirmation
+  // — a documentation-level durability lie. The honest contract is:
+  //   publish() == true  → best-effort delivery AT-MOST-ONCE (QoS 0)
+  //   replay()          → at-least-once via the NVS spool on reconnect
+  // The critical-event spool keeps the record until a LATER successful
+  // replay — the durability comes from spool persistence + replay, not from
+  // a phantom PUBACK. Downstream consumers MUST dedupe by (seq/eventId).
   const char* suffix =
     (recordType == (uint8_t)Services::SpoolRecordType::CriticalEvent) ? "log" : "status";
   String topic = mqttTransport.getDeviceTopic(suffix);
-  return mqttTransport.publish(topic.c_str(), payload, len, false, 1);
+  return mqttTransport.publish(topic.c_str(), payload, len, false, 0);
 }
 
 void MqttTelemetryPublisher::begin() {
@@ -68,11 +78,13 @@ void MqttTelemetryPublisher::publishCriticalEvent(const char* type, const char* 
   uint32_t ts = Services::timeManager.getUnixTime();
   Services::telemetrySpool.spoolCritical(seq, ts, payload, (uint16_t)len);
 
-  // Best-effort immediate delivery (QoS 1); the record stays in the spool
-  // until replay confirms delivery.
+  // [PRODUCTION-GRADE 2026-09] Best-effort immediate delivery at QoS 0
+  // (PubSubClient 2.8 reality — see the trampoline note above). The record
+  // REMAINS in the spool; replay after reconnect provides the at-least-once
+  // guarantee, with GAS-side dedup on sequence absorbing the duplicates.
   if (mqttTransport.isFullyOperational()) {
     String topic = mqttTransport.getDeviceTopic("log");
-    mqttTransport.publish(topic.c_str(), payload, len, false, 1);
+    mqttTransport.publish(topic.c_str(), payload, len, false, 0);
   }
   (void)type;
 }
@@ -87,9 +99,11 @@ void MqttTelemetryPublisher::replaySpool() {
 // [P1-6 AUDIT 2026-09] OTA lifecycle event publisher — closes the audit-7
 // observability gap. Modular OTA state transitions used to be device-local
 // only; operators could not see OTA progress from PWA/GAS without a serial
-// console. This emits a small JSON envelope on plts/<deviceId>/ota/event
-// at QoS 1 (durable, broker-acked) so GAS can persist it in the OtaEvents
-// sheet, mirroring the generic tree's OTA_STATUS reporter.
+// console. This emits a small JSON envelope on plts/<deviceId>/ota/event.
+//
+// [PRODUCTION-GRADE 2026-09] Delivery is QoS 0 best-effort (PubSubClient
+// 2.8 reality); GAS dedup on (deviceId, jobId, state) makes the stream
+// effectively at-least-once. NOT a safety/release gate — observability only.
 //
 // Idempotency: GAS dedupes on (deviceId, jobId, state) — re-publishing the
 // same state is safe (power-loss replay, network retry, etc.).
@@ -136,13 +150,14 @@ void MqttTelemetryPublisher::publishOtaLifecycle(const char* jobId,
   String json;
   serializeJson(doc, json);
 
-  // QoS 1 → PubSubClient blocks for PUBACK; return = delivery confirmation.
-  // Best-effort: if transport is down, the event is logged locally via
-  // LogService (the device log keeps an honest record until GAS can pull it).
+  // [PRODUCTION-GRADE 2026-09] QoS 0 best-effort publish (PubSubClient 2.8
+  // cannot do QoS 1 — see the trampoline note). Best-effort: if transport is
+  // down, the event is logged locally via LogService (the device log keeps an
+  // honest record until GAS can pull it).
   String topic = mqttTransport.getDeviceTopic("ota/event");
   bool ok = false;
   if (mqttTransport.isFullyOperational()) {
-    ok = mqttTransport.publish(topic.c_str(), json.c_str(), json.length(), false, 1);
+    ok = mqttTransport.publish(topic.c_str(), json.c_str(), json.length(), false, 0);
   }
   if (ok) {
     _publishedCount++;

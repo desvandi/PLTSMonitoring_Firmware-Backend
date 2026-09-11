@@ -159,16 +159,45 @@ bool TransactionJournal::storeTransaction(const String& requestId,
     if (_hashes[idx] != commandHash) return false;
     return true;
   }
-  // New slot
+  // New slot — [CORE-04 audit p.319-321] transactional from the caller's
+  // perspective: RAM is mutated only AFTER the NVS commit succeeds. The old
+  // code wrote RAM first, so a failed NVS commit still produced DUPLICATE
+  // decisions for a transaction that was never durable (false durability —
+  // after reboot the retry would be treated as NEW and re-executed).
   uint8_t newIdx = _writeIdx;
-  _writeIdx = (_writeIdx + 1) % JOURNAL_SIZE;
+
+  // [audit p.323] Do NOT _clearSlotNVS() before the new write — NVS
+  // putBytes() replaces the record under the same key atomically at the
+  // storage layer; deleting first only widens the power-loss window in
+  // which the previous record is already gone and the new one not yet
+  // committed.
+  {
+    // Stage the new entry, remembering the previous occupant so a failed
+    // commit restores it exactly (a ring slot may still hold a live entry).
+    String prevId = _ids[newIdx];
+    String prevHash = _hashes[newIdx];
+    String prevAck = _acks[newIdx];
+    bool prevValid = _valid[newIdx];
+
+    _ids[newIdx] = requestId;
+    _hashes[newIdx] = commandHash;
+    _acks[newIdx] = ackJson;
+    _valid[newIdx] = true;
+
+    if (!_saveEntryToNVSAtomic(newIdx)) {
+      // ROLLBACK — RAM must not claim a transaction that is not durable,
+      // and must not lose the previous occupant of this slot either.
+      _ids[newIdx] = prevId;
+      _hashes[newIdx] = prevHash;
+      _acks[newIdx] = prevAck;
+      _valid[newIdx] = prevValid;
+      return false;
+    }
+  }
+  // NVS commit succeeded — advance the write pointer and size now.
+  _writeIdx = (newIdx + 1) % JOURNAL_SIZE;
   if (newIdx >= _size) _size = newIdx + 1;
-  _ids[newIdx] = requestId;
-  _hashes[newIdx] = commandHash;
-  _acks[newIdx] = ackJson;
-  _valid[newIdx] = true;
-  _clearSlotNVS(newIdx);  // R10I-4
-  return _saveEntryToNVSAtomic(newIdx);
+  return true;
 }
 
 TransactionDecision TransactionJournal::decide(const String& requestId,

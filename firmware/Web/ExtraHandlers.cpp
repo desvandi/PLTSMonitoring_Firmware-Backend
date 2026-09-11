@@ -200,6 +200,14 @@ void handleDevicePost() {
   if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
   doc["type"] = "config";
   doc["action"] = "device";
+  // [CORE-02] Envelope gate
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(doc, envErr)) {
+      sendError(400, envErr);
+      return;
+    }
+  }
   // [P2-1 REMEDIATION 2026-09] Freshness gate (REST/MQTT parity — see
   // ConfigHandlers.cpp for the full rationale).
   {
@@ -258,6 +266,13 @@ void handlePasswordPost() {
   // dedup like every other mutation). Body keys: current, next, requestId.
   doc["type"] = "config";
   doc["action"] = "password";
+  // [CORE-02] Envelope gate
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(doc, envErr)) {
+      sendError(400, envErr); return;
+    }
+  }
   {
     String expiryErr;
     if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {

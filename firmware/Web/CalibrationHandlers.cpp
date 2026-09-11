@@ -120,34 +120,144 @@ void handlePost() {
   sendSuccess("Calibration updated", "{}");
 }
 
-void handlePoint(const String& which) {
+// [PRODUCTION-GRADE 2026-09 / audit p.266-269, BLOCKER C] Both calibration
+// point and ACS712-zero mutations now flow through the SAME canonical
+// transaction pipeline as the MQTT path: envelope → freshness →
+// canonicalize → journal → apply → ACK. Previously these REST endpoints
+// called VoltageCalibration::setPoint()/captureZeroOffset() DIRECTLY — a
+// network timeout followed by an operator retry could apply the capture
+// TWICE with no durable transaction identity (idempotency gap).
+static void handlePointImpl(const String& which) {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
   if (!requireBody(1024)) return;
   String raw = http.arg("plain");
-  StaticJsonDocument<512> doc;
-  if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
-  float ref = doc["reference"] | 0.0f;
-  float rawV = doc["raw"] | 0.0f;
+  StaticJsonDocument<512> body;
+  if (deserializeJson(body, raw)) { sendError(400, "Invalid JSON"); return; }
+
+  // Build the canonical command envelope
+  StaticJsonDocument<512> cmdDoc;
+  cmdDoc["type"] = "calibration";
+  cmdDoc["action"] = "point";
+  cmdDoc["which"] = which;
+  cmdDoc["reference"] = body["reference"] | 0.0f;
+  cmdDoc["raw"] = body["raw"] | 0.0f;
+  cmdDoc["requestId"] = body["requestId"] | "";
+  cmdDoc["transactionId"] = body["transactionId"] | "";
+  cmdDoc["version"] = body["version"] | 0;
+  cmdDoc["issuedAt"] = body["issuedAt"] | 0;
+  cmdDoc["expiresAt"] = body["expiresAt"] | 0;
+
+  // [CORE-02] Envelope gate (same as relay/config mutations)
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(cmdDoc, envErr)) {
+      sendError(400, envErr.c_str());
+      return;
+    }
+  }
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr)) {
+      sendError(400, expiryErr);
+      return;
+    }
+  }
+  Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(cmdDoc);
+  if (!canon.ok) { sendError(400, canon.errorMessage); return; }
+  Services::DecisionResult d =
+    Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  if (d.decision == Services::TransactionDecision::Conflict) {
+    sendError(409, "requestId reuse with different command");
+    return;
+  }
+  if (d.decision == Services::TransactionDecision::Duplicate) {
+    sendSecurityHeaders();
+    http.send(200, "application/json; charset=utf-8", d.previousAckJson);
+    return;
+  }
+
+  // Execute (two-phase: setPoint validates internally BEFORE mutating)
+  float ref = cmdDoc["reference"] | 0.0f;
+  float rawV = cmdDoc["raw"] | 0.0f;
   if (!Services::voltageCalibration.setPoint(which.c_str(), ref, rawV)) {
     sendError(400, "Calibration point rejected");
+    return;
+  }
+
+  String ack = "{\"success\":true,\"message\":\"Calibration point " + which + " set\"}";
+  if (!Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack)) {
+    sendError(503, "Calibration applied but journal persistence failed");
     return;
   }
   sendSuccess("Calibration point set", "{}");
 }
 
-void handleAcs712Zero() {
+static void handleAcs712ZeroImpl() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
-  // Capture zero offset from current sensor (must be at zero current)
+  if (!requireBody(512)) return;
+  String raw = http.arg("plain");
+  StaticJsonDocument<512> body;
+  if (deserializeJson(body, raw)) { sendError(400, "Invalid JSON"); return; }
+
+  // Build the canonical command envelope (action=acs712_zero)
+  StaticJsonDocument<512> cmdDoc;
+  cmdDoc["type"] = "calibration";
+  cmdDoc["action"] = "acs712_zero";
+  cmdDoc["requestId"] = body["requestId"] | "";
+  cmdDoc["transactionId"] = body["transactionId"] | "";
+  cmdDoc["version"] = body["version"] | 0;
+  cmdDoc["issuedAt"] = body["issuedAt"] | 0;
+  cmdDoc["expiresAt"] = body["expiresAt"] | 0;
+
+  // [CORE-02] Envelope gate — the ACS712 capture is a physical measurement
+  // mutation; a retried POST MUST dedupe to the first capture result.
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(cmdDoc, envErr)) {
+      sendError(400, envErr.c_str());
+      return;
+    }
+  }
+  {
+    String expiryErr;
+    if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr)) {
+      sendError(400, expiryErr);
+      return;
+    }
+  }
+  Services::CanonicalResult canon = Services::CommandCanonicalizer::canonicalizeAndHash(cmdDoc);
+  if (!canon.ok) { sendError(400, canon.errorMessage); return; }
+  Services::DecisionResult d =
+    Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  if (d.decision == Services::TransactionDecision::Conflict) {
+    sendError(409, "requestId reuse with different command");
+    return;
+  }
+  if (d.decision == Services::TransactionDecision::Duplicate) {
+    sendSecurityHeaders();
+    http.send(200, "application/json; charset=utf-8", d.previousAckJson);
+    return;
+  }
+
+  // Execute — capture zero offset from current sensor (must be at zero current)
   float offset = Drivers::acs712.captureZeroOffset();
   Core::calibration.acs712Offset = offset;
   Drivers::acs712.setZeroOffset(offset);
   Storage::config.markCalibrationDirty();
   Storage::config.saveCalibration(true);
-  String data = "{\"offset\":" + String(offset, 2) + "}";
-  sendSuccess("ACS712 zero offset captured", data);
+
+  String ack = "{\"success\":true,\"offset\":" + String(offset, 2) + "}";
+  if (!Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack)) {
+    sendError(503, "Zero-cal applied but journal persistence failed");
+    return;
+  }
+  sendSuccess("ACS712 zero offset captured", ack);
 }
+
+void handlePoint(const String& which) { handlePointImpl(which); }
+void handleAcs712Zero() { handleAcs712ZeroImpl(); }
 
 void registerRoutes() {
   http.on("/api/calibration", HTTP_GET, handleGet);

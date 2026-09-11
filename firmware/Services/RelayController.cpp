@@ -10,6 +10,9 @@
 #include "../Services/HealthSupervisor.h"
 #include <Preferences.h>
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <ctime>
 
 namespace Services {
 
@@ -25,9 +28,16 @@ void RelayController::begin() {
     _pulses[i].active = false;
   }
 
-  // [P1-10] Initialize command queue
-  _cmdQueueHead = 0;
-  _cmdQueueTail = 0;
+  // [audit p.101-102] Native FreeRTOS queue replaces the custom volatile
+  // ring buffer — cross-core producer (networkTask/core1) and consumer
+  // (relayTask/core0) synchronization is now the kernel's responsibility.
+  if (_commandQueueHandle == nullptr) {
+    _commandQueueHandle = xQueueCreate(COMMAND_QUEUE_SIZE, sizeof(QueuedRelayCommand));
+  }
+
+  // [RG-RELAY-09] Clear the transaction result ring
+  for (uint8_t i = 0; i < RESULT_RING_SIZE; i++) _resultRing[i] = RelayTransactionRecord{};
+  _resultRingNext = 0;
 
   // Initialize interlock groups (all inactive by default — operator configures)
   for (uint8_t i = 0; i < 4; i++) {
@@ -80,6 +90,29 @@ void RelayController::tick() {
 
   if (!_driverAvailable) return;
 
+  // [audit p.92-93] Automatic verified safe-recovery after a failed I²C
+  // write: the driver refuses normal mutations while its shadow register is
+  // unknown. Recovery drives 0xFF (ALL OFF — safe direction) and verifies by
+  // readback, restoring the driver to a known state.
+  if (Drivers::relayExpander.isShadowUnknown()) {
+    if (Drivers::relayExpander.recoverWithAllOff()) {
+      for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+        if (_state[ch].reportedState) {
+          _state[ch].reportedState = false;
+          _state[ch].desiredState = false;
+          _state[ch].stateSequence++;
+          _state[ch].lastChangedAtMs = millis();
+          _state[ch].onSinceMs = 0;
+          _state[ch].confidence = Core::RelayStateConfidence::SoftwareOnly;
+        }
+        _pulses[ch].active = false;  // any pending pulse is moot — channel is OFF
+      }
+      Services::Log.append(Core::LogType::Custom,
+                 "RELAY: I²C shadow recovered (verified ALL OFF) — normal mutations re-enabled", 0);
+    }
+    // Recovery failed — remain in refused state; fault alarms already raised.
+  }
+
   // 1. Check maxOnTime for all channels — FORCE OFF if exceeded
   _checkMaxOnTime();
 
@@ -108,14 +141,18 @@ RelayCommandResult RelayController::applyCommand(
     return RelayCommandResult::Failed;
   }
 
-  // Handle "all_off" command
+  // Handle "all_off" command — [audit p.77] all_off is a normal command and
+  // follows the SAME queue/task lifecycle as per-channel commands.
   if (command == "all_off") {
-    for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
-      _applyChannelState(ch, false, Core::RelaySource::System);
-    }
-    messageOut = "All channels OFF";
-    Services::Log.append(Core::LogType::Custom, "RELAY: all_off command executed", 0);
-    return RelayCommandResult::Applied;
+    AllOffResult result = allOffWithResult();
+    messageOut = "All channels OFF: " + String(result.success) + " ok, " +
+                 String(result.failed) + " failed" +
+                 (result.unknown > 0 ? (", " + String(result.unknown) + " unknown") : "");
+    Services::Log.append(Core::LogType::Custom,
+               "RELAY: all_off command executed (" + messageOut + ")", 0);
+    return (result.failed == 0 && result.unknown == 0)
+           ? RelayCommandResult::Applied
+           : RelayCommandResult::Failed;
   }
 
   // Handle "config" command
@@ -274,16 +311,55 @@ RelayCommandResult RelayController::applyCommand(
   return RelayCommandResult::Rejected;
 }
 
+// [audit p.363-365] Emergency ALL OFF — the SAFETY AUTHORITY path.
+// - Attempts the OFF write on EVERY channel regardless of reportedState:
+//   after an I²C fault the physical state is unknown, so "software thinks
+//   it's off" is NOT a reason to skip the write.
+// - NOT blocked by minOnTime (safety hierarchy, audit p.378).
+// - Bumps the safety generation → every command still queued from BEFORE the
+//   emergency is re-validated at execution and BLOCKED (audit p.366-369).
 void RelayController::emergencyAllOff() {
-  if (!_driverAvailable) return;
+  // Invalidate pending normal commands — they belong to a dead safety epoch.
+  _safetyGeneration++;
 
+  if (!_driverAvailable) {
+    Services::Log.append(Core::LogType::Custom,
+               "RELAY: E-WAVE cascade — driver UNAVAILABLE, cannot force OFF", 0);
+    Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
+                           Core::AlarmSeverity::Critical,
+                           "E-WAVE: relay driver unavailable — physical state NOT verifiable");
+    return;
+  }
+
+  AllOffResult result;
+  result.requested = Core::RELAY_CHANNEL_COUNT;
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
-    if (_state[ch].reportedState) {
-      _applyChannelState(ch, false, Core::RelaySource::System);
+    _pulses[ch].active = false;  // cancel pending pulses first
+
+    // Attempt OFF regardless of reportedState (audit p.364).
+    _applyChannelState(ch, false, Core::RelaySource::Safety);
+
+    if (_state[ch].fault) {
+      // _applyChannelState could not verify the write — outcome unknown
+      // (the write may or may not have reached the expander).
+      result.unknown++;
+      result.detail += "CH" + String(ch) + ":UNKNOWN ";
+    } else if (!_state[ch].reportedState) {
+      result.success++;
+    } else {
+      result.failed++;
+      result.detail += "CH" + String(ch) + ":STILL_ON ";
     }
   }
+
+  Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
+                         Core::AlarmSeverity::Critical,
+                         ("E-WAVE cascade executed: " + String(result.success) + " off, " +
+                          String(result.unknown) + " unknown").c_str());
   Services::Log.append(Core::LogType::Custom,
-             "RELAY: E-WAVE cascade — all channels OFF", 0);
+             "RELAY: E-WAVE cascade — all channels OFF attempted (" +
+             String(result.success) + " ok, " + String(result.unknown) + " unknown, safetyGen=" +
+             String(_safetyGeneration) + ")", 0);
 }
 
 bool RelayController::acknowledgeSafetyAlarm(uint8_t channel) {
@@ -308,12 +384,13 @@ bool RelayController::clearSafetyLockout(uint8_t channel) {
   if (!faultResolved) return false;
 
   _state[channel].maxOnTimeForced = false;
+  // [audit p.380-382] CLEARED is recorded before ARMING so the lifecycle is
+  // observable in logs; ARMED → NORMAL happens on the next executor tick.
   _state[channel].lockout = Core::RelayLockoutState::Cleared;
-  // Will transition to ARMED on next tick, then NORMAL
   _state[channel].lockout = Core::RelayLockoutState::Armed;
   _saveLockoutStates();
   Services::Log.append(Core::LogType::Custom,
-             "RELAY: Channel " + String(channel) + " safety lockout cleared", 0);
+             "RELAY: Channel " + String(channel) + " safety lockout cleared (CLEARED→ARMED)", 0);
   return true;
 }
 
@@ -339,7 +416,104 @@ void RelayController::serializeStatus(JsonArray& arr) const {
     o["enabled"] = _config[ch].enabled;
     o["lastChangedAt"] = _state[ch].lastChangedAtMs;
     o["maxOnTimeForced"] = _state[ch].maxOnTimeForced;
+    o["stateSequence"] = _state[ch].stateSequence;  // [audit p.293] readback authority
   }
+}
+
+// ============================================================================
+// QUEUE — single physical mutation authority (audit p.284-289, p.589-602)
+// ============================================================================
+
+bool RelayController::queueCommand(const QueuedRelayCommand& cmd) {
+  if (_commandQueueHandle == nullptr) return false;
+  // Producer side: networkTask (core 1) / MQTT context. xQueueSend is
+  // cross-core safe; timeout 0 — ingress must never block on a full queue
+  // (the caller reports 503 and the operator retries with the SAME
+  // transactionId, which the journal deduplicates).
+  return xQueueSend((QueueHandle_t)_commandQueueHandle, &cmd, 0) == pdTRUE;
+}
+
+void RelayController::processCommandQueue() {
+  if (_commandQueueHandle == nullptr) return;
+
+  QueuedRelayCommand cmd;
+  while (xQueueReceive((QueueHandle_t)_commandQueueHandle, &cmd, 0) == pdTRUE) {
+    // ---- EXECUTION-TIME VALIDATION (audit p.375-377) --------------------
+    // Ingress validation proves the command COULD enter the system; this
+    // proves it can STILL safely execute NOW.
+
+    // 1. Freshness re-check — the command may have expired while queued.
+    if (cmd.expiresAt > 0) {
+      uint32_t now = (uint32_t)::time(nullptr);
+      if (now != 0 && cmd.expiresAt < now) {
+        _recordTransactionResult(cmd, RelayTerminalResult::Rejected,
+                                 "command expired while queued");
+        continue;
+      }
+    }
+
+    // 2. Safety generation — commands queued BEFORE an emergency trip are
+    //    stale and must never re-activate a load after E-WAVE (audit
+    //    p.366-369). No automatic restoration of lower-priority intent.
+    if (cmd.safetyGeneration != _safetyGeneration) {
+      _recordTransactionResult(cmd, RelayTerminalResult::Blocked,
+                               "BLOCKED_STALE_SAFETY — safety epoch changed (emergency)");
+      continue;
+    }
+
+    // 3. Execute through the single mutation path (safety + interlock are
+    //    re-evaluated inside applyCommand immediately before the write).
+    String messageOut;
+    RelayCommandResult r = applyCommand(String(cmd.command), cmd.channel,
+                                        cmd.desiredState, cmd.pulseDurationMs,
+                                        String(cmd.source), messageOut);
+
+    RelayTerminalResult terminal;
+    switch (r) {
+      case RelayCommandResult::Applied: terminal = RelayTerminalResult::Executed; break;
+      case RelayCommandResult::Blocked: terminal = RelayTerminalResult::Blocked; break;
+      case RelayCommandResult::Rejected: terminal = RelayTerminalResult::Rejected; break;
+      default:                          terminal = RelayTerminalResult::Failed; break;
+    }
+    // Honest UNKNOWN propagation: when the hardware write failed AND the
+    // driver shadow is unknown, the outcome is not deterministic FAILED.
+    if (terminal == RelayTerminalResult::Failed &&
+        Drivers::relayExpander.isShadowUnknown()) {
+      terminal = RelayTerminalResult::Unknown;
+    }
+    _recordTransactionResult(cmd, terminal, messageOut);
+  }
+}
+
+bool RelayController::getTransactionResult(const String& transactionId,
+                                           RelayTransactionRecord& out) const {
+  if (transactionId.length() == 0) return false;
+  for (uint8_t i = 0; i < RESULT_RING_SIZE; i++) {
+    if (_resultRing[i].valid &&
+        transactionId.equals(_resultRing[i].transactionId)) {
+      out = _resultRing[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+void RelayController::_recordTransactionResult(const QueuedRelayCommand& cmd,
+                                               RelayTerminalResult result,
+                                               const String& message) {
+  RelayTransactionRecord& rec = _resultRing[_resultRingNext];
+  strncpy(rec.transactionId, cmd.transactionId, sizeof(rec.transactionId) - 1);
+  rec.transactionId[sizeof(rec.transactionId) - 1] = '\0';
+  rec.result = result;
+  rec.channel = cmd.channel;
+  rec.desiredState = cmd.desiredState;
+  rec.reportedState = _validChannel(cmd.channel) ? _state[cmd.channel].reportedState : false;
+  rec.stateSequence = _validChannel(cmd.channel) ? _state[cmd.channel].stateSequence : 0;
+  strncpy(rec.message, message.c_str(), sizeof(rec.message) - 1);
+  rec.message[sizeof(rec.message) - 1] = '\0';
+  rec.completedAtMs = millis();
+  rec.valid = true;
+  _resultRingNext = (_resultRingNext + 1) % RESULT_RING_SIZE;
 }
 
 // ============================================================================
@@ -645,64 +819,29 @@ void RelayController::_recordHeartbeat() {
   Services::health.recordHeartbeat(Core::TaskId::Relay);
 }
 
-// [P1-7] all_off with per-channel result tracking
+// [P1-7] all_off with per-channel result tracking.
+// EXECUTOR-ONLY — invoked from applyCommand("all_off") inside relayTask.
+// Writes OFF on every channel regardless of reportedState (audit p.364 —
+// channels whose physical state is unknown after a fault still get the
+// safe-direction write attempted).
 AllOffResult RelayController::allOffWithResult() {
   AllOffResult result;
   result.requested = Core::RELAY_CHANNEL_COUNT;
 
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
-    bool wasOn = _state[ch].reportedState;
-    if (wasOn) {
-      _applyChannelState(ch, false, Core::RelaySource::System);
-      // Check if the write succeeded (fault flag set by _applyChannelState on failure)
-      if (_state[ch].fault) {
-        result.failed++;
-        result.detail += "CH" + String(ch) + ":I2C_FAIL ";
-      } else {
-        result.success++;
-      }
-      // Cancel any pending pulse for this channel
-      _pulses[ch].active = false;
+    _pulses[ch].active = false;  // cancel any pending pulse for this channel
+    _applyChannelState(ch, false, Core::RelaySource::Manual);
+
+    if (_state[ch].fault) {
+      // The write outcome is unverified — count separately from hard failures
+      // so the ACK can report UNKNOWN honestly (audit p.50, p.365).
+      result.unknown++;
+      result.detail += "CH" + String(ch) + ":UNKNOWN ";
     } else {
-      result.success++;  // already OFF = success
+      result.success++;
     }
   }
   return result;
-}
-
-// [P1-10] Command queue — single-threaded mutation via relayTask
-bool RelayController::queueCommand(const String& command, uint8_t channel,
-                                    bool desiredState, uint32_t pulseDurationMs,
-                                    const String& source) {
-  uint8_t nextTail = (_cmdQueueTail + 1) % COMMAND_QUEUE_SIZE;
-  if (nextTail == _cmdQueueHead) {
-    // Queue full
-    return false;
-  }
-  QueuedCommand& cmd = _commandQueue[_cmdQueueTail];
-  strncpy(cmd.command, command.c_str(), sizeof(cmd.command) - 1);
-  cmd.command[sizeof(cmd.command) - 1] = '\0';
-  cmd.channel = channel;
-  cmd.desiredState = desiredState;
-  cmd.pulseDurationMs = pulseDurationMs;
-  strncpy(cmd.source, source.c_str(), sizeof(cmd.source) - 1);
-  cmd.source[sizeof(cmd.source) - 1] = '\0';
-  cmd.valid = true;
-  _cmdQueueTail = nextTail;
-  return true;
-}
-
-void RelayController::processCommandQueue() {
-  while (_cmdQueueHead != _cmdQueueTail) {
-    QueuedCommand& cmd = _commandQueue[_cmdQueueHead];
-    if (cmd.valid) {
-      String messageOut;
-      applyCommand(String(cmd.command), cmd.channel, cmd.desiredState,
-                   cmd.pulseDurationMs, String(cmd.source), messageOut);
-      cmd.valid = false;
-    }
-    _cmdQueueHead = (_cmdQueueHead + 1) % COMMAND_QUEUE_SIZE;
-  }
 }
 
 } // namespace Services

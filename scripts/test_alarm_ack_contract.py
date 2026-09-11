@@ -43,7 +43,12 @@ PATTERNS = {
         "Firmware must have handleAcknowledge() that parses /api/alarms/{code}/acknowledge",
     ),
     "fw_404_on_missing": (
-        r'sendError\(404,\s*"Alarm not found"\)',
+        # [PRODUCTION-GRADE 2026-09] The 404 contract is now enforced inside
+        # runAlarmAckPipeline: it sets httpStatusOut=404 + errMsgOut="Alarm
+        # not found", which handleAcknowledgeImpl relays via sendError(status, err).
+        # Accept both the legacy direct-call and the pipeline forms.
+        r'(sendError\(404,\s*"Alarm not found"\))|'
+        r'(httpStatusOut\s*=\s*404\s*;\s*\n\s*errMsgOut\s*=\s*"Alarm not found")',
         "Firmware must 404 when alarm code not found (was: silently OK)",
     ),
 }

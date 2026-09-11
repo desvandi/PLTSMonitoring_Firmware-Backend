@@ -270,6 +270,10 @@ void setup() {
   }
   esp_task_wdt_reset();
 
+  // [STORAGE-GATE-06] Complete an interrupted factory reset BEFORE loading
+  // any config — a half-wiped device must not boot with partial state.
+  handlePendingFactoryReset();
+
   // Storage — sole owner of persistence (RC-12, D-6)
   // ConfigStore doesn't have begin(); load each subsystem explicitly.
   Storage::config.loadUserConfig();
@@ -501,6 +505,37 @@ void setup() {
 //=============================================================================
 // LOOP — minimal; work is done in tasks
 //=============================================================================
+// [PRODUCTION-GRADE 2026-09 / audit p.145-146, STORAGE-GATE-06] Boot-side
+// completion of an interrupted factory reset. SystemHandlers persists an
+// IN_PROGRESS marker ('plts'/ftr_p) BEFORE wiping the first namespace; a
+// power loss mid-wipe leaves the marker set. On boot we detect it, finish
+// the deterministic reset (all namespaces + LittleFS format), clear the
+// marker, and continue into first-boot provisioning — the operator sees a
+// fully-reset device instead of a half-reset one.
+void handlePendingFactoryReset() {
+  Preferences p;
+  if (!p.begin("plts", true)) return;
+  bool inProgress = p.getBool("ftr_p", false);
+  p.end();
+  if (!inProgress) return;
+
+  Serial.println("[RESET] Interrupted factory reset detected — completing wipe");
+  static const char* const NAMESPACES[] = {
+    "plts", "plts_health", "plts_energy", "plts_ota", "plts_txn",
+    "plts_spool", "plts_batt", "plts_alarm", "plts_time", "plts_soc",
+    "plts_emg", "plts_auth", "plts_relays",
+  };
+  for (const char* ns : NAMESPACES) {
+    if (p.begin(ns, false)) { p.clear(); p.end(); }
+  }
+  LittleFS.format();
+  LittleFS.begin(true);
+  // Clear the marker so the next boot is a normal (complete) state.
+  if (p.begin("plts", false)) { p.putBool("ftr_p", false); p.end(); }
+  Serial.println("[RESET] Factory reset completed after interruption");
+}
+
+
 void loop() {
   esp_task_wdt_reset();
   // [W13-1] OTA image confirmation: no-op (two compares) until the 60 s
