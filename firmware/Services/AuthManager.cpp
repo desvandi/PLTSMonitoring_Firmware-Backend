@@ -21,21 +21,45 @@
 #include "../Core/Config.h"
 #include "../Core/Common.h"
 #include "../Utils/Crypto.h"
+#include "../Utils/Crc.h"
 #include "../Storage/ConfigStore.h"
 #include "../Drivers/RtcDriver.h"
 #include "LogService.h"
 #include <Preferences.h>
 #include <cstring>
 #include <cstdio>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace Services {
 
 AuthManager auth;
 
+// [AUTH-GATE-06] Persisted refresh-token blob layout (224 payload + 12 header):
+//   [0..3]  magic 'R','T','O','K'
+//   [4]     version (1)
+//   [5..7]  reserved (0)
+//   [8..11] CRC32 over payload bytes [12..end]
+//   [12..]  4 slots × 56 bytes {token(32), issuedAt(4), expiresAt(4), used(1), ip(15)}
+static const uint8_t RT_BLOB_MAGIC[4] = {'R','T','O','K'};
+static const uint8_t RT_BLOB_VERSION = 1;
+
+// [AUTH-GATE-05] Mutex guards the WHOLE refresh-rotation critical section.
+void AuthManager::_lockAuth() {
+  if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();
+  if (_authMutex) xSemaphoreTake((SemaphoreHandle_t)_authMutex, portMAX_DELAY);
+}
+void AuthManager::_unlockAuth() {
+  if (_authMutex) xSemaphoreGive((SemaphoreHandle_t)_authMutex);
+}
+
 void AuthManager::begin() {
   rotateCsrfToken();
   for (uint8_t i = 0; i < Core::MAX_TRACKED_IPS; i++) _attempts[i] = {};
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) _refreshTokens[i] = {};
+
+  // [AUTH-GATE-05] Create the rotation mutex up front.
+  if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();
 
   // [audit-2 K-4] Restore refresh tokens from NVS so sessions survive reboot.
   _loadRefreshTokens();
@@ -50,6 +74,18 @@ void AuthManager::begin() {
     Log.append(Core::LogType::AuthFail,
                "AUTH NOT_READY: per-device JWT secret missing/invalid", 0);
   }
+
+  // [AUTH-GATE-04 / audit p.160] PBKDF2 iteration count: lower AND upper
+  // bound. Core::iterations is uint16_t (max 65535); a corrupted value of
+  // 65535 would still cost ~6.5× the default per login attempt — enough for
+  // a request-timing local DoS when combined with a weak password oracle.
+  if (Core::iterations < 1000 || Core::iterations > 50000) {
+    Log.append(Core::LogType::AuthFail,
+               String("AUTH: PBKDF2 iterations=") + String(Core::iterations) +
+               " out of [1000,50000] — default applied", 0);
+    Core::iterations = Core::PBKDF2_ITERATIONS;
+  }
+
   Serial.print(F("[AUTH] init: "));
   Serial.print(_authReady ? "READY" : "NOT_READY");
   Serial.println(F(" | JWT 15min, refresh 7-day rotation, PBKDF2 10k, per-IP rate limit"));
@@ -285,6 +321,9 @@ String AuthManager::issueRefreshToken(WebServer& server, const String& username)
 bool AuthManager::verifyRefreshToken(const String& token, String& outUsername) {
   // [WAVE-5 / FW-B1] Fixed-length compare needs an equal-length input —
   // a shorter String would be overread past its allocation.
+  // NOTE (AUTH-GATE-05): read-only verification. Rotation MUST use
+  // consumeRefreshToken() — verify+rotate as two calls is the race the
+  // audit found (two concurrent refreshes could both pass verify).
   if (token.length() != 32) return false;
   for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS; i++) {
     if (_refreshTokens[i].token[0] == '\0') continue;
@@ -300,67 +339,138 @@ bool AuthManager::verifyRefreshToken(const String& token, String& outUsername) {
   return false;
 }
 
-bool AuthManager::rotateRefreshToken(const String& oldToken, String& outNewToken) {
-  // [WAVE-5 / FW-B1] Same length guard as verifyRefreshToken.
+// [AUTH-GATE-05 / audit p.166-167] ONE ATOMIC consume operation:
+// find → validate → mark old used → allocate new → persist, all under the
+// auth mutex. There is NO window in which two concurrent requests can both
+// verify the same not-yet-used token and both rotate it (A→B AND A→C).
+bool AuthManager::consumeRefreshToken(const String& oldToken, String& outNewToken,
+                                      String& outUsername) {
   if (oldToken.length() != 32) return false;
-  for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS; i++) {
+  _lockAuth();
+  bool ok = false;
+  for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS && !ok; i++) {
     if (_refreshTokens[i].token[0] == '\0') continue;
-    if (Utils::constantTimeMemEquals((const volatile uint8_t*)_refreshTokens[i].token,
-                                      (const volatile uint8_t*)oldToken.c_str(), 32)) {
-      if (_refreshTokens[i].used) return false;   // already rotated — replay attack
-      // [audit-2 K-3 FIX] Mark old token as used (one-time use semantics)
-      // WITHOUT overwriting the slot. The old token stays in the slot until
-      // LRU-evicted by _findRefreshSlot(), so a replay attempt correctly
-      // hits `used=true` and returns false. The new token gets a fresh slot.
-      _refreshTokens[i].used = true;
-      _refreshTokens[i].expiresAt = Drivers::rtc.getUnixTime() + Core::JWT_REFRESH_TTL_SEC;
-      // Issue the new token in a fresh slot
-      int newSlot = _findRefreshSlot();
-      RefreshToken& rt = _refreshTokens[newSlot];
-      outNewToken = Utils::generateToken(32);
-      strncpy(rt.token, outNewToken.c_str(), 32);
-      rt.token[32] = '\0';
-      rt.issuedAt = Drivers::rtc.getUnixTime();
-      rt.expiresAt = rt.issuedAt + Core::JWT_REFRESH_TTL_SEC;
-      rt.used = false;
-      _persistRefreshTokens();
-      return true;
+    if (!Utils::constantTimeMemEquals((const volatile uint8_t*)_refreshTokens[i].token,
+                                       (const volatile uint8_t*)oldToken.c_str(), 32)) {
+      continue;
     }
+    if (_refreshTokens[i].used) break;               // replay — reject
+    uint32_t now = Drivers::rtc.getUnixTime();
+    if (now > _refreshTokens[i].expiresAt) break;     // expired — reject
+
+    // Mark old token used (one-time semantics) in place.
+    _refreshTokens[i].used = true;
+
+    // Issue the successor in a fresh slot.
+    int newSlot = _findRefreshSlot();
+    RefreshToken& rt = _refreshTokens[newSlot];
+    outNewToken = Utils::generateToken(32);
+    strncpy(rt.token, outNewToken.c_str(), 32);
+    rt.token[32] = '\0';
+    rt.issuedAt = now;
+    rt.expiresAt = rt.issuedAt + Core::JWT_REFRESH_TTL_SEC;
+    rt.used = false;
+    _persistRefreshTokens();
+    outUsername = Core::wwwUser;  // single-user system
+    ok = true;
   }
-  return false;
+  _unlockAuth();
+  return ok;
 }
 
-// [audit-2 K-4 FIX] Persist refresh token slots to NVS namespace `plts_auth`
-// so they survive reboot. Header contract "NVS LRU 4" is now honored.
-// Layout: blob of MAX_REFRESH_TOKENS × {token(32) + issuedAt(4) + expiresAt(4)
-// + used(1) + ip(15)} = 56 bytes per slot × 4 = 224 bytes total. CRC32 guard.
+// [AUTH-GATE-07 / audit p.171-172] Logout server-side revocation: zero every
+// slot and persist. A stolen refresh token dies with the user's logout,
+// not with its 7-day TTL.
+void AuthManager::revokeAllRefreshTokens() {
+  _lockAuth();
+  for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
+    memset(_refreshTokens[i].token, 0, sizeof(_refreshTokens[i].token));
+    _refreshTokens[i].used = true;   // belt-and-braces: any residual value is dead
+    _refreshTokens[i].issuedAt = 0;
+    _refreshTokens[i].expiresAt = 0;
+    _refreshTokens[i].ip[0] = '\0';
+  }
+  _persistRefreshTokens();
+  _unlockAuth();
+  Log.append(Core::LogType::Logout,
+             "All refresh tokens revoked (server-side session revocation)", 0);
+}
+
+// [audit-2 K-4 FIX + AUTH-GATE-06] Persist refresh token slots to NVS
+// namespace `plts_auth` so they survive reboot. Header contract "NVS LRU 4"
+// is now honored — AND the blob now carries a REAL CRC32 (the old comment
+// claimed a guard that was never written). Layout:
+//   [0..3] magic 'RTOK' | [4] version | [5..7] reserved | [8..11] CRC32
+//   [12..235] 4 slots × 56 bytes. Write result is verified (STORAGE-GATE-04).
 void AuthManager::_persistRefreshTokens() {
   Preferences p;
-  if (!p.begin("plts_auth", false)) return;
-  // Pack into a single blob for atomicity.
+  if (!p.begin("plts_auth", false)) {
+    Log.append(Core::LogType::Custom,
+               "NVS FAILURE: plts_auth open failed — refresh tokens NOT persisted", 0);
+    return;
+  }
   static_assert(sizeof(RefreshToken) >= 56, "RefreshToken too small for NVS blob");
-  uint8_t buf[Core::MAX_REFRESH_TOKENS * 56];
+  const size_t payloadLen = Core::MAX_REFRESH_TOKENS * 56;
+  uint8_t buf[12 + payloadLen] = {0};
+  memcpy(buf, RT_BLOB_MAGIC, 4);
+  buf[4] = RT_BLOB_VERSION;
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
-    uint8_t* slot = buf + i * 56;
+    uint8_t* slot = buf + 12 + i * 56;
     memcpy(slot, _refreshTokens[i].token, 32);
     memcpy(slot + 32, &_refreshTokens[i].issuedAt, 4);
     memcpy(slot + 36, &_refreshTokens[i].expiresAt, 4);
     slot[40] = _refreshTokens[i].used ? 1 : 0;
     memcpy(slot + 41, _refreshTokens[i].ip, 15);
   }
-  p.putBytes("rtokens", buf, sizeof(buf));
+  uint32_t crc = Utils::crc32(buf + 12, payloadLen);
+  buf[8] = (uint8_t)(crc & 0xFF);
+  buf[9] = (uint8_t)((crc >> 8) & 0xFF);
+  buf[10] = (uint8_t)((crc >> 16) & 0xFF);
+  buf[11] = (uint8_t)((crc >> 24) & 0xFF);
+  bool ok = p.putBytes("rtokens", buf, sizeof(buf)) == sizeof(buf);
   p.end();
+  if (!ok) {
+    Log.append(Core::LogType::Custom,
+               "NVS FAILURE: refresh-token blob write failed — sessions may not survive reboot", 0);
+  }
 }
 
 void AuthManager::_loadRefreshTokens() {
   Preferences p;
   if (!p.begin("plts_auth", true)) return;
-  uint8_t buf[Core::MAX_REFRESH_TOKENS * 56];
+  const size_t payloadLen = Core::MAX_REFRESH_TOKENS * 56;
+  uint8_t buf[12 + payloadLen] = {0};
   size_t n = p.getBytes("rtokens", buf, sizeof(buf));
   p.end();
-  if (n != sizeof(buf)) return;   // empty or stale — keep zero-initialized slots
+
+  // Legacy image (224 raw bytes, no header): the old format had no CRC, so it
+  // cannot be verified — accept it once and it will be re-persisted in the
+  // new format on the next rotation/logout. New format (236 bytes) is fully
+  // verified: magic + version + CRC (AUTH-GATE-06 — format-valid is no longer
+  // the same as integrity-valid).
+  const uint8_t* payload = nullptr;
+  if (n == 12 + payloadLen) {
+    if (memcmp(buf, RT_BLOB_MAGIC, 4) != 0 || buf[4] != RT_BLOB_VERSION) {
+      Log.append(Core::LogType::Custom,
+                 "AUTH: refresh-token blob header mismatch — sessions discarded", 0);
+      return;
+    }
+    uint32_t storedCrc = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) |
+                         ((uint32_t)buf[10] << 16) | ((uint32_t)buf[11] << 24);
+    if (storedCrc != Utils::crc32(buf + 12, payloadLen)) {
+      Log.append(Core::LogType::Custom,
+                 "AUTH: refresh-token blob CRC mismatch — sessions discarded", 0);
+      return;
+    }
+    payload = buf + 12;
+  } else if (n == payloadLen) {
+    payload = buf;  // legacy raw layout
+  } else {
+    return;  // empty or stale — keep zero-initialized slots
+  }
+
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
-    uint8_t* slot = buf + i * 56;
+    const uint8_t* slot = payload + i * 56;
     memcpy(_refreshTokens[i].token, slot, 32);
     _refreshTokens[i].token[32] = '\0';
     memcpy(&_refreshTokens[i].issuedAt, slot + 32, 4);

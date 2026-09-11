@@ -5,6 +5,7 @@
 #include "../Core/Globals.h"
 #include "../Core/Config.h"
 #include "../Core/Common.h"
+#include "../Utils/Crc.h"
 #include "LogService.h"
 #include <Preferences.h>
 #include <cmath>
@@ -144,26 +145,98 @@ void EnergyCounterService::reset(const char* reason) {
 }
 
 void EnergyCounterService::saveToNVS() {
+  // [PRODUCTION-GRADE 2026-09 / audit p.131-133, STORAGE-GATE-01/02] The old
+  // format wrote SIX independent float keys — a power loss between writes
+  // left a snapshot of MIXED generations (some fields new, some old), and
+  // netWh was then computed from incoherent data. Now: ONE blob with
+  // magic + version + CRC32, written (and verified) as a single NVS record
+  // — the same pattern the SOC state machine already uses (the audit's
+  // internal reference implementation).
   Preferences p;
   if (!p.begin("plts_energy", false)) return;
+
+  // Scratch: keep legacy keys in sync during the transition so a rollback
+  // firmware still finds coherent (if generation-atomic-weak) data.
   p.putFloat("chAh", _c.chargeAh);
   p.putFloat("dchAh", _c.dischargeAh);
   p.putFloat("chWh", _c.chargeWh);
   p.putFloat("dchWh", _c.dischargeWh);
   p.putFloat("pkChA", _c.peakChargeA);
   p.putFloat("pkDchA", _c.peakDischargeA);
+
+  uint8_t blob[12 + sizeof(float) * 6] = {0};
+  blob[0] = 'E'; blob[1] = 'N'; blob[2] = 'R'; blob[3] = 'G';
+  blob[4] = 1;  // version
+  float vals[6] = { _c.chargeAh, _c.dischargeAh, _c.chargeWh,
+                    _c.dischargeWh, _c.peakChargeA, _c.peakDischargeA };
+  memcpy(blob + 12, vals, sizeof(vals));
+  uint32_t crc = Utils::crc32(blob + 12, sizeof(vals));
+  blob[8] = (uint8_t)(crc & 0xFF);
+  blob[9] = (uint8_t)((crc >> 8) & 0xFF);
+  blob[10] = (uint8_t)((crc >> 16) & 0xFF);
+  blob[11] = (uint8_t)((crc >> 24) & 0xFF);
+  p.putBytes("state", blob, sizeof(blob));
   p.end();
 }
 
 void EnergyCounterService::loadFromNVS() {
   Preferences p;
-  if (!p.begin("plts_energy", true)) return;
+  if (!p.begin("plts_energy", true)) { _c = {}; return; }
+
+  // Preferred path: the single-blob snapshot (atomic, CRC-verified).
+  {
+    uint8_t blob[12 + sizeof(float) * 6] = {0};
+    size_t n = p.getBytes("state", blob, sizeof(blob));
+    if (n == sizeof(blob) && blob[0] == 'E' && blob[1] == 'N' &&
+        blob[2] == 'R' && blob[3] == 'G' && blob[4] == 1) {
+      uint32_t storedCrc = (uint32_t)blob[8] | ((uint32_t)blob[9] << 8) |
+                           ((uint32_t)blob[10] << 16) | ((uint32_t)blob[11] << 24);
+      if (storedCrc == Utils::crc32(blob + 12, sizeof(float) * 6)) {
+        float vals[6];
+        memcpy(vals, blob + 12, sizeof(vals));
+        // [STORAGE-GATE-09] Reject non-finite / negative accumulators — a
+        // corrupt record must never become a "valid-looking" measurement.
+        bool sane = true;
+        for (uint8_t i = 0; i < 6; i++) {
+          if (!isfinite(vals[i]) || vals[i] < 0.0f) sane = false;
+        }
+        if (sane) {
+          p.end();
+          _c.chargeAh = vals[0]; _c.dischargeAh = vals[1];
+          _c.chargeWh = vals[2]; _c.dischargeWh = vals[3];
+          _c.peakChargeA = vals[4]; _c.peakDischargeA = vals[5];
+          _c.netAh = _c.chargeAh - _c.dischargeAh;
+          _c.netWh = _c.chargeWh - _c.dischargeWh;
+          float cap = Core::cfgBatteryCapacityAh > 0 ? Core::cfgBatteryCapacityAh : Core::BATTERY_CAPACITY_AH;
+          _c.efc = (cap > 0) ? _c.dischargeAh / cap : 0.0f;
+          return;
+        }
+        // CRC ok but values insane — fall through to legacy/default path.
+        Log.append(Core::LogType::Custom,
+                   "Energy snapshot failed sanity (non-finite/negative) — defaults applied", 0);
+      } else {
+        Log.append(Core::LogType::Custom,
+                   "Energy snapshot CRC mismatch — defaults applied (counters restart from 0)", 0);
+      }
+    }
+  }
+
+  // Legacy path: independent keys (best-effort, may be a mixed-generation
+  // snapshot — pre-existing behavior, kept only for migration).
   _c.chargeAh        = p.getFloat("chAh", 0.0f);
   _c.dischargeAh     = p.getFloat("dchAh", 0.0f);
   _c.chargeWh        = p.getFloat("chWh", 0.0f);
   _c.dischargeWh     = p.getFloat("dchWh", 0.0f);
   _c.peakChargeA     = p.getFloat("pkChA", 0.0f);
   _c.peakDischargeA  = p.getFloat("pkDchA", 0.0f);
+  // [STORAGE-GATE-09] Same sanity gate on the legacy fields.
+  auto sane = [](float v) { return isfinite(v) && v >= 0.0f; };
+  if (!sane(_c.chargeAh) || !sane(_c.dischargeAh) || !sane(_c.chargeWh) ||
+      !sane(_c.dischargeWh) || !sane(_c.peakChargeA) || !sane(_c.peakDischargeA)) {
+    Log.append(Core::LogType::Custom,
+               "Legacy energy keys failed sanity — defaults applied", 0);
+    _c = {};
+  }
   _c.netAh = _c.chargeAh - _c.dischargeAh;
   _c.netWh = _c.chargeWh - _c.dischargeWh;
   float cap = Core::cfgBatteryCapacityAh > 0 ? Core::cfgBatteryCapacityAh : Core::BATTERY_CAPACITY_AH;

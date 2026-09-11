@@ -10,6 +10,7 @@
 #include "../Storage/ConfigStore.h"
 #include "../Services/CommandCanonicalizer.h"
 #include "../Services/TransactionJournal.h"
+#include "../Services/ConfigUpdater.h"
 #include "../Services/LogService.h"
 #include "../Services/AlarmRegistry.h"
 #include "../Services/SocStateMachine.h"
@@ -113,7 +114,20 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
     }
   }
 
-  // --- 4. Expiry check (defense-in-depth) --------------------------------------
+  // --- 4. [CORE-02] Mandatory mutation envelope -------------------------------
+  // version + transactionId + issuedAt + expiresAt must ALL be present so
+  // replay protection never silently degrades to journal-retention-only
+  // (same gate as every REST handler — REST/MQTT equivalence).
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(doc, envErr)) {
+      _publishAck(tid.c_str(), false, "BAD_SCHEMA", envErr);
+      _rejected++;
+      return;
+    }
+  }
+
+  // --- 4b. Expiry check (defense-in-depth) --------------------------------------
   // [P2-1 REMEDIATION 2026-09] Now routed through the SHARED gate so every
   // ingress (REST + MQTT) enforces identical freshness semantics — see
   // CommandCanonicalizer::isCommandExpired + TransactionJournal.h for the
@@ -141,7 +155,7 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   {
     JsonObject root = doc.as<JsonObject>();
     for (JsonPair kv : root) {
-      if (!Services::CommandCanonicalizer::isFieldAllowed(type, kv.key().c_str())) {
+      if (!Services::CommandCanonicalizer::isFieldAllowed(type, action, kv.key().c_str())) {
         _publishAck(tid.c_str(), false, "REJECTED",
                     "unknown field: " + String(kv.key().c_str()));
         _rejected++;
@@ -191,7 +205,7 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   }
 
   // --- 9. NEW — apply the command via canonical path ----------------------------
-  ApplyResult r = _applyCommand(type, action, doc);
+  ApplyResult r = _applyCommand(type, action, doc, canon.transactionId, canon.commandHash);
 
   // --- 10. Store transaction + ACK in journal (2-phase commit) -----------------
   // ACK body — same schema regardless of ok=true/false (per §51)
@@ -209,8 +223,16 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
 
   // Store in journal BEFORE publishing ACK (so a crash between store + publish
   // is recoverable — client retries, journal says DUPLICATE, replays ACK).
-  Services::journal.storeTransaction(canon.transactionId,
-                                      canon.commandHash, ackJson);
+  // [TXN-02/CORE-05] A failed durable store must NOT produce a success ACK —
+  // the command may already be applied, but the client is told (via the
+  // DURABILITY_FAILURE code) to reconcile rather than blindly retry.
+  if (!Services::journal.storeTransaction(canon.transactionId,
+                                          canon.commandHash, ackJson)) {
+    _publishAck(canon.transactionId.c_str(), false, "DURABILITY_FAILURE",
+                "transaction journal persistence failed — reconcile before retrying");
+    _rejected++;
+    return;
+  }
 
   // Publish ACK
   {
@@ -242,178 +264,32 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
 // ---------------------------------------------------------------------------
 MqttConfigReceiver::ApplyResult
 MqttConfigReceiver::_applyCommand(const String& type, const String& action,
-                                    JsonDocument& doc) {
+                                    JsonDocument& doc, const String& tid,
+                                    const String& commandHash) {
+  (void)commandHash;  // used by the relay branch below
   // ---------- config.update ----------
   // [FW-22 REMEDIATION 2026-08] Range validation now IDENTICAL to the REST
   // path (Web::ConfigHandlers). Previously MQTT config.update accepted ANY
   // value (negative capacity, 0 V thresholds) and persisted it — a divergent
   // validation surface violating the single-command-model requirement.
   if (type == "config" && action == "update") {
-    if (doc.containsKey("batteryCapacityAh")) {
-      float v = doc["batteryCapacityAh"];
-      if (v >= 10 && v <= 1000) Core::cfgBatteryCapacityAh = v;
-      else return { false, "REJECTED", "batteryCapacityAh out of range [10,1000]" };
+    // [PRODUCTION-GRADE 2026-09 / audit p.274-279, BLOCKER B] Two-phase
+    // mutation via the SHARED ConfigUpdater (same service the REST path
+    // uses). The old code mutated Core::cfg* field-by-field, so a REJECTED
+    // request (later field invalid, or a tier-order violation) left earlier
+    // fields already live in RAM. Validation law is now identical for both
+    // ingresses and no RAM mutation happens before the candidate is fully
+    // valid.
+    Services::ConfigUpdater::Result r = Services::ConfigUpdater::applyUpdate(doc);
+    if (!r.ok) {
+      return { false, "REJECTED", r.message };
     }
-    if (doc.containsKey("batteryNominalV")) {
-      float v = doc["batteryNominalV"];
-      if (v >= 24 && v <= 48) Core::cfgBatteryNominalVoltage = v;
-      else return { false, "REJECTED", "batteryNominalV out of range [24,48]" };
-    }
-    if (doc.containsKey("fullVoltage")) {
-      float v = doc["fullVoltage"];
-      if (v >= 50 && v <= 56) Core::cfgFullVoltage = v;
-      else return { false, "REJECTED", "fullVoltage out of range [50,56]" };
-    }
-    if (doc.containsKey("lowVoltage")) {
-      float v = doc["lowVoltage"];
-      if (v >= 40 && v <= 50) Core::cfgLowVoltage = v;
-      else return { false, "REJECTED", "lowVoltage out of range [40,50]" };
-    }
-    if (doc.containsKey("idleCurrentThreshold")) {
-      float v = doc["idleCurrentThreshold"];
-      if (v >= 0.1f && v <= 5.0f) Core::cfgIdleCurrentThreshold = v;
-      else return { false, "REJECTED", "idleCurrentThreshold out of range [0.1,5]" };
-    }
-    if (doc.containsKey("fullChargeCurrentThreshold")) {
-      float v = doc["fullChargeCurrentThreshold"];
-      if (v >= 0.5f && v <= 10.0f) Core::cfgFullChargeCurrentThreshold = v;
-      else return { false, "REJECTED", "fullChargeCurrentThreshold out of range [0.5,10]" };
-    }
-    if (doc.containsKey("fullChargePersistenceSec")) {
-      uint32_t v = doc["fullChargePersistenceSec"];
-      if (v >= 60 && v <= 7200) Core::cfgFullChargePersistenceSec = v;
-      else return { false, "REJECTED", "fullChargePersistenceSec out of range [60,7200]" };
-    }
-    if (doc.containsKey("telemetryIntervalSec")) {
-      uint16_t v = doc["telemetryIntervalSec"];
-      if (v >= 1 && v <= 60) Core::cfgTelemetryIntervalSec = v;
-      else return { false, "REJECTED", "telemetryIntervalSec out of range [1,60]" };
-    }
-    if (doc.containsKey("deviceName")) {
-      const char* dn = doc["deviceName"];
-      if (dn) strncpy(Core::deviceName, dn, sizeof(Core::deviceName) - 1);
-      Core::deviceName[sizeof(Core::deviceName) - 1] = '\0';
-    }
-    if (doc.containsKey("timezone")) {
-      const char* tz = doc["timezone"];
-      if (tz) strncpy(Core::cfgTimezone, tz, sizeof(Core::cfgTimezone) - 1);
-      Core::cfgTimezone[sizeof(Core::cfgTimezone) - 1] = '\0';
-    }
-    // [PARITY-4] BMS comm fields — previously the canonicalizer whitelist
-    // rejected them ("unknown field"), so MQTT could never configure BMS
-    // comm even though the REST path did. Ranges mirror Web::ConfigHandlers.
-    bool bmsConfigChanged = false;
-    if (doc.containsKey("bmsProtocol")) {
-      const char* p = doc["bmsProtocol"];
-      bool valid = p && (strcmp(p, "auto") == 0 || strcmp(p, "none") == 0 ||
-                         strcmp(p, "pylontech_can") == 0 || strcmp(p, "modbus_rtu") == 0 ||
-                         strcmp(p, "modbus_tcp") == 0);
-      if (!valid) return { false, "REJECTED", "bmsProtocol must be auto|none|pylontech_can|modbus_rtu|modbus_tcp" };
-      strncpy(Core::cfgBmsProtocol, p, sizeof(Core::cfgBmsProtocol) - 1);
-      Core::cfgBmsProtocol[sizeof(Core::cfgBmsProtocol) - 1] = '\0';
-      bmsConfigChanged = true;
-    }
-    if (doc.containsKey("bmsPollIntervalMs")) {
-      uint32_t v = doc["bmsPollIntervalMs"];
-      if (v < 1000 || v > 600000) return { false, "REJECTED", "bmsPollIntervalMs out of range [1000,600000]" };
-      Core::cfgBmsPollIntervalMs = v; bmsConfigChanged = true;
-    }
-    if (doc.containsKey("bmsModbusSlaveId")) {
-      uint8_t v = doc["bmsModbusSlaveId"];
-      if (v < 1 || v > 247) return { false, "REJECTED", "bmsModbusSlaveId out of range [1,247]" };
-      Core::cfgBmsModbusSlaveId = v; bmsConfigChanged = true;
-    }
-    if (doc.containsKey("bmsModbusTcpHost")) {
-      const char* h = doc["bmsModbusTcpHost"];
-      if (!h || strlen(h) >= sizeof(Core::cfgBmsModbusTcpHost)) return { false, "REJECTED", "bmsModbusTcpHost too long" };
-      strncpy(Core::cfgBmsModbusTcpHost, h, sizeof(Core::cfgBmsModbusTcpHost) - 1);
-      Core::cfgBmsModbusTcpHost[sizeof(Core::cfgBmsModbusTcpHost) - 1] = '\0';
-      bmsConfigChanged = true;
-    }
-    if (doc.containsKey("bmsModbusTcpPort")) {
-      uint16_t v = doc["bmsModbusTcpPort"];
-      if (v < 1 || v > 65535) return { false, "REJECTED", "bmsModbusTcpPort out of range [1,65535]" };
-      Core::cfgBmsModbusTcpPort = v; bmsConfigChanged = true;
-    }
-    // [PARITY-4] two-tier alarm thresholds — validation IDENTICAL to the REST
-    // path (Web::ConfigHandlers): ranges, then tier order on the post-update
-    // RAM state. Applied live: AnomalyDetector reads cfgAlarm* every tick.
-    {
-      bool alarmChanged = false;
-      if (doc.containsKey("voltageLowWarn")) {
-        float v = doc["voltageLowWarn"];
-        if (!(v >= 40 && v <= 50)) return { false, "REJECTED", "voltageLowWarn out of range [40,50]" };
-        Core::cfgAlarmVoltageLowWarnV = v; alarmChanged = true;
-      }
-      if (doc.containsKey("voltageLowCritical")) {
-        float v = doc["voltageLowCritical"];
-        if (!(v >= 40 && v <= 50)) return { false, "REJECTED", "voltageLowCritical out of range [40,50]" };
-        Core::cfgAlarmVoltageLowCriticalV = v; alarmChanged = true;
-      }
-      if (doc.containsKey("voltageHighWarn")) {
-        float v = doc["voltageHighWarn"];
-        if (!(v >= 50 && v <= 60)) return { false, "REJECTED", "voltageHighWarn out of range [50,60]" };
-        Core::cfgAlarmVoltageHighWarnV = v; alarmChanged = true;
-      }
-      if (doc.containsKey("voltageHighCritical")) {
-        float v = doc["voltageHighCritical"];
-        if (!(v >= 50 && v <= 60)) return { false, "REJECTED", "voltageHighCritical out of range [50,60]" };
-        Core::cfgAlarmVoltageHighCriticalV = v; alarmChanged = true;
-      }
-      if (doc.containsKey("currentHighWarn")) {
-        float v = doc["currentHighWarn"];
-        if (!(v >= 10 && v <= 150)) return { false, "REJECTED", "currentHighWarn out of range [10,150]" };
-        Core::cfgAlarmCurrentHighWarnA = v; alarmChanged = true;
-      }
-      if (doc.containsKey("currentHighCritical")) {
-        float v = doc["currentHighCritical"];
-        if (!(v >= 10 && v <= 160)) return { false, "REJECTED", "currentHighCritical out of range [10,160]" };
-        Core::cfgAlarmCurrentHighCriticalA = v; alarmChanged = true;
-      }
-      if (doc.containsKey("temperatureHighWarn")) {
-        float v = doc["temperatureHighWarn"];
-        if (!(v >= -20 && v <= 80)) return { false, "REJECTED", "temperatureHighWarn out of range [-20,80]" };
-        Core::cfgAlarmTemperatureHighWarnC = v; alarmChanged = true;
-      }
-      if (doc.containsKey("temperatureHighCritical")) {
-        float v = doc["temperatureHighCritical"];
-        if (!(v >= -20 && v <= 90)) return { false, "REJECTED", "temperatureHighCritical out of range [-20,90]" };
-        Core::cfgAlarmTemperatureHighCriticalC = v; alarmChanged = true;
-      }
-      if (doc.containsKey("humidityHighWarn")) {
-        float v = doc["humidityHighWarn"];
-        if (!(v >= 50 && v <= 100)) return { false, "REJECTED", "humidityHighWarn out of range [50,100]" };
-        Core::cfgAlarmHumidityHighWarnPct = v; alarmChanged = true;
-      }
-      if (doc.containsKey("socLowWarn")) {
-        float v = doc["socLowWarn"];
-        if (!(v >= 5 && v <= 50)) return { false, "REJECTED", "socLowWarn out of range [5,50]" };
-        Core::cfgAlarmSocLowWarnPct = v; alarmChanged = true;
-      }
-      if (doc.containsKey("socLowCritical")) {
-        float v = doc["socLowCritical"];
-        if (!(v >= 2 && v <= 50)) return { false, "REJECTED", "socLowCritical out of range [2,50]" };
-        Core::cfgAlarmSocLowCriticalPct = v; alarmChanged = true;
-      }
-      if (Core::cfgAlarmVoltageLowCriticalV >= Core::cfgAlarmVoltageLowWarnV)
-        return { false, "REJECTED", "voltageLowCritical must be < voltageLowWarn" };
-      if (Core::cfgAlarmVoltageHighCriticalV <= Core::cfgAlarmVoltageHighWarnV)
-        return { false, "REJECTED", "voltageHighCritical must be > voltageHighWarn" };
-      if (Core::cfgAlarmCurrentHighCriticalA <= Core::cfgAlarmCurrentHighWarnA)
-        return { false, "REJECTED", "currentHighCritical must be > currentHighWarn" };
-      if (Core::cfgAlarmTemperatureHighCriticalC <= Core::cfgAlarmTemperatureHighWarnC)
-        return { false, "REJECTED", "temperatureHighCritical must be > temperatureHighWarn" };
-      if (Core::cfgAlarmSocLowCriticalPct >= Core::cfgAlarmSocLowWarnPct)
-        return { false, "REJECTED", "socLowCritical must be < socLowWarn" };
-      if (alarmChanged) Storage::config.saveAlarmConfig();
-    }
-    Storage::config.saveBatteryConfig();
-    if (bmsConfigChanged) {
+    if (r.bmsConfigChanged) {
       Comm::batteryComm.reconfigure();
       Services::Log.append(Core::LogType::ConfigurationChanged,
                             String("MQTT: BMS comm reconfigured proto=") + Core::cfgBmsProtocol, -1);
     }
-    return { true, "ACCEPTED", "config updated" };
+    return { true, "ACCEPTED", r.message };
   }
 
   // ---------- calibration.update ----------
@@ -587,17 +463,36 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     uint8_t channel = doc["channel"] | 0;
     String source = doc["source"] | "MANUAL";
     uint32_t pulseMs = doc["durationMs"] | 0;
-    bool desired = (action == "on" || action == "pulse");
 
-    String messageOut;
-    Services::RelayCommandResult result = Services::relaysController.applyCommand(
-      action, channel, desired, pulseMs, source, messageOut);
+    // [PRODUCTION-GRADE 2026-09 / audit p.284-286] MQTT relay commands MUST
+    // go through the SAME single physical mutation authority as REST — the
+    // FreeRTOS queue consumed by relayTask. The old direct
+    // relaysController.applyCommand() from the networkTask context created a
+    // second hardware mutation path (PATH B) with non-deterministic
+    // ordering vs. queued REST commands and cross-core I²C access.
+    Services::QueuedRelayCommand qc = {};
+    strncpy(qc.transactionId, tid.c_str(), sizeof(qc.transactionId) - 1);
+    strncpy(qc.requestId, tid.c_str(), sizeof(qc.requestId) - 1);
+    strncpy(qc.commandHash, commandHash.c_str(), sizeof(qc.commandHash) - 1);
+    strncpy(qc.command, action.c_str(), sizeof(qc.command) - 1);
+    qc.channel = channel;
+    qc.desiredState = (action == "on" || action == "pulse");
+    qc.pulseDurationMs = pulseMs;
+    strncpy(qc.source, source.c_str(), sizeof(qc.source) - 1);
+    qc.issuedAt = doc["issuedAt"] | 0U;
+    qc.expiresAt = doc["expiresAt"] | 0U;
+    qc.safetyGeneration = Services::relaysController.safetyGeneration();
+    qc.enqueuedAtMs = millis();
 
-    bool ok = (result == Services::RelayCommandResult::Applied);
-    String code = (result == Services::RelayCommandResult::Applied) ? "EXECUTED" :
-                  (result == Services::RelayCommandResult::Blocked) ? "BLOCKED" :
-                  (result == Services::RelayCommandResult::Rejected) ? "REJECTED" : "FAILED";
-    return ApplyResult{ ok, code.c_str(), messageOut };
+    if (!Services::relaysController.queueCommand(qc)) {
+      return { false, "REJECTED", "relay command queue full — retry with the same transactionId" };
+    }
+
+    // Asynchronous submission semantics (audit p.73-75): the ACK says the
+    // command was QUEUED, not executed. The final outcome is retrievable
+    // via GET /api/relays/transactions/{transactionId} on REST, or observed
+    // through telemetry (reportedState + stateSequence).
+    return { true, "QUEUED", "relay command queued for execution" };
   }
   #endif
 

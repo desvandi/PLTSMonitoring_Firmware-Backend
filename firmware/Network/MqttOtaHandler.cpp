@@ -78,6 +78,18 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     }
   }
 
+  // --- 2a. [CORE-02] Mandatory mutation envelope --------------------------------
+  // version + transactionId + issuedAt + expiresAt must ALL be present (same
+  // gate as every other ingress — OTA commands are mutations too).
+  {
+    String envErr;
+    if (!Services::CommandCanonicalizer::validateCommandEnvelope(doc, envErr)) {
+      _publishAck(tid.c_str(), false, "BAD_SCHEMA", envErr);
+      _rejected++;
+      return;
+    }
+  }
+
   // --- 2b. [P2-1 REMEDIATION 2026-09] Freshness gate (RETENTION CONTRACT) ------
   // An expired OTA command can be neither applied nor safely deduplicated
   // once its journal ring slot is gone (see TransactionJournal.h).
@@ -94,7 +106,7 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
   {
     JsonObject root = doc.as<JsonObject>();
     for (JsonPair kv : root) {
-      if (!Services::CommandCanonicalizer::isFieldAllowed(type, kv.key().c_str())) {
+      if (!Services::CommandCanonicalizer::isFieldAllowed(type, action, kv.key().c_str())) {
         _publishAck(tid.c_str(), false, "REJECTED",
                     "unknown field: " + String(kv.key().c_str()));
         _rejected++;

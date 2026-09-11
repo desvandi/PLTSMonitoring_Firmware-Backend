@@ -319,27 +319,81 @@ void ConfigStore::loadBatteryConfig() {
   Core::cfgBmsModbusTcpPort            = p.getUShort("bmsPort", Core::BMS_MODBUS_TCP_PORT);
   Core::calibration.version               = 1;
   p.end();
+
+  // [PRODUCTION-GRADE 2026-09 / audit p.126-128, STORAGE-GATE-03] A corrupt
+  // NVS image must never inject NaN / out-of-range values into the runtime.
+  // Every float read from persistent storage is range-validated against
+  // the SAME law the REST/MQTT ingress applies (see Services::ConfigUpdater);
+  // invalid values fall back to compile-time defaults and the anomaly is
+  // logged — corrupt storage degrades to safe defaults, never silent lies.
+  auto sanitize = [](float v, float lo, float hi, float dflt, const char* field) {
+    if (!std::isfinite(v) || v < lo || v > hi) {
+      Services::Log.append(Core::LogType::Custom,
+        String("NVS battery config corrupt: ") + field + "=" + String(v) +
+        " out of [" + String(lo) + "," + String(hi) + "] — default applied", 0);
+      return dflt;
+    }
+    return v;
+  };
+  Core::cfgBatteryCapacityAh = sanitize(Core::cfgBatteryCapacityAh, 10, 1000, Core::BATTERY_CAPACITY_AH, "capAh");
+  Core::cfgBatteryNominalVoltage = sanitize(Core::cfgBatteryNominalVoltage, 24, 48, Core::BATTERY_NOMINAL_V, "nomV");
+  Core::cfgFullVoltage = sanitize(Core::cfgFullVoltage, 50, 56, Core::BATTERY_FULL_V, "fullV");
+  Core::cfgLowVoltage = sanitize(Core::cfgLowVoltage, 40, 50, Core::BATTERY_LOW_V, "lowV");
+  Core::cfgIdleCurrentThreshold = sanitize(Core::cfgIdleCurrentThreshold, 0.1f, 5.0f, Core::IDLE_CURRENT_THRESHOLD_A, "idleA");
+  Core::cfgFullChargeCurrentThreshold = sanitize(Core::cfgFullChargeCurrentThreshold, 0.5f, 10.0f, Core::FULL_CHARGE_CURRENT_THRESHOLD_A, "endA");
+  if (Core::cfgFullChargePersistenceSec < 60 || Core::cfgFullChargePersistenceSec > 7200) {
+    Services::Log.append(Core::LogType::Custom,
+      "NVS battery config corrupt: persistS out of [60,7200] — default applied", 0);
+    Core::cfgFullChargePersistenceSec = Core::FULL_CHARGE_PERSISTENCE_SEC;
+  }
+  if (Core::cfgTelemetryIntervalSec < 1 || Core::cfgTelemetryIntervalSec > 60) {
+    Services::Log.append(Core::LogType::Custom,
+      "NVS battery config corrupt: telS out of [1,60] — default applied", 0);
+    Core::cfgTelemetryIntervalSec = 5;
+  }
+  // Cross-field invariant (audit p.278): low < full on the LOADED pair too.
+  if (Core::cfgLowVoltage >= Core::cfgFullVoltage) {
+    Services::Log.append(Core::LogType::Custom,
+      "NVS battery config corrupt: lowV >= fullV — defaults applied", 0);
+    Core::cfgLowVoltage = Core::BATTERY_LOW_V;
+    Core::cfgFullVoltage = Core::BATTERY_FULL_V;
+  }
 }
 
-void ConfigStore::saveBatteryConfig() {
+// [PRODUCTION-GRADE 2026-09 / audit p.281-282, BLOCKER E + STORAGE-GATE-04]
+// Returns false when the namespace could not be opened or any write failed —
+// callers (REST/MQTT/ConfigUpdater) must surface the failure instead of
+// issuing a plain success ACK.
+bool ConfigStore::saveBatteryConfig() {
   Preferences p;
-  p.begin("plts_batt", false);
-  p.putFloat("capAh", Core::cfgBatteryCapacityAh);
-  p.putFloat("nomV",  Core::cfgBatteryNominalVoltage);
-  p.putFloat("fullV", Core::cfgFullVoltage);
-  p.putFloat("lowV",  Core::cfgLowVoltage);
-  p.putFloat("idleA", Core::cfgIdleCurrentThreshold);
-  p.putFloat("endA",  Core::cfgFullChargeCurrentThreshold);
-  p.putULong("persistS", Core::cfgFullChargePersistenceSec);
-  p.putUShort("telS", Core::cfgTelemetryIntervalSec);
+  if (!p.begin("plts_batt", false)) {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: plts_batt open failed — battery config NOT saved", 0);
+    return false;
+  }
+  bool ok = true;
+  ok &= p.putFloat("capAh", Core::cfgBatteryCapacityAh) == sizeof(float);
+  ok &= p.putFloat("nomV",  Core::cfgBatteryNominalVoltage) == sizeof(float);
+  ok &= p.putFloat("fullV", Core::cfgFullVoltage) == sizeof(float);
+  ok &= p.putFloat("lowV",  Core::cfgLowVoltage) == sizeof(float);
+  ok &= p.putFloat("idleA", Core::cfgIdleCurrentThreshold) == sizeof(float);
+  ok &= p.putFloat("endA",  Core::cfgFullChargeCurrentThreshold) == sizeof(float);
+  ok &= p.putULong("persistS", Core::cfgFullChargePersistenceSec) == sizeof(uint32_t);
+  ok &= p.putUShort("telS", Core::cfgTelemetryIntervalSec) == sizeof(uint16_t);
   // v1.6.0 — BMS/inverter comm config
-  p.putULong("bmsPoll", Core::cfgBmsPollIntervalMs);
-  p.putString("bmsProto", Core::cfgBmsProtocol);
-  p.putUChar("bmsSlave", Core::cfgBmsModbusSlaveId);
-  p.putString("bmsHost", Core::cfgBmsModbusTcpHost);
-  p.putUShort("bmsPort", Core::cfgBmsModbusTcpPort);
+  ok &= p.putULong("bmsPoll", Core::cfgBmsPollIntervalMs) == sizeof(uint32_t);
+  ok &= p.putString("bmsProto", Core::cfgBmsProtocol) == strlen(Core::cfgBmsProtocol);
+  ok &= p.putUChar("bmsSlave", Core::cfgBmsModbusSlaveId) == sizeof(uint8_t);
+  ok &= p.putString("bmsHost", Core::cfgBmsModbusTcpHost) == strlen(Core::cfgBmsModbusTcpHost);
+  ok &= p.putUShort("bmsPort", Core::cfgBmsModbusTcpPort) == sizeof(uint16_t);
   p.end();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Battery config saved", 0);
+  if (ok) {
+    Services::Log.append(Core::LogType::ConfigurationChanged, "Battery config saved", 0);
+  } else {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: battery config write failed — durability degraded", 0);
+  }
+  return ok;
 }
 
 // ============================================================================

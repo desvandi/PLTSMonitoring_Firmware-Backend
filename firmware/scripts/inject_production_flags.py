@@ -84,14 +84,19 @@ if _pem_macros:
     print(f"[inject_production_flags] Generated header: {secrets_header}")
 
 # Also add ALLOWED_CORS_ORIGINS to CPPDEFINES (it's in platformio.ini build_flags
-# but may not be parsed into CPPDEFINES yet at this point)
+# but may not be parsed into CPPDEFINES yet at this point).
+# [PRODUCTION-GRADE 2026-09 / audit p.115] The fallback must be the REAL
+# production PWA origin, not the placeholder example domain — a placeholder
+# allowlist silently refuses every direct browser->device request.
 _cors_present = any(
     (isinstance(d, (list, tuple)) and d[0] == "ALLOWED_CORS_ORIGINS") or
     (isinstance(d, str) and "ALLOWED_CORS_ORIGINS" in d)
     for d in build_env.Dictionary("CPPDEFINES")
 )
 if not _cors_present:
-    build_env.Append(CPPDEFINES=[("ALLOWED_CORS_ORIGINS", "https://plts.example.com")])
+    _cors_default = os.environ.get("PIO_ALLOWED_CORS_ORIGINS",
+                                   "https://jmse-plts-monitoring.vercel.app")
+    build_env.Append(CPPDEFINES=[("ALLOWED_CORS_ORIGINS", _cors_default)])
 
 # ============================================================================
 # STEP 2: Validate

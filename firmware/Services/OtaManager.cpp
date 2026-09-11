@@ -315,9 +315,12 @@ bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
   _bytesProcessed = 0;
   _totalBytes = totalSize;
   _expectedVersion = expectedVersion;
-  // [P1-6] Start a new OTA job id — correlates lifecycle events on GAS.
-  // Format: "<unixTime>-<bytes>" (compact, sortable, unique per session).
-  _jobId = String(Services::timeManager.getUnixTime()) + "-" + String(totalSize);
+  // [P1-6 + PRODUCTION-GRADE 2026-09 / audit p.209-210] OTA job id: CSPRNG
+  // 128-bit hex. The old "<unixTime>-<bytes>" format was NOT unique — two
+  // jobs in the same epoch second with the same size collided, corrupting
+  // GAS dedup on (deviceId, jobId, state). Random identity cannot collide
+  // by construction (128-bit space).
+  _jobId = Utils::generateToken(32);
   _shaCtx = malloc(sizeof(mbedtls_md_context_t));
   if (_shaCtx) {
     mbedtls_md_init((mbedtls_md_context_t*)_shaCtx);
@@ -417,10 +420,10 @@ bool OtaManager::beginDownload(const char* url, const char* expectedVersion,
   _totalBytes = expectedSize;
   _expectedVersion = expectedVersion;
   _downloadUrl = url;                     // [FW-09] retained for tickDownload()
-  // [P1-6 FIX audit-2 S-2] Set jobId for MQTT path too. REST path sets it in
-  // beginUpload. Without this, ACTIVATED/ROLLBACK events after MQTT OTA used
-  // the sentinel "boot-verify" and GAS could not correlate to the MQTT job.
-  _jobId = String(Services::timeManager.getUnixTime()) + "-mqtt-" + String(expectedSize);
+  // [P1-6 FIX audit-2 S-2 + PRODUCTION-GRADE 2026-09] Set jobId for the MQTT
+  // path too — CSPRNG 128-bit (collision-free by construction; the old
+  // "<unixTime>-mqtt-<size>" could collide across same-second jobs).
+  _jobId = Utils::generateToken(32);
   _state = OtaState::Downloading;
   Log.append(Core::LogType::OtaStarted,
              "OTA download started: " + String(url) + " v=" + _expectedVersion, 0);

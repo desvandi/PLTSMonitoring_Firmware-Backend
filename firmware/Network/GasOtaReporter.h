@@ -70,7 +70,18 @@ public:
   // (ESP-IDF portMUX semantics).
   uint8_t pendingCount();
 
-  static constexpr uint32_t HTTP_TIMEOUT_MS        = 7000;
+  // [PRODUCTION-GRADE 2026-09 / audit p.26, p.115 — WDT vs blocking TLS]
+  // INVARIANT (must remain true): worst-case flushOne() runtime
+  //   = TLS handshake timeout (HTTP_TIMEOUT_MS)
+  //   + HTTP request timeout (HTTP_TIMEOUT_MS)
+  //   = 2 × HTTP_TIMEOUT_MS
+  // must stay STRICTLY BELOW the task-WDT window (esp_task_wdt_init(10 s)
+  // in firmware_v1.ino). 4000 ms × 2 = 8 s < 10 s. The single
+  // esp_task_wdt_reset() before http.POST() can only buy ONE WDT interval —
+  // with the old 7 s timeouts the worst case (14 s) could outrun the
+  // watchdog mid-call and reset the device during an OTA report. Changing
+  // this value requires re-verifying the invariant against the TWDT config.
+  static constexpr uint32_t HTTP_TIMEOUT_MS        = 4000;
   static constexpr uint32_t MIN_FLUSH_INTERVAL_MS  = 5000;
   static constexpr uint8_t  MAX_ATTEMPTS_PER_EVENT = 20;
   static constexpr uint8_t  RING_SIZE              = 6;

@@ -40,6 +40,13 @@ static const CommandDef COMMAND_REGISTRY[] = {
   // transaction path (requestId + journal + dedup) as every other mutation.
   {"config", "password",
     {"current","next", nullptr}},
+  // [PRODUCTION-GRADE 2026-09 — latent-bug fix] The (config, device) entry
+  // was MISSING from the registry while Web::ExtraHandlers::handleDevicePost
+  // tags its commands with type="config" action="device" — every device-name
+  // / site / timezone update from the PWA failed canonicalization with
+  // "unknown (type, action)" and returned 400. Registered now.
+  {"config", "device",
+    {"deviceName","siteName","timezone", nullptr}},
   {"calibration", "update",
     {"version","voltageLow","voltageNominal","voltageFull",
      "acs712Offset","acs712Sensitivity","sht31TempOffset","sht31HumOffset",
@@ -92,7 +99,12 @@ bool CommandCanonicalizer::isKnownCommandType(const String& type, const String& 
   return false;
 }
 
-bool CommandCanonicalizer::isFieldAllowed(const String& type, const String& field) {
+// [CORE-01] Field whitelist scoped to the EXACT (type, action) tuple.
+// Previously this matched on type alone, so relay.on accepted durationMs
+// (allowed only for relay.pulse) WITHOUT hashing it — two semantically
+// different payloads produced the same commandHash (audit p.309-313).
+bool CommandCanonicalizer::isFieldAllowed(const String& type, const String& action,
+                                          const String& field) {
   // Envelope fields are always allowed
   if (field == "type" || field == "action" || field == "requestId" ||
       field == "transactionId" || field == "version" || field == "issuedAt" ||
@@ -100,11 +112,13 @@ bool CommandCanonicalizer::isFieldAllowed(const String& type, const String& fiel
     return true;
   }
   String t = type; t.toLowerCase();
+  String a = action; a.toLowerCase();
   for (size_t i = 0; i < COMMAND_REGISTRY_COUNT; i++) {
-    if (t == COMMAND_REGISTRY[i].type) {
+    if (t == COMMAND_REGISTRY[i].type && a == COMMAND_REGISTRY[i].action) {
       for (size_t j = 0; j < 32 && COMMAND_REGISTRY[i].fields[j]; j++) {
         if (field == COMMAND_REGISTRY[i].fields[j]) return true;
       }
+      return false;  // exact tuple found — field not in it → reject
     }
   }
   return false;
@@ -151,6 +165,65 @@ bool CommandCanonicalizer::isCommandExpired(JsonDocument& doc, String& errOut) {
   return false;
 }
 
+// [CORE-02] Mandatory mutation envelope — audit p.314-318, p.330.
+// version + transactionId/requestId + issuedAt + expiresAt must ALL be
+// present. Freshness evaluation may be impossible (no clock), but the
+// envelope claim is mandatory so replay protection is never silently
+// downgraded to journal-retention-only.
+bool CommandCanonicalizer::validateCommandEnvelope(JsonDocument& doc, String& errOut) {
+  // version: mandatory + valid
+  if (!doc.containsKey("version")) {
+    errOut = "missing version (command envelope v1 required)";
+    return false;
+  }
+  {
+    int v = doc["version"] | 0;
+    String err;
+    if (!validateProtocolVersion(v, err)) { errOut = err; return false; }
+  }
+  // transactionId / requestId: mandatory, non-empty, well-formed
+  String tid = doc["requestId"] | "";
+  String tidAlt = doc["transactionId"] | "";
+  if (tid.length() == 0 && tidAlt.length() > 0) tid = tidAlt;
+  else if (tid.length() > 0 && tidAlt.length() > 0 && tid != tidAlt) {
+    errOut = "requestId and transactionId differ";
+    return false;
+  }
+  if (tid.length() == 0) {
+    errOut = "missing transactionId/requestId (required for mutation)";
+    return false;
+  }
+  {
+    String err;
+    if (!validateTransactionId(tid, err)) { errOut = err; return false; }
+  }
+  // issuedAt: mandatory, plausible (> 2020-01-01)
+  if (!doc.containsKey("issuedAt")) {
+    errOut = "missing issuedAt (command envelope requires freshness claim)";
+    return false;
+  }
+  uint32_t issuedAt = doc["issuedAt"] | 0U;
+  if (issuedAt == 0) {
+    errOut = "issuedAt must be a non-zero unix timestamp";
+    return false;
+  }
+  // expiresAt: mandatory, non-zero, after issuedAt
+  if (!doc.containsKey("expiresAt")) {
+    errOut = "missing expiresAt (command envelope requires freshness claim)";
+    return false;
+  }
+  uint32_t expiresAt = doc["expiresAt"] | 0U;
+  if (expiresAt == 0) {
+    errOut = "expiresAt must be non-zero (use issuedAt + TTL)";
+    return false;
+  }
+  if (expiresAt <= issuedAt) {
+    errOut = "expiresAt must be > issuedAt";
+    return false;
+  }
+  return true;
+}
+
 static String lower(const String& s) {
   String o = s; o.toLowerCase(); return o;
 }
@@ -179,13 +252,14 @@ String CommandCanonicalizer::buildCanonicalString(JsonDocument& doc,
     return String();
   }
   
-  // Whitelist check on payload fields
+  // Whitelist check on payload fields — [CORE-01] scoped to exact (type, action)
   JsonObject payload = doc.as<JsonObject>();
   if (payload) {
     for (JsonPair p : payload) {
       String field = p.key().c_str();
-      if (!isFieldAllowed(t, field)) {
+      if (!isFieldAllowed(t, a, field)) {
         errOut = "unknown field '" + field + "' for type '" + t + "'";
+        if (a.length() > 0) errOut += " action '" + a + "'";
         return String();
       }
     }
@@ -203,13 +277,28 @@ String CommandCanonicalizer::buildCanonicalString(JsonDocument& doc,
     } else if (v.is<int>() || v.is<long>()) {
       canon += String((long)v.as<long>());
     } else if (v.is<float>() || v.is<double>()) {
+      // [audit p.338-339] Numeric hardening: reject NaN/±Inf, normalize -0.0
+      double d = (double)v.as<double>();
+      if (!isfinite(d)) {
+        errOut = String(fieldName) + ": NaN/Infinity not allowed";
+        return String();
+      }
+      if (d == 0.0) d = 0.0;  // collapse -0.0 → +0.0
       char buf[32];
-      snprintf(buf, sizeof(buf), "%.6f", (double)v.as<float>());
+      snprintf(buf, sizeof(buf), "%.6f", d);
       canon += buf;
     } else if (v.is<const char*>()) {
-      canon += v.as<const char*>();
+      // [audit p.334] Unambiguous canonical grammar — escape the reserved
+      // delimiters so a value containing '|' or '=' cannot forge a different
+      // canonical string (collision via crafted strings).
+      const char* s = v.as<const char*>();
+      for (const char* pc = s; *pc; pc++) {
+        if (*pc == '|' || *pc == '=' || *pc == '\\') canon += '\\';
+        canon += *pc;
+      }
     } else {
-      canon += "?";
+      errOut = String(fieldName) + ": unsupported JSON value type";
+      return String();
     }
   }
   return canon;

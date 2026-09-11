@@ -3,13 +3,36 @@
 // -----------------------------------------------------------------------------
 // [v1.8.0] Single authoritative relay control path.
 //
-// Architecture (NO BYPASS):
-//   REST/MQTT → applyCommand() → safety.evaluate() → interlock.evaluate()
-//     → applyChannelState() → RelayExpanderDriver.setChannel() → I²C → GPIO
+// [PRODUCTION-GRADE 2026-09] — audit p.34-59, p.284-294 remediation:
+//
+//   SINGLE PHYSICAL EXECUTION AUTHORITY (RG-RELAY-01):
+//     REST ─────┐
+//     MQTT ─────┤→ queueCommand() → FreeRTOS Queue → relayTask → applyCommand()
+//     all_off ──┘                                            │
+//                                                            ▼
+//                                              RelayExpanderDriver (I²C guard)
+//     SAFETY OVERRIDE (separate authority, RG-RELAY-08):
+//     EmergencySupervisor → emergencyAllOff()  (never waits for the queue)
+//
+//   TRANSACTION IDENTITY SURVIVES THE QUEUE (RG-RELAY-02):
+//     QueuedRelayCommand carries transactionId/requestId/commandHash plus
+//     the full envelope; the final execution result is recorded and queryable
+//     via getTransactionResult() / GET /api/relays/transactions/{id}.
+//
+//   SAFETY GENERATION (audit p.366-369):
+//     emergencyAllOff() increments _safetyGeneration; every command queued
+//     BEFORE the emergency is re-validated at EXECUTION time and BLOCKED as
+//     BLOCKED_STALE_SAFETY — a queued "ON" can never re-activate a load
+//     after an E-WAVE trip.
+//
+//   EXECUTION-TIME VALIDATION (audit p.375-377):
+//     Freshness (expiresAt), safety, and interlock are re-evaluated when the
+//     command is DEQUEUED, immediately before the hardware mutation —
+//     ingress validation and execution validation are two boundaries.
 //
 // Safety features:
 //   - maxOnTime (FORCE OFF, cannot be bypassed)
-//   - minOnTime (protect inductive loads)
+//   - minOnTime (protect inductive loads; bypassed ONLY by safety/emergency)
 //   - minOffTime (cooling period)
 //   - antiChatter (min switch interval)
 //   - 5-state lockout (NORMAL→TRIPPED→ACKNOWLEDGED→CLEARED→ARMED→NORMAL)
@@ -82,12 +105,56 @@ enum class RelayCommandResult {
   Failed
 };
 
+// [audit p.50] Canonical terminal results — surfaced to REST/MQTT/PWA.
+// UNKNOWN is a FIRST-CLASS outcome: an I²C timeout does not mean the write
+// did not reach the expander, so it must never be reported as FAILED.
+enum class RelayTerminalResult {
+  Executed,
+  Blocked,
+  Rejected,
+  Failed,
+  Unknown
+};
+
 // [P1-7] Result for all_off — per-channel breakdown
 struct AllOffResult {
   uint8_t requested = 0;
   uint8_t success = 0;
   uint8_t failed = 0;
-  String detail;  // per-channel failures
+  uint8_t unknown = 0;   // [audit p.365] write attempted, outcome unverified
+  String detail;         // per-channel failures
+};
+
+// [RG-RELAY-02] Queued command with FULL transaction identity — the queue is
+// the durability hand-off point between ingress (networkTask) and the single
+// executor (relayTask). Identity must survive it for final-result correlation.
+struct QueuedRelayCommand {
+  char transactionId[65] = {0};
+  char requestId[65] = {0};
+  char commandHash[65] = {0};
+  char command[16] = {0};        // "on" | "off" | "pulse" | "all_off"
+  uint8_t channel = 0;
+  bool desiredState = false;
+  uint32_t pulseDurationMs = 0;
+  char source[16] = {0};
+  uint32_t issuedAt = 0;
+  uint32_t expiresAt = 0;
+  uint32_t safetyGeneration = 0;  // snapshot at enqueue time
+  uint32_t enqueuedAtMs = 0;
+};
+
+// [RG-RELAY-09] Final transaction record — bounded ring of the most recent
+// relay command outcomes, queryable by transactionId (PWA reconciliation).
+struct RelayTransactionRecord {
+  char transactionId[65] = {0};
+  RelayTerminalResult result = RelayTerminalResult::Unknown;
+  uint8_t channel = 0;
+  bool desiredState = false;
+  bool reportedState = false;
+  uint32_t stateSequence = 0;
+  char message[96] = {0};
+  uint32_t completedAtMs = 0;
+  bool valid = false;
 };
 
 class RelayController {
@@ -96,7 +163,8 @@ public:
   void tick();  // 5 Hz — safety checks, maxOnTime enforcement, lockout transitions
 
   /// Apply a relay command. Returns result + message.
-  /// This is the SINGLE ENTRY POINT for all relay mutations.
+  /// EXECUTOR-ONLY: called from relayTask (processCommandQueue). Ingress
+  /// (REST/MQTT) must use queueCommand() — never this method.
   /// Commands: "on", "off", "pulse", "all_off", "config", "acknowledge", "clear"
   RelayCommandResult applyCommand(const String& command,
                                    uint8_t channel,
@@ -105,24 +173,36 @@ public:
                                    const String& source,
                                    String& messageOut);
 
-  /// E-WAVE safety cascade — called from EmergencySupervisor::_trip().
-  /// Forces ALL channels OFF immediately. Cannot be overridden.
+  /// E-WAVE safety cascade — called from EmergencySupervisor (safety
+  /// authority, separate execution context). Attempts OFF on EVERY channel
+  /// regardless of reportedState (audit p.363-365: after an I²C fault the
+  /// physical state is unknown — safety must attempt the write anyway).
+  /// Increments the safety generation, invalidating queued normal commands.
+  /// Cannot be overridden, and is not blocked by minOnTime.
   void emergencyAllOff();
 
   /// [P1-7] all_off with per-channel result tracking.
-  /// Returns AllOffResult with success/failed counts.
+  /// EXECUTOR-ONLY: invoked from applyCommand("all_off") inside relayTask.
   AllOffResult allOffWithResult();
 
-  /// [P1-10] Queue a command for execution in relayTask context.
-  /// All relay mutations from REST/MQTT MUST go through this queue
-  /// to ensure single-threaded state mutation.
-  /// Returns false if queue is full.
-  bool queueCommand(const String& command, uint8_t channel,
-                    bool desiredState, uint32_t pulseDurationMs,
-                    const String& source);
+  /// [RG-RELAY-02/06] Queue a command for execution in relayTask context.
+  /// ALL relay mutations from REST/MQTT go through this queue — the FreeRTOS
+  /// queue provides the cross-core synchronization the old volatile ring
+  /// buffer lacked (audit p.101-102). Returns false if the queue is full.
+  bool queueCommand(const QueuedRelayCommand& cmd);
 
   /// [P1-10] Process queued commands — called from relayTask tick().
+  /// Re-validates freshness + safety generation at EXECUTION time, executes,
+  /// and records the final per-transaction result.
   void processCommandQueue();
+
+  /// Current safety generation — incremented by every emergency trip.
+  uint32_t safetyGeneration() const { return _safetyGeneration; }
+
+  /// [RG-RELAY-09] Look up the final outcome of a relay transaction.
+  /// Returns true + fills `out` when a record exists for this transactionId.
+  bool getTransactionResult(const String& transactionId,
+                            RelayTransactionRecord& out) const;
 
   /// Acknowledge safety alarm for a channel (TRIPPED → ACKNOWLEDGED).
   bool acknowledgeSafetyAlarm(uint8_t channel);
@@ -150,6 +230,11 @@ private:
   bool _driverAvailable = false;
   uint8_t _pcf8574Address = Core::PCF8574_I2C_ADDRESS_DEFAULT;
 
+  // [audit p.366-369] Safety epoch — bumped on every emergency trip. Queued
+  // commands snapshot the generation at enqueue; a mismatch at execution
+  // time BLOCKS the command as stale (no post-emergency reactivation).
+  uint32_t _safetyGeneration = 0;
+
   // [P1-8] Pulse tracking — one slot per channel (deterministic, no overflow)
   struct PulseEntry {
     bool active = false;
@@ -157,19 +242,17 @@ private:
   };
   PulseEntry _pulses[Core::RELAY_CHANNEL_COUNT];  // 8 slots — one per channel
 
-  // [P1-10] Command queue — single-threaded mutation via relayTask
-  struct QueuedCommand {
-    char command[16];
-    uint8_t channel;
-    bool desiredState;
-    uint32_t pulseDurationMs;
-    char source[16];
-    bool valid = false;
-  };
+  // [audit p.101-102] Native FreeRTOS queue — thread-safe across cores.
+  // The old custom ring buffer (volatile head/tail, array) had NO
+  // synchronization primitive between the networkTask producer and the
+  // relayTask consumer.
+  void* _commandQueueHandle = nullptr;  // QueueHandle_t (kept opaque in header)
   static const uint8_t COMMAND_QUEUE_SIZE = 8;
-  QueuedCommand _commandQueue[COMMAND_QUEUE_SIZE];
-  volatile uint8_t _cmdQueueHead = 0;
-  volatile uint8_t _cmdQueueTail = 0;
+
+  // [RG-RELAY-09] Recent final results — small ring for PWA reconciliation.
+  static const uint8_t RESULT_RING_SIZE = 8;
+  RelayTransactionRecord _resultRing[RESULT_RING_SIZE];
+  uint8_t _resultRingNext = 0;
 
   // --- Internal methods ---
 
@@ -207,6 +290,11 @@ private:
 
   /// Validate channel index
   bool _validChannel(uint8_t ch) const { return ch < Core::RELAY_CHANNEL_COUNT; }
+
+  /// Record a final transaction outcome into the result ring.
+  void _recordTransactionResult(const QueuedRelayCommand& cmd,
+                                RelayTerminalResult result,
+                                const String& message);
 };
 
 extern RelayController relaysController;
