@@ -127,7 +127,7 @@ void handlePost() {
 // called VoltageCalibration::setPoint()/captureZeroOffset() DIRECTLY — a
 // network timeout followed by an operator retry could apply the capture
 // TWICE with no durable transaction identity (idempotency gap).
-static void handlePoint(const String& which) {
+static void handlePointImpl(const String& which) {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
   if (!requireBody(1024)) return;
@@ -193,7 +193,7 @@ static void handlePoint(const String& which) {
   sendSuccess("Calibration point set", "{}");
 }
 
-static void handleAcs712Zero() {
+static void handleAcs712ZeroImpl() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
   if (!requireBody(512)) return;
@@ -255,6 +255,9 @@ static void handleAcs712Zero() {
   }
   sendSuccess("ACS712 zero offset captured", ack);
 }
+
+void handlePoint(const String& which) { handlePointImpl(which); }
+void handleAcs712Zero() { handleAcs712ZeroImpl(); }
 
 void registerRoutes() {
   http.on("/api/calibration", HTTP_GET, handleGet);

@@ -111,7 +111,7 @@ void handleGetAlarms() {
   sendSuccess("OK", out);
 }
 
-static void handleAcknowledge() {
+static void handleAcknowledgeImpl() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
   if (!requireBody(512)) return;
@@ -132,6 +132,8 @@ static void handleAcknowledge() {
   }
   sendSuccess("Alarm acknowledged", ack);
 }
+
+void handleAcknowledge() { handleAcknowledgeImpl(); }
 
 // P1-3 — pattern router for /api/alarms/{code}/acknowledge
 // The Arduino WebServer library does not support path parameters natively,
