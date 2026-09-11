@@ -20,7 +20,8 @@ namespace AlarmHandlers {
 // freshness → canonicalize → journal → apply → ACK), matching the MQTT
 // alarm.acknowledge / alarm.acknowledgeAll paths.
 static bool runAlarmAckPipeline(const String& action, const String& code,
-                                String& ackOut, String& errMsgOut) {
+                                String& ackOut, String& errMsgOut, int& httpStatusOut) {
+  httpStatusOut = 400;
   String raw = http.arg("plain");
   StaticJsonDocument<512> body;
   if (deserializeJson(body, raw)) { errMsgOut = "Invalid JSON"; return false; }
@@ -68,7 +69,12 @@ static bool runAlarmAckPipeline(const String& action, const String& code,
   bool ok;
   if (action == "acknowledge") {
     const Services::Alarm* a = Services::alarms.find(code.c_str());
-    if (!a) { errMsgOut = "Alarm not found"; return false; }
+    if (!a) {
+      // P1-3 canonical contract: 404 when alarm code not found (was: silently OK)
+      httpStatusOut = 404;
+      errMsgOut = "Alarm not found";
+      return false;
+    }
     Services::alarms.acknowledge(code.c_str());
     ok = true;
   } else {  // acknowledgeAll
@@ -126,8 +132,9 @@ static void handleAcknowledgeImpl() {
   if (code.length() == 0) { sendError(400, "Empty alarm code"); return; }
 
   String ack, err;
-  if (!runAlarmAckPipeline("acknowledge", code, ack, err)) {
-    sendError(400, err);
+  int status = 400;
+  if (!runAlarmAckPipeline("acknowledge", code, ack, err, status)) {
+    sendError(status, err);
     return;
   }
   sendSuccess("Alarm acknowledged", ack);
@@ -163,8 +170,9 @@ void registerRoutes() {
     if (!requireCsrf()) return;
     if (!requireBody(512)) return;
     String ack, err;
-    if (!runAlarmAckPipeline("acknowledgeAll", "", ack, err)) {
-      sendError(400, err);
+    int status = 400;
+    if (!runAlarmAckPipeline("acknowledgeAll", "", ack, err, status)) {
+      sendError(status, err);
       return;
     }
     sendSuccess("All alarms acknowledged", ack);
