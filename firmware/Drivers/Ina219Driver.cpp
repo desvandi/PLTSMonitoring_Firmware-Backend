@@ -275,4 +275,30 @@ void Ina219Driver::tick() {
   _evaluatePgaSwitch(std::fabs(rawCurrent));
 }
 
+// [AUDIT ROUND 4 / INA219 acceptance] Read-only register snapshot for the
+// acceptance endpoint. Deliberately RAW + FRESH: reads the four registers the
+// acceptance procedures need, decodes the two the procedures judge, and does
+// nothing else. A failure anywhere fails the whole snapshot (ok=false) — the
+// acceptance evidence must never be partially stale.
+Ina219Diag Ina219Driver::readDiagnostic() {
+  Ina219Diag d = {};
+  d.ok = false;
+  if (!_available) return d;
+  uint16_t cfg = 0, shunt = 0, bus = 0, cal = 0;
+  if (!_readRegister(REG_CONFIG, cfg))   return d;
+  if (!_readRegister(REG_SHUNT, shunt))  return d;
+  if (!_readRegister(REG_BUS, bus))      return d;
+  if (!_readRegister(REG_CALIBRATION, cal)) return d;
+  d.configReg      = cfg;
+  d.shuntReg       = shunt;
+  d.busReg         = bus;
+  d.calibrationReg = cal;
+  d.shuntVoltageV  = (float)(int16_t)shunt * 0.00001f;   // LSB 10 µV, signed
+  uint16_t busFixed = (bus >> 3) & 0x1FFF;
+  d.busVoltageV    = (busFixed == 0x1FFF) ? 0.0f : busFixed * 0.004f;
+  d.readMs         = millis();
+  d.ok             = true;
+  return d;
+}
+
 } // namespace Drivers

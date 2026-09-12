@@ -12,6 +12,7 @@
 #include "../Network/GasOtaReporter.h"
 #include "LogService.h"
 #include "TimeManager.h"   // [CI fix] needed for Services::timeManager
+#include "SecurityPosture.h"  // [AUDIT ROUND 4] hardware-security gates
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
@@ -105,6 +106,45 @@ bool OtaManager::_validateCa() {
     return false;
   }
 #endif
+  return true;
+}
+
+// [AUDIT ROUND 4 / p.437] Fail-closed provisioning gate. Production builds
+// refuse OTA on unprovisioned flash (encryption OFF); every build refuses
+// when the anti-rollback ledger is inconsistent with the eFuse floor
+// (rollback evidence). See Services/SecurityPosture + docs/SECURE_PROVISIONING.md.
+bool OtaManager::_validateProvisioning() {
+  String whyNot;
+  if (!Services::securityPosture.otaProvisioningOk(&whyNot)) {
+    _lastError = whyNot;
+    return false;
+  }
+  return true;
+}
+
+// [AUDIT ROUND 4 / p.436] Hardware-rooted anti-downgrade. The candidate's
+// (major, minor) must be >= the burned security epoch's version. Semantics
+// with the existing _validateVersion (strict semver > running) — the floor
+// additionally blocks crossing BELOW the last burned epoch, even when the
+// running image is older than it (post-rollback scenario).
+bool OtaManager::_validateSecurityFloor(const String& newVer) {
+  uint16_t nMaj, nMin, nPat;
+  if (!semverParse(newVer, nMaj, nMin, nPat)) {
+    _lastError = "invalid new version (not semver)";
+    return false;
+  }
+  if (!Services::securityPosture.candidateAllowedByFloor(nMaj, nMin)) {
+    uint16_t lMaj, lMin;
+    Services::securityPosture.ledgerVersion(lMaj, lMin);
+    _lastError = "anti-rollback (eFuse floor): candidate v" + newVer +
+                 " is below the burned security epoch (floor epoch v" +
+                 String(lMaj) + "." + String(lMin) +
+                 ") — downgrades across a burned epoch are refused";
+    Log.append(Core::LogType::OtaFailed,
+               "OTA REFUSED by hardware security floor: v" + newVer +
+               " < burned epoch " + String(lMaj) + "." + String(lMin), 0);
+    return false;
+  }
   return true;
 }
 
@@ -260,6 +300,12 @@ void OtaManager::markBootHealthyIfPending() {
     // bootloader reverts it on the next reset — a "successful" OTA that
     // silently goes back to the old version after any reboot/power blip.
     esp_ota_mark_app_valid_cancel_rollback();
+    // [AUDIT ROUND 4 / p.436] The image is now CONFIRMED healthy — this is
+    // the only legitimate point to advance the hardware anti-rollback floor:
+    // one burned eFuse bit per (major, minor) advance, production builds
+    // only. Uses the compiled-in identity of the running image, not the
+    // (reboot-lost) OTA session's claimed version.
+    Services::securityPosture.onImageActivated();
     Log.append(Core::LogType::OtaSuccess,
                "OTA image ACTIVATED — rollback cancelled after healthy window", 0);
     // [P1-6] Emit ACTIVATED — the lifecycle's terminal success state.
@@ -308,6 +354,9 @@ bool OtaManager::beginUpload(size_t totalSize, const char* expectedVersion) {
     return false;
   }
   if (!_validateVersion(expectedVersion)) return false;
+  // [AUDIT ROUND 4] hardware-security gates — REST upload path.
+  if (!_validateProvisioning()) return false;
+  if (!_validateSecurityFloor(String(expectedVersion))) return false;
   if (!Update.begin(totalSize)) {
     _lastError = "Update.begin failed";
     return false;
@@ -412,6 +461,11 @@ bool OtaManager::beginDownload(const char* url, const char* expectedVersion,
     return false;
   }
   if (!_validateVersion(expectedVersion)) return false;
+  // [AUDIT ROUND 4] hardware-security gates — MQTT download path (the SAME
+  // two gates as the REST upload path: provisioning fail-closed + eFuse
+  // anti-downgrade floor).
+  if (!_validateProvisioning()) return false;
+  if (!_validateSecurityFloor(String(expectedVersion))) return false;
   if (!_validateUrlAllowlist(url)) return false;
   if (!_validateCa()) return false;
   _expectedSha256 = expectedSha256Hex;

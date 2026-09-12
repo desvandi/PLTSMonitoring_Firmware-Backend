@@ -12,6 +12,15 @@ namespace Services {
 // "plts" (the IN_PROGRESS marker's home) is wiped LAST on purpose: wiping it
 // first would destroy the ftr_p marker microseconds after it was written and
 // gut the STORAGE-GATE-06 recoverable-reset contract.
+//
+// [AUDIT ROUND 4] SECURITY LEADGER IS PRESERVED BY DESIGN: the anti-rollback
+// ledger lives in the "plts_sec" namespace (Services/SecurityPosture) and is
+// deliberately NOT in this sweep. The eFuse secure-version floor is one-way
+// hardware; wiping its interpretation layer (ledger) together with user
+// config would make every factory-reset device look like a rollback attack
+// (ledger absent, floor > 0) and permanently refuse OTA. Security epoch
+// state is device state, not user configuration — it must survive a reset.
+// scripts/test_audit_round4_2026_09.py enforces this contract statically.
 const char* const FACTORY_RESET_NAMESPACES[] = {
   "plts_health",   // health supervisor (crash-loop counters)
   "plts_energy",   // energy history
