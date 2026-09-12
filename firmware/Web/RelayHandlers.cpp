@@ -64,8 +64,23 @@ static void handleGetRelays() {
 }
 
 // GET /api/relays/transactions/{transactionId}
-// [RG-RELAY-09] Final-outcome reconciliation endpoint. PWA polls this after
-// a QUEUED ack to learn EXECUTED / BLOCKED / REJECTED / FAILED / UNKNOWN.
+// [RG-RELAY-09 + audit p.413/414/415] Final-outcome reconciliation — resolution
+// chain (a terminal transaction must NEVER regress to a non-terminal state):
+//
+//   1. RAM result ring (fast cache of the latest 8)          → TERMINAL
+//   2. NVS TransactionJournal (durable — authoritative):
+//        a. stored ack is TERMINAL                            → TERMINAL
+//           (ring-evicted or post-reboot — audit p.413/p.414)
+//        b. submission ack + boot marker == current boot      → QUEUED
+//           (honest in-flight; journal write precedes the 200)
+//        c. submission ack + boot marker != current boot      → UNKNOWN
+//           (lost at reboot / interrupted mid-execution — the in-RAM queue
+//            cannot survive a reboot, so it can no longer reach terminal)
+//   3. No record anywhere                                    → UNKNOWN
+//      (never accepted, or evicted beyond the 16-entry journal
+//       retention window — see TransactionJournal.h)
+//
+// Responses carry a "source" field ("ring" | "journal") for observability.
 static void handleGetTransaction() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
 
@@ -78,28 +93,81 @@ static void handleGetTransaction() {
     return;
   }
 
+  // --- 1. fast path: RAM result ring --------------------------------
   Services::RelayTransactionRecord rec;
-  if (!Services::relaysController.getTransactionResult(tid, rec)) {
-    // Not (yet) in the result ring — could be still queued, or evicted.
-    // Report honestly as PENDING rather than guessing.
-    String out = "{\"transactionId\":\"" + tid + "\",\"state\":\"PENDING\"}";
+  if (Services::relaysController.getTransactionResult(tid, rec)) {
+    const char* resultMap[] = { "EXECUTED", "BLOCKED", "REJECTED", "FAILED", "UNKNOWN" };
+    StaticJsonDocument<512> doc;
+    doc["transactionId"] = rec.transactionId;
+    doc["state"] = "TERMINAL";
+    doc["result"] = resultMap[(size_t)rec.result];
+    doc["channel"] = rec.channel;
+    doc["desiredState"] = rec.desiredState;
+    doc["reportedState"] = rec.reportedState;
+    doc["stateSequence"] = rec.stateSequence;
+    doc["message"] = rec.message;
+    doc["completedAtMs"] = rec.completedAtMs;
+    doc["source"] = "ring";
+    String out;
+    serializeJson(doc, out);
     sendSuccess("OK", out);
     return;
   }
 
-  const char* resultMap[] = { "EXECUTED", "BLOCKED", "REJECTED", "FAILED", "UNKNOWN" };
-  StaticJsonDocument<512> doc;
-  doc["transactionId"] = rec.transactionId;
-  doc["state"] = "TERMINAL";
-  doc["result"] = resultMap[(size_t)rec.result];
-  doc["channel"] = rec.channel;
-  doc["desiredState"] = rec.desiredState;
-  doc["reportedState"] = rec.reportedState;
-  doc["stateSequence"] = rec.stateSequence;
-  doc["message"] = rec.message;
-  doc["completedAtMs"] = rec.completedAtMs;
-  String out;
-  serializeJson(doc, out);
+  // --- 2. authoritative fallback: durable journal --------------------
+  String ack = Services::journal.getAckJson(tid);
+  if (ack.length() > 0) {
+    StaticJsonDocument<512> jDoc;
+    if (!deserializeJson(jDoc, ack)) {
+      const char* st = jDoc["state"] | "";
+      if (strcmp(st, "TERMINAL") == 0) {
+        // Durable terminal record written by the executor (audit p.413/414).
+        jDoc["source"] = "journal";
+        String out;
+        serializeJson(jDoc, out);
+        sendSuccess("OK", out);
+        return;
+      }
+      // Submission ack only — in flight, or lost at reboot?
+      uint32_t txBoot = jDoc["boot"] | 0U;
+      if (txBoot == Services::journal.bootCount()) {
+        // Accepted THIS boot: the command is still queued / executing.
+        String out = "{\"transactionId\":\"" + tid +
+                    "\",\"state\":\"QUEUED\",\"result\":\"QUEUED\"," 
+                    "\"message\":\"accepted and queued — awaiting executor\"}";
+        sendSuccess("OK", out);
+        return;
+      }
+      // txBoot == 0 (legacy entry without marker) or a PREVIOUS boot: the
+      // in-RAM queue was flushed at that reboot, so this transaction can no
+      // longer reach terminal on its own. It may have been mid-execution when
+      // the device restarted (outcome unverified) — the honest answer is
+      // UNKNOWN, terminal (audit p.414): reconciliation must terminate, not
+      // poll an eternal PENDING.
+      StaticJsonDocument<384> out;
+      out["transactionId"] = tid;
+      out["state"] = "TERMINAL";
+      out["result"] = "UNKNOWN";
+      out["message"] = "accepted in a previous boot with no terminal record — "
+                       "lost at reboot or interrupted mid-execution; re-issue "
+                       "with a NEW transactionId if the action is still required";
+      String s;
+      serializeJson(out, s);
+      sendSuccess("OK", s);
+      return;
+    }
+  }
+
+  // --- 3. no record anywhere -----------------------------------------
+  // The ingress journal write happens BEFORE the 200 response is sent, so a
+  // client that received a QUEUED ack will always find the journal entry.
+  // "No record" therefore means the id was never accepted, its ingress
+  // journal write failed, or it was evicted beyond the 16-entry retention
+  // window. Never an eternal PENDING (audit p.413).
+  String out = "{\"transactionId\":\"" + tid + "\",\"state\":\"TERMINAL\","
+               "\"result\":\"UNKNOWN\",\"message\":\"no durable record for this "
+               "transactionId (never accepted, or evicted beyond the 16-entry "
+               "journal retention window)\"}";
   sendSuccess("OK", out);
 }
 
@@ -204,7 +272,9 @@ static void handleRelayCommand() {
     return;
   }
 
-  // Build ACK — asynchronous submission accepted (audit p.73-75)
+  // Build ACK — asynchronous submission accepted (audit p.73-75).
+  // [audit p.414] The boot marker lets reconciliation distinguish "in flight
+  // this boot" (QUEUED) from "lost at reboot" (UNKNOWN) later on.
   String ack;
   StaticJsonDocument<512> ackDoc;
   ackDoc["ok"] = true;
@@ -213,6 +283,7 @@ static void handleRelayCommand() {
   ackDoc["channel"] = (uint8_t)channel;
   ackDoc["message"] = "Command queued for execution";
   ackDoc["transactionId"] = canon.transactionId;
+  ackDoc["boot"] = Services::journal.bootCount();
   serializeJson(ackDoc, ack);
 
   // [TXN-02/CORE-05] Journal durability failure must NOT produce a success
@@ -311,6 +382,8 @@ static void handleAllOff() {
   ackDoc["state"] = "QUEUED";
   ackDoc["message"] = "All-off command queued for execution";
   ackDoc["transactionId"] = canon.transactionId;
+  // [audit p.414] Boot marker — see handleRelayCommand.
+  ackDoc["boot"] = Services::journal.bootCount();
   serializeJson(ackDoc, ack);
 
   // [TXN-02/CORE-05] Durability failure → no success ACK

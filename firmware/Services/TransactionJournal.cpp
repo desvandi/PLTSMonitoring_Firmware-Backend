@@ -1,5 +1,6 @@
 // =============================================================================
-// Services/TransactionJournal.cpp — NVS dedup + 2-phase commit
+// Services/TransactionJournal.cpp — NVS dedup + 2-phase commit + durable
+//                                          terminal outcomes (audit p.413-415)
 // =============================================================================
 #include "TransactionJournal.h"
 #include "../Core/Common.h"
@@ -7,10 +8,26 @@
 #include <Preferences.h>
 #include <cstring>
 #include <cstdio>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace Services {
 
 TransactionJournal journal;
+
+// [audit p.413-415] Cross-task serialization. storeTransaction is called from
+// networkTask (REST/MQTT ingress); updateAck is called from relayTask (the
+// executor's terminal verdict). Without this lock, a concurrent slot
+// eviction (storeTransaction wrapping _writeIdx) and a terminal update
+// (updateAck re-committing the same slot) could interleave and leave the NVS
+// blob and the RAM mirror disagreeing about which transaction owns the slot.
+void TransactionJournal::_lock() {
+  if (_mutex) xSemaphoreTake((SemaphoreHandle_t)_mutex, portMAX_DELAY);
+}
+void TransactionJournal::_unlock() {
+  if (_mutex) xSemaphoreGive((SemaphoreHandle_t)_mutex);
+}
+
 
 static const uint8_t BLOB_MAGIC1 = 0x54;  // 'T'
 static const uint8_t BLOB_MAGIC2 = 0x4A;  // 'J'
@@ -133,66 +150,111 @@ void TransactionJournal::begin() {
     _valid[i] = false;
   }
   _size = 0; _writeIdx = 0;
+
+  // [audit p.414] Boot marker — incremented on EVERY boot and persisted, so
+  // relay reconciliation can distinguish "queued in the current boot" (still
+  // in flight) from "accepted in a previous boot that restarted before the
+  // executor reached terminal" (lost at reboot → honest UNKNOWN).
+  {
+    Preferences p;
+    if (p.begin("plts_txn", false)) {
+      _bootCount = p.getUInt("boot", 0) + 1;
+      p.putUInt("boot", _bootCount);
+      p.end();
+    }
+  }
+
+  // [audit p.413-415] Mutations now arrive from two execution contexts —
+  // create the cross-task lock BEFORE any concurrent access can happen
+  // (begin() runs in single-tasked setup context).
+  if (_mutex == nullptr) {
+    _mutex = xSemaphoreCreateMutex();
+  }
+
   _loadFromNVS();
-  Serial.printf("[TXN] journal loaded: %u entries\n", _size);
+  Serial.printf("[TXN] journal loaded: %u entries (boot %lu)\n",
+                _size, (unsigned long)_bootCount);
 }
 
 bool TransactionJournal::isProcessed(const String& requestId) {
-  return _findInJournal(requestId) >= 0;
+  _lock();
+  bool r = _findInJournal(requestId) >= 0;
+  _unlock();
+  return r;
 }
 String TransactionJournal::getCommandHash(const String& requestId) {
+  _lock();
   int idx = _findInJournal(requestId);
-  return idx >= 0 ? _hashes[idx] : String();
+  String r = idx >= 0 ? _hashes[idx] : String();
+  _unlock();
+  return r;
 }
 String TransactionJournal::getAckJson(const String& requestId) {
+  _lock();
   int idx = _findInJournal(requestId);
-  return idx >= 0 ? _acks[idx] : String();
+  String r = idx >= 0 ? _acks[idx] : String();
+  _unlock();
+  return r;
 }
 
 bool TransactionJournal::storeTransaction(const String& requestId,
                                           const String& commandHash,
                                           const String& ackJson) {
+  // [audit p.413-415] networkTask ingress path — serialized against the
+  // relayTask terminal-update path (updateAck).
+  _lock();
   // Find existing slot or new
   int idx = _findInJournal(requestId);
   if (idx >= 0) {
-    // Existing — only allow if hash matches (idempotent)
-    if (_hashes[idx] != commandHash) return false;
-    return true;
+    // Existing — only allow if hash matches (idempotent). The ack is NOT
+    // rewritten: if the executor already persisted a TERMINAL ack here
+    // (updateAck raced ahead — see create-on-demand), it must survive.
+    bool ok = _hashes[idx] == commandHash;
+    _unlock();
+    return ok;
   }
   // New slot — [CORE-04 audit p.319-321] transactional from the caller's
   // perspective: RAM is mutated only AFTER the NVS commit succeeds. The old
   // code wrote RAM first, so a failed NVS commit still produced DUPLICATE
   // decisions for a transaction that was never durable (false durability —
   // after reboot the retry would be treated as NEW and re-executed).
-  uint8_t newIdx = _writeIdx;
-
+  //
   // [audit p.323] Do NOT _clearSlotNVS() before the new write — NVS
   // putBytes() replaces the record under the same key atomically at the
   // storage layer; deleting first only widens the power-loss window in
   // which the previous record is already gone and the new one not yet
   // committed.
-  {
-    // Stage the new entry, remembering the previous occupant so a failed
-    // commit restores it exactly (a ring slot may still hold a live entry).
-    String prevId = _ids[newIdx];
-    String prevHash = _hashes[newIdx];
-    String prevAck = _acks[newIdx];
-    bool prevValid = _valid[newIdx];
+  bool ok = _storeNewEntryLocked(requestId, commandHash, ackJson);
+  _unlock();
+  return ok;
+}
 
-    _ids[newIdx] = requestId;
-    _hashes[newIdx] = commandHash;
-    _acks[newIdx] = ackJson;
-    _valid[newIdx] = true;
+// [audit p.413-415] Shared NEW-entry staging + 2-phase NVS commit. The
+// caller MUST hold _mutex. On NVS commit failure the previous occupant of
+// the wrapped slot is restored exactly (a ring slot may still hold a live
+// entry) — RAM must never claim durability it does not have.
+bool TransactionJournal::_storeNewEntryLocked(const String& requestId,
+                                              const String& commandHash,
+                                              const String& ackJson) {
+  uint8_t newIdx = _writeIdx;
 
-    if (!_saveEntryToNVSAtomic(newIdx)) {
-      // ROLLBACK — RAM must not claim a transaction that is not durable,
-      // and must not lose the previous occupant of this slot either.
-      _ids[newIdx] = prevId;
-      _hashes[newIdx] = prevHash;
-      _acks[newIdx] = prevAck;
-      _valid[newIdx] = prevValid;
-      return false;
-    }
+  String prevId = _ids[newIdx];
+  String prevHash = _hashes[newIdx];
+  String prevAck = _acks[newIdx];
+  bool prevValid = _valid[newIdx];
+
+  _ids[newIdx] = requestId;
+  _hashes[newIdx] = commandHash;
+  _acks[newIdx] = ackJson;
+  _valid[newIdx] = true;
+
+  if (!_saveEntryToNVSAtomic(newIdx)) {
+    // ROLLBACK — restore the previous occupant of this slot.
+    _ids[newIdx] = prevId;
+    _hashes[newIdx] = prevHash;
+    _acks[newIdx] = prevAck;
+    _valid[newIdx] = prevValid;
+    return false;
   }
   // NVS commit succeeded — advance the write pointer and size now.
   _writeIdx = (newIdx + 1) % JOURNAL_SIZE;
@@ -200,15 +262,66 @@ bool TransactionJournal::storeTransaction(const String& requestId,
   return true;
 }
 
+// [audit p.413/414/415] Terminal-outcome persistence. The relay executor
+// calls this when a journaled transaction reaches its final state; the
+// updated ack becomes the durable, reboot-safe record that
+// GET /api/relays/transactions/{id} falls back to once the 8-entry RAM
+// result ring has evicted the transaction (or after a reboot wiped the
+// ring). Identity is deliberately NOT touched — commandHash stays immutable;
+// only the outcome evolves.
+bool TransactionJournal::updateAck(const String& requestId,
+                                   const String& commandHash,
+                                   const String& ackJson) {
+  _lock();
+  int idx = _findInJournal(requestId);
+  if (idx >= 0) {
+    if (_hashes[idx] != commandHash) {
+      // Identity mismatch — refuse to touch the entry. The terminal verdict
+      // stays in the RAM ring only (observable degradation, never a wrong
+      // durable answer).
+      _unlock();
+      return false;
+    }
+    String prevAck = _acks[idx];
+    _acks[idx] = ackJson;
+    if (!_saveEntryToNVSAtomic(idx)) {
+      _acks[idx] = prevAck;  // ROLLBACK — no false durability in RAM either
+      _unlock();
+      return false;
+    }
+    _unlock();
+    return true;
+  }
+  // CREATE-ON-DEMAND (audit p.413) — the executor's terminal verdict raced
+  // AHEAD of the ingress journal write (queueCommand precedes
+  // storeTransaction in the REST handler), or that ingress write failed
+  // outright (the 503 path) while the command still executed. Store the
+  // terminal record now under the SAME identity: a later storeTransaction
+  // for this id/hash lands in the idempotent duplicate branch above and can
+  // never overwrite this terminal ack with a stale QUEUED one. Without this,
+  // such a transaction would keep a QUEUED journal entry forever while its
+  // real outcome lived only in the evictable RAM ring — the exact
+  // "terminal looks non-terminal" defect of audit p.413.
+  bool ok = _storeNewEntryLocked(requestId, commandHash, ackJson);
+  _unlock();
+  return ok;
+}
+
 TransactionDecision TransactionJournal::decide(const String& requestId,
                                                 const String& commandHash,
                                                 String& outPreviousAck) {
+  _lock();
   int idx = _findInJournal(requestId);
-  if (idx < 0) return TransactionDecision::New;
+  if (idx < 0) {
+    _unlock();
+    return TransactionDecision::New;
+  }
   if (_hashes[idx] == commandHash) {
     outPreviousAck = _acks[idx];
+    _unlock();
     return TransactionDecision::Duplicate;
   }
+  _unlock();
   return TransactionDecision::Conflict;
 }
 
