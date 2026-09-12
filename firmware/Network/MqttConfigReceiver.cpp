@@ -16,6 +16,7 @@
 #include "../Services/SocStateMachine.h"
 #include "../Services/EnergyCounters.h"
 #include "../Services/AuthManager.h"
+#include "../Services/FactoryReset.h"   // [audit p.427] shared factory-reset wipe
 #include "../Drivers/Acs712Driver.h"
 #include "../Drivers/Sht31Driver.h"   // [v1.6.3] live-apply calibration offsets
 #include "../Comm/BatteryCommManager.h" // [PARITY-4] BMS comm live-reconfigure (REST parity)
@@ -23,7 +24,6 @@
 #include "../Services/RelayController.h"   // [v1.8.0] relay command dispatch
 #endif
 #include <ArduinoJson.h>
-#include <Preferences.h>
 #include <cstring>
 #include <cmath>
 
@@ -183,7 +183,14 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   if (decision == Services::TransactionDecision::Duplicate) {
     // Idempotent replay — re-publish the previous ACK verbatim.
     // This is the contract guarantee: clients may retry safely.
+    // [audit p.418] The retry's transport identity is logged (NOT merged
+    // into the stored ack) so the audit trail can count transport
+    // attempts per logical transaction.
     _duplicates++;
+    Services::Log.append(Core::LogType::Custom,
+        "MQTT: duplicate submission TX=" + canon.transactionId +
+        " attempt requestId=" + canon.requestId +
+        " — replaying original ACK", 0);
     if (previousAck.length() > 0) {
       String ackTopic = mqttTransport.getDeviceTopic("ack");
       mqttTransport.publish(ackTopic.c_str(), previousAck.c_str(),
@@ -209,10 +216,13 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
 
   // --- 10. Store transaction + ACK in journal (2-phase commit) -----------------
   // ACK body — same schema regardless of ok=true/false (per §51)
+  // [audit p.418] requestId = the TRANSPORT attempt identity (echoes back so
+  // the audit trail can correlate this ACK with the submission attempt).
   String ackJson;
   {
     JsonDocument ack;
     ack["transactionId"] = canon.transactionId;
+    ack["requestId"] = canon.requestId;
     ack["ok"] = r.ok;
     ack["code"] = r.code;
     ack["message"] = r.message;
@@ -436,23 +446,18 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     const char* token = doc["token"] | "";
     if (strlen(token) == 0) return { false, "REJECTED", "missing token" };
     // [FW-22 CLOSED 2026-08] Real execution: verify the one-time token, then
-    // erase persisted state (same namespace wipe as the REST path) and
-    // reboot into first-boot provisioning.
+    // erase persisted state and reboot into first-boot provisioning.
     if (!Services::auth.confirmFactoryReset(token)) {
       return { false, "REJECTED", "invalid or expired factory reset token" };
     }
     Services::Log.append(Core::LogType::ConfigurationChanged,
                           "MQTT: factory_reset_confirm — erasing state", -1);
-    Preferences p;
-    p.begin("plts", false);        p.clear(); p.end();
-    p.begin("plts_health", false); p.clear(); p.end();
-    p.begin("plts_energy", false); p.clear(); p.end();
-    p.begin("plts_ota", false);    p.clear(); p.end();
-    p.begin("plts_soc", false);    p.clear(); p.end();
-    p.begin("plts_alarm", false);  p.clear(); p.end();
-    p.begin("plts_txn", false);    p.clear(); p.end();
-    p.begin("plts_spool", false);  p.clear(); p.end();
-    p.begin("plts_batt", false);   p.clear(); p.end();
+    // [audit p.427] The MQTT path previously kept its OWN (9-of-13)
+    // namespace list — a factory reset issued over MQTT left plts_time,
+    // plts_emg, plts_auth, plts_relays ALIVE and skipped the LittleFS
+    // format. It now sweeps the SAME shared, single-source set as REST
+    // (Services/FactoryReset.cpp) including the audit-log preservation.
+    Services::executeFactoryResetWipe();
     Network::mqttConfigReceiver.requestDeferredReboot(500);
     return { true, "ACCEPTED", "factory reset applied — rebooting" };
   }
@@ -460,6 +465,18 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
   // ---------- relay.* (v1.8.0) ----------
   #if PLTS_ENABLE_RELAYS
   if (type == "relay") {
+    // [audit p.434] Executable-action whitelist — the relay queue accepts
+    // ONLY runtime mutations. "config" is registered in the canonicalizer
+    // schema but has NO runtime ingress (maxOnTime/minOnTime/interlock are
+    // provisioned, not commanded); queueing it would ACK a silent no-op.
+    // Fail closed with an honest NACK instead of a misleading success.
+    if (action != "on" && action != "off" && action != "pulse" &&
+        action != "all_off" && action != "acknowledge" && action != "clear") {
+      return { false, "REJECTED",
+               "relay action '" + action +
+               "' is not an executable runtime mutation (config is not a "
+               "runtime path)" };
+    }
     uint8_t channel = doc["channel"] | 0;
     String source = doc["source"] | "MANUAL";
     uint32_t pulseMs = doc["durationMs"] | 0;
@@ -472,7 +489,14 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     // ordering vs. queued REST commands and cross-core I²C access.
     Services::QueuedRelayCommand qc = {};
     strncpy(qc.transactionId, tid.c_str(), sizeof(qc.transactionId) - 1);
-    strncpy(qc.requestId, tid.c_str(), sizeof(qc.requestId) - 1);
+    // [audit p.418] Transport identity — MAY differ from the logical
+    // transactionId (a retry presents a fresh requestId with the SAME
+    // transactionId); falls back to tid when the client sends none.
+    {
+      const char* ridC = doc["requestId"] | "";
+      String rid = (strlen(ridC) > 0) ? String(ridC) : tid;
+      strncpy(qc.requestId, rid.c_str(), sizeof(qc.requestId) - 1);
+    }
     strncpy(qc.commandHash, commandHash.c_str(), sizeof(qc.commandHash) - 1);
     strncpy(qc.command, action.c_str(), sizeof(qc.command) - 1);
     qc.channel = channel;
@@ -492,6 +516,11 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     // command was QUEUED, not executed. The final outcome is retrievable
     // via GET /api/relays/transactions/{transactionId} on REST, or observed
     // through telemetry (reportedState + stateSequence).
+    // [audit p.432] Delivery-guarantee honesty: this ACK is published with
+    // PubSubClient QoS 0 (fire-and-forget socket write) — NOT a broker
+    // PUBACK. The DURABLE journal + REST reconciliation endpoint is the
+    // authoritative outcome source; a lost MQTT ACK is recoverable by
+    // re-issuing with the SAME transactionId (idempotent replay).
     return { true, "QUEUED", "relay command queued for execution" };
   }
   #endif

@@ -293,3 +293,132 @@ Vercel — combined GitHub status firmware kini bersih.
   dari `test_relay_safety_2026_09.py`).
 - T9–T13 tetap menunggu bukti fisik (lihat catatan auditor: source test ≠
   physical acceptance evidence).
+
+---
+
+# Round 3 — p.418/425/427/432/434: Cross-subsystem re-audit remediation (12 Sep 2026)
+
+Re-audit auditor atas commit `97caa646` menutup p.398–417 dan membuka fokus
+baru. Round ini menutup semua temuan source-level yang dapat ditindaklanjuti
+tanpa hardware: requestId transport identity (p.418), TLS variant gate
+(p.425), factory reset single-source (p.427), kontrak delivery MQTT yang
+jujur (p.432), dan relay.config yang jujur fail-closed (p.434).
+
+## p.418 — requestId diisi transactionId (🟠 P2 metadata) → SELESAI
+
+**Temuan**: 3 call-site mengisi `qc.requestId` dengan transactionId
+(RelayHandlers ×2, MqttConfigReceiver ×1) — metadata transport identity
+menjadi salah, observability tidak bisa membedakan attempt retry.
+
+**Perbaikan**:
+- `CanonicalResult` kini membawa `requestId` (dikeluarkan dari hash —
+  envelope-only). `validateCommandEnvelope()` tidak lagi menolak
+  requestId ≠ transactionId: transactionId = identitas logis/dedup
+  (wajib), requestId = identitas transport (opsional, boleh berbeda,
+  fallback ke transactionId untuk klien v2).
+- Ketiga call-site mengisi `qc.requestId` dari identitas transport yang
+  benar (REST: `canon.requestId`; MQTT: `doc["requestId"]` fallback tid).
+- `RelayTransactionRecord` + journal terminal ack + GET
+  `/api/relays/transactions/{id}` + ack QUEUED semuanya membawa
+  `requestId`.
+- Replay DUPLICATE (REST + MQTT) me-LOG `attempt requestId=` dari retry —
+  jumlah attempt per transaksi logis kini terlacak di device log, sementara
+  ACK asli tetap direplay verbatim.
+- PWA `apiShared.ts` meng-document kontrak v3 (requestId boleh beda);
+  perilaku klien tetap requestId === transactionId (kompatibel v2+v3).
+
+## p.425 — TLS gate hanya satu .ino (🟠 P1 build-variant) → SELESAI
+
+**Temuan**: gate statis M3 hanya memindai `MqttTransport.cpp`; varian
+push-alarm (`MonitorIoT_Firmware.ino`) dan firmware-generic tidak
+tercakup.
+
+**Perbaikan**: `scripts/test_audit_round3_2026_09.py` memindai SEMUA target
+(134 file di `firmware/`, `firmware-generic/src/`, `push-alarm/firmware/`):
+- Setiap `setInsecure()` LIVE (9 ditemukan) wajib di balik guard
+  compile-time (`#elif defined(DEVELOPMENT_BUILD)` / `#else` dari guard
+  produksi (`PRODUCTION_BUILD`/`*_ROOT_CA`) / `#ifdef TLS_SKIP_CERT_VERIFY`).
+- `#define TLS_SKIP_CERT_VERIFY` push-alarm wajib tetap OFF default
+  (commented).
+- Regresi M3 modular tetap di-assert (paritas dengan
+  `test_wave7_10_crosslayer.py`).
+
+## p.427 — Factory reset tidak menyapu seluruh namespace (🟠 P1) → SELESAI
+
+**Temuan**: REST menyapu 13 namespace + LittleFS.format + audit
+preservation; MQTT hanya 9 (meninggalkan `plts_time`, `plts_emg`,
+`plts_auth`, `plts_relays` — lockout relai & counter emergency selamat
+dari "factory reset"); boot completion memegang salinan list ketiga.
+
+**Perbaikan**: `Services/FactoryReset.{h,cpp}` = satu-satunya sumber daftar
+namespace (13, dengan `"plts"` DIURUTKAN TERAKHIR — sebelumnya marker
+`ftr_p` dihapus oleh sweep namespace pertama sendiri, mempersempit jendela
+recoverable-reset ke mikrodetik; kini marker ditulis ulang setelah sweep
+dan bertahan sampai format + restore selesai). Ketiga jalur (REST confirm,
+MQTT confirm, boot completion) memanggil `executeFactoryResetWipe()` yang
+sama: marker → sweep → re-marker → preserve audit → `LittleFS.format()` →
+restore audit → clear marker. Test mirror memverifikasi setiap namespace
+yang pernah di-`begin()` firmware tercakup dalam sweep (kecuali
+`plts_audit` — vessel preserve yang dibersihkan oleh restore).
+
+## p.432 — Klaim delivery guarantee MQTT (🟠 P1 contract) → SELESAI
+
+**Temuan**: sisa overclaim "QoS 1 PUBACK" di TelemetrySpool, tabel topik
+Config.h mencampur arah, dokumen remediasi menulis "at QoS 1" untuk
+publish yang mustahil QoS 1 di PubSubClient 2.8.
+
+**Perbaikan** (kontrak jujur, selaras REMEDIATION_REPORT_v1.9.3 p.79 yang
+diklaim tapi belum tuntas):
+- TelemetrySpool.h/.cpp: penghapusan record = "confirmed socket write
+  (PubSubClient QoS-0 — NOT a broker PUBACK)"; delivery = at-least-once
+  via spool replay + dedup sekuens GAS.
+- Config.h tabel topik kini direction-accurate: `config`/`ota` = QoS 1
+  SUBSCRIBE (downlink); `ack`/`status`/`log` = QoS 0 publish; `online` =
+  QoS 1 retain via LWT broker-side.
+- AUDIT_2026_09_REMEDIATION.md P1-6 dan GasOtaReporter.h dikoreksi.
+- Jalur ACK MQTT relai kini men-document eksplisit: QoS 0 fire-and-forget,
+  journal durable + REST reconciliation = sumber outcome authoritative;
+  ACK yang hilang dipulihkan dengan re-issue transactionId sama (replay
+  idempotent).
+
+## p.434 — Config mutation atomicity (🟠 P1) → VERIFIED + HONEST-FAIL FIX
+
+**Temuan auditor**: konfigurasi keselamatan (maxOnTime/minOnTime/
+interlock/...) harus atomic. **Temuan laten baru saat verifikasi**: aksi
+`relay.config` di MQTT masuk queue lalu stub `applyCommand("config")`
+membalas "Config updated" TANPA menerapkan apa pun (misleading success).
+
+**Perbaikan**:
+- MQTT relay ingress kini whitelist aksi executable (on/off/pulse/all_off/
+  acknowledge/clear) — "config" ditolak jujur sebelum queue.
+- Stub `applyCommand("config")` fail-closed: `Rejected` + pesan jujur
+  (relay config = provisioning NVS, bukan jalur runtime). Entri registry
+  relay.config dipertahankan sebagai schema-canonical untuk ingress
+  provisioning masa depan, dengan komentar statusnya.
+- Atomicity jalur yang ADA diverifikasi ulang: ConfigUpdater (2-phase,
+  zero RAM mutation sebelum semua field + invariant lolos) untuk
+  battery/BMS/alarm; calibration `setPoint`/`captureZeroOffset`
+  validate-before-mutate. MQTT endpoint & OTA policy bukan mutasi runtime.
+
+## Item yang tetap menunggu (di luar scope source)
+
+- **T9–T13 physical acceptance** — tidak berubah (Gate F).
+- **Secure Boot + Flash Encryption + eFuse anti-rollback provisioning**
+  (p.422/423) — bukti perangkat, bukan source.
+- **p.429 retention journal** — keputusan produk: Opsi A (retensi 16
+  entry terdokumentasi; endpoint jujur UNKNOWN setelah eviksi) vs Opsi B
+  (audit permanen ke GAS dengan transactionId/commandHash/result/reason/
+  eventTime/deviceId/firmwareVersion/stateSequence). Status quo = Opsi A
+  terdokumentasi di TransactionJournal.h + respons GET.
+- **p.430/431 telemetry contract & clock authority** — butuh verifikasi
+  lintas-layer firmware–GAS–PWA dan keputusan NTP-first policy;
+  direkomendasikan masuk audit cycle berikutnya.
+
+## Verifikasi Round 3
+
+- `scripts/test_audit_round3_2026_09.py`: **41/41 PASS** (statis p.418/
+  427/432/434 + Python mirror envelope/requestId + TLS scanner 134 file,
+  9 live setInsecure, 0 unguarded).
+- Seluruh 28 file `scripts/test_*.py` hijau (termasuk 39/39 relay safety
+  dan 30/30 transaction durability).
+- Compile: `pio run -e development -e staging` → SUCCESS.

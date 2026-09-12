@@ -99,6 +99,7 @@ static void handleGetTransaction() {
     const char* resultMap[] = { "EXECUTED", "BLOCKED", "REJECTED", "FAILED", "UNKNOWN" };
     StaticJsonDocument<512> doc;
     doc["transactionId"] = rec.transactionId;
+    doc["requestId"] = rec.requestId;   // [audit p.418] transport identity
     doc["state"] = "TERMINAL";
     doc["result"] = resultMap[(size_t)rec.result];
     doc["channel"] = rec.channel;
@@ -246,6 +247,12 @@ static void handleRelayCommand() {
     return;
   }
   if (d.decision == Services::TransactionDecision::Duplicate) {
+    // [audit p.418] The retry's transport identity is logged (NOT merged into
+    // the stored ack) so operators can trace how many transport attempts a
+    // logical transaction took — the original ACK is replayed verbatim.
+    Services::Log.append(Core::LogType::Custom,
+        String("RELAY: duplicate submission TX=") + canon.transactionId +
+        " attempt requestId=" + canon.requestId + " — replaying original ACK", 0);
     sendSecurityHeaders();
     http.send(200, "application/json; charset=utf-8", d.previousAckJson);
     return;
@@ -253,9 +260,12 @@ static void handleRelayCommand() {
 
   // [RG-RELAY-02] Queue with FULL transaction identity — identity must
   // survive into the executor so the final result is correlatable.
+  // [audit p.418] requestId carries the TRANSPORT identity (distinct from
+  // the logical transactionId) so retries of the same logical command stay
+  // distinguishable in the audit trail.
   Services::QueuedRelayCommand qc = {};
   strncpy(qc.transactionId, canon.transactionId.c_str(), sizeof(qc.transactionId) - 1);
-  strncpy(qc.requestId, canon.transactionId.c_str(), sizeof(qc.requestId) - 1);
+  strncpy(qc.requestId, canon.requestId.c_str(), sizeof(qc.requestId) - 1);
   strncpy(qc.commandHash, canon.commandHash.c_str(), sizeof(qc.commandHash) - 1);
   strncpy(qc.command, action.c_str(), sizeof(qc.command) - 1);
   qc.channel = (uint8_t)channel;
@@ -275,6 +285,7 @@ static void handleRelayCommand() {
   // Build ACK — asynchronous submission accepted (audit p.73-75).
   // [audit p.414] The boot marker lets reconciliation distinguish "in flight
   // this boot" (QUEUED) from "lost at reboot" (UNKNOWN) later on.
+  // [audit p.418] requestId echoes the TRANSPORT attempt identity.
   String ack;
   StaticJsonDocument<512> ackDoc;
   ackDoc["ok"] = true;
@@ -283,6 +294,7 @@ static void handleRelayCommand() {
   ackDoc["channel"] = (uint8_t)channel;
   ackDoc["message"] = "Command queued for execution";
   ackDoc["transactionId"] = canon.transactionId;
+  ackDoc["requestId"] = canon.requestId;
   ackDoc["boot"] = Services::journal.bootCount();
   serializeJson(ackDoc, ack);
 
@@ -349,6 +361,10 @@ static void handleAllOff() {
     return;
   }
   if (d.decision == Services::TransactionDecision::Duplicate) {
+    // [audit p.418] Retry observability — same as per-channel commands.
+    Services::Log.append(Core::LogType::Custom,
+        String("RELAY: duplicate submission TX=") + canon.transactionId +
+        " attempt requestId=" + canon.requestId + " — replaying original ACK", 0);
     sendSecurityHeaders();
     http.send(200, "application/json; charset=utf-8", d.previousAckJson);
     return;
@@ -357,9 +373,10 @@ static void handleAllOff() {
   // [RG-RELAY-07] Enqueue all_off — executed by relayTask like every other
   // normal mutation. The per-channel final result is retrievable via
   // GET /api/relays/transactions/{transactionId}.
+  // [audit p.418] requestId carries the TRANSPORT identity.
   Services::QueuedRelayCommand qc = {};
   strncpy(qc.transactionId, canon.transactionId.c_str(), sizeof(qc.transactionId) - 1);
-  strncpy(qc.requestId, canon.transactionId.c_str(), sizeof(qc.requestId) - 1);
+  strncpy(qc.requestId, canon.requestId.c_str(), sizeof(qc.requestId) - 1);
   strncpy(qc.commandHash, canon.commandHash.c_str(), sizeof(qc.commandHash) - 1);
   strncpy(qc.command, "all_off", sizeof(qc.command) - 1);
   qc.channel = 0;
@@ -382,6 +399,7 @@ static void handleAllOff() {
   ackDoc["state"] = "QUEUED";
   ackDoc["message"] = "All-off command queued for execution";
   ackDoc["transactionId"] = canon.transactionId;
+  ackDoc["requestId"] = canon.requestId;   // [audit p.418] transport identity
   // [audit p.414] Boot marker — see handleRelayCommand.
   ackDoc["boot"] = Services::journal.bootCount();
   serializeJson(ackDoc, ack);

@@ -2,13 +2,15 @@
 // Network/GasOtaReporter.h — [PARITY-3 AUDIT 2026-09-06] GAS OTA_STATUS bridge
 // -----------------------------------------------------------------------------
 // The modular tree's OTA lifecycle used to be observable ONLY via MQTT
-// plts/<id>/ota/event (QoS 1) + the in-RAM /api/ota/history ring — the PWA's
+// plts/<id>/ota/event + the in-RAM /api/ota/history ring — the PWA's
 // "Authoritative — GAS OTA_LOG" panel stayed empty forever because nothing
 // bridged lifecycle events into the GAS OtaEvents sheet. OtaManager.h
 // documented this hole explicitly: "the modular tree reports locally until a
 // GAS OTA_STATUS bridge exists". firmware-generic has had its OTA_STATUS
 // reporter since WAVE-6; this is the modular equivalent, closing the
 // three-layer gap (backend stores it, PWA displays it, firmware now feeds it).
+// [audit p.432] ota/event is a PubSubClient QoS-0 publish (socket write,
+// not broker-acknowledged); this HMAC GAS bridge is the durable record.
 //
 // Contract (HMAC envelope byte-identical with GasAdvisor /
 // GasEmergencyChannel — contract v2.1, verified by Code.gs verifyHmac_):

@@ -515,13 +515,18 @@ static constexpr uint8_t  MAX_USER_LEN   = 32;
 static constexpr uint8_t  SALT_LEN       = 16;
 static constexpr uint8_t  PASS_HASH_HEX_LEN = 65;  // 32 bytes × 2 + null
 
-// Topic structure (brief §48)
-// plts/<deviceId>/status   QoS 0  — telemetry publish (5s)
-// plts/<deviceId>/log      QoS 0  — log events
-// plts/<deviceId>/online   QoS 1 retain — presence (LWT)
-// plts/<deviceId>/config   QoS 1  — config commands (PWA → ESP32)
-// plts/<deviceId>/ack      QoS 1  — command ACKs (ESP32 → PWA)
-// plts/<deviceId>/ota      QoS 1  — OTA commands
+// Topic structure (brief §48) — [audit p.432] direction-accurate QoS table.
+// PubSubClient 2.8: SUBSCRIBE may use QoS 1; PUBLISH is always QoS 0.
+// plts/<deviceId>/status   QoS 0 pub       — telemetry publish (5s)
+// plts/<deviceId>/log      QoS 0 pub       — log events
+// plts/<deviceId>/online   QoS 1 retain    — presence (broker-side LWT at CONNECT)
+// plts/<deviceId>/config   QoS 1 SUBSCRIBE — command ingress (broker → ESP32);
+//                                          device→broker ACKs are QoS 0
+// plts/<deviceId>/ack      QoS 0 pub        — command ACKs (ESP32 → PWA):
+//                                          recoverable via journal + REST
+//                                          reconciliation, NOT broker PUBACK
+// plts/<deviceId>/ota      QoS 1 SUBSCRIBE — OTA commands (broker → ESP32);
+//                                          ota/event publishes are QoS 0
 static constexpr const char* MQTT_TOPIC_PREFIX = "plts";
 
 // LittleFS paths

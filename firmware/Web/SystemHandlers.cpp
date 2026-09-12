@@ -9,6 +9,7 @@
 #include <LittleFS.h>
 #include "../Services/AuthManager.h"
 #include "../Services/LogService.h"
+#include "../Services/FactoryReset.h"
 #include <ArduinoJson.h>
 
 namespace Web {
@@ -45,61 +46,17 @@ void handleFactoryResetConfirm() {
   sendSuccess("Factory reset confirmed — executing", "{}");
   delay(500);
   // [PRODUCTION-GRADE 2026-09 / audit p.145-146, STORAGE-GATE-06] Factory
-  // reset is now a RECOVERABLE transaction: an IN_PROGRESS marker is persisted
-  // BEFORE the first namespace is wiped. Previously a power loss mid-wipe left
-  // a HALF-reset device (some namespaces cleared, others still holding state)
-  // that booted with no indication of the partial reset. On boot, setup()
-  // detects the marker and completes the wipe + format deterministically
+  // reset is a RECOVERABLE transaction: an IN_PROGRESS marker is persisted
+  // BEFORE the first namespace is wiped. On boot, setup() detects the marker
+  // and completes the wipe + format deterministically
   // (see firmware_v1.ino handlePendingFactoryReset()).
-  {
-    Preferences m;
-    if (m.begin("plts", false)) {   // 'plts' is wiped LAST below
-      m.putBool("ftr_p", true);      // FaCtoryReset-in-Progress marker
-      m.end();
-    }
-  }
-  // [audit-2 S-16 FIX] Wipe ALL NVS namespaces — previously missed
-  // plts_alarm, plts_time, plts_soc, plts_emg, plts_auth, plts_emg_calib.
-  // Incomplete wipe left stale alarm state + crash-loop counters + auth
-  // tokens after factory reset → device could boot into CRASHLOOP hold
-  // or show stale alarms. Now wipe the complete namespace set.
-  Preferences p;
-  static const char* const NAMESPACES[] = {
-    "plts",          // main config
-    "plts_health",   // health supervisor
-    "plts_energy",   // energy history
-    "plts_ota",      // OTA state
-    "plts_txn",      // transaction journal (dedup)
-    "plts_spool",    // telemetry spool
-    "plts_batt",     // battery snapshot
-    "plts_alarm",    // [audit-2 S-16] alarm state with CRC
-    "plts_time",     // [audit-2 S-16] epoch estimate
-    "plts_soc",      // [audit-2 S-16] SOC integrator
-    "plts_emg",      // [audit-2 S-16] emergency relay state + trip counter
-    "plts_auth",     // [audit-2 S-16] refresh tokens
-    "plts_relays",   // [v1.8.0] 8-channel relay config + lockout states
-  };
-  for (const char* ns : NAMESPACES) {
-    if (p.begin(ns, false)) { p.clear(); p.end(); }
-  }
-  // [audit-2 S-17] Preserve audit log across factory reset — forensic
-  // evidence of who triggered the reset should survive. Audit log is in
-  // LittleFS PATH_AUDIT_LOG. Save to a temporary NVS blob before format,
-  // restore after.
-  // [CI fix] These functions are defined in LogService.cpp inside namespace Services.
-  // Declare them properly with namespace qualification.
-  bool auditPreserved = Services::preserveAuditLogAcrossReset();
-  LittleFS.format();
-  if (auditPreserved) Services::restoreAuditLogAfterReset();
-  // [STORAGE-GATE-06] Mark COMPLETE so boot does not re-run the wipe
-  // (belt-and-braces — the reboot follows immediately anyway).
-  {
-    Preferences m;
-    if (m.begin("plts", false)) {
-      m.putBool("ftr_p", false);
-      m.end();
-    }
-  }
+  //
+  // [audit p.427] The wipe itself now lives in Services/FactoryReset.cpp —
+  // the SHARED, single-source sweep used by REST confirm, MQTT confirm AND
+  // the boot-time completion. The three paths previously kept three copies
+  // of the namespace list and had diverged (MQTT wiped only 9 of 13,
+  // leaving relay lockouts / emergency counters / auth tokens alive).
+  Services::executeFactoryResetWipe();
   delay(500);
   ESP.restart();
 }

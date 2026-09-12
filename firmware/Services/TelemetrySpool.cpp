@@ -123,7 +123,8 @@ uint8_t TelemetrySpool::replay() {
         _dropCount++;
         continue;
       }
-      // [P1-005] Removal happens ONLY after the callback confirms delivery.
+      // [P1-005 / audit p.432] Removal happens ONLY after the callback
+      // confirms a socket write (PubSubClient QoS-0 — no broker PUBACK).
       if (_publishCb(r.recordType, r.payload, r.payloadLen)) {
         _criticalHead = (_criticalHead + 1) % CRITICAL_SPOOL_CAPACITY;
         _criticalCount--;
@@ -142,7 +143,9 @@ uint8_t TelemetrySpool::replay() {
     uint8_t idx = (_head + SPOOL_CAPACITY - _count) % SPOOL_CAPACITY;
     const TelemetryRecord& r = _records[idx];
     if (verifyRecord(r)) {
-      // [P1-005] Record removed ONLY on confirmed delivery (QoS PUBACK).
+      // [P1-005 / audit p.432] Record removed ONLY on confirmed socket write
+      // (PubSubClient QoS-0 publish — NOT a broker PUBACK). Delivery is
+      // at-least-once via replay + GAS sequence dedup.
       if (_publishCb(r.recordType, r.payload, r.payloadLen)) {
         _count--;
         _replayCount++;
