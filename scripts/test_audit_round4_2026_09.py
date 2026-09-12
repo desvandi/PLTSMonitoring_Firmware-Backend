@@ -133,8 +133,9 @@ fr_cpp = read(FW / "Services" / "FactoryReset.cpp")
 ns_block = fr_cpp.split("FACTORY_RESET_NAMESPACES[] = {")[1].split("};")[0]
 check("C1 plts_sec NOT in factory-reset sweep (survives reset)",
       "plts_sec" not in ns_block)
+ns_count = len(re.findall(r'"plts', ns_block))
 check("C2 13 operational namespaces unchanged",
-      len(re.findall(r'"plts', ns_block)) == 13, f"found {len(re.findall(r'\"plts', ns_block))}")
+      ns_count == 13, f"found {ns_count}")
 check("C3 preservation is documented at the sweep site",
       "plts_sec" in fr_cpp.split("const char* const FACTORY_RESET_NAMESPACES")[0].split("namespace Services {")[-1])
 check("C4 ledger namespace literal used consistently",
