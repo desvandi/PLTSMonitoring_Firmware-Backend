@@ -183,3 +183,113 @@ di CI pada setiap push/PR, sehingga call-site ilegal akan mem-break build.
   `scripts/test_*.py` lama tetap hijau).
 - Scheduler/Automation (p.408): tetap *future* — tidak diklaim Production
   Grade; konfirmasi klasifikasi auditor dihargai.
+
+---
+
+# Round 2 — p.413–415: Transaction durability & reconciliation (12 Sep 2026)
+
+Auditor menutup p.398–412 (commit `5d36f166`) dan mengangkat tiga temuan
+baru pada lapisan transaction relay. Round ini menutup ketiganya.
+
+## p.413 — Result ring 8 entry bukan authoritative (🔴 P1) → SELESAI
+
+**Temuan**: `getTransactionResult()` hanya membaca RAM ring 8 entry; setelah
+eviction, transaksi terminal bisa terlihat `PENDING` — "terminal transaction
+terlihat non-terminal setelah record dieviction".
+
+**Remediasi**:
+1. `RelayController::_recordTransactionResult()` kini menulis **dua kali**:
+   ring RAM (fast cache) **dan** `TransactionJournal::updateAck()` (NVS,
+   authoritative). Setiap verdict terminal durable sejak momen eksekusi.
+2. `GET /api/relays/transactions/{id}` memakai rantai resolusi:
+   `ring (fast) → journal (durable) → UNKNOWN jujur`. Tidak ada jalur yang
+   mengembalikan `PENDING` abadi; respons membawa `source: ring|journal`
+   untuk observabilitas.
+3. **Create-on-demand** di `updateAck()`: verdict executor yang *menang*
+   dari journal-write ingress (race `queueCommand()` vs
+   `storeTransaction()` di handler REST — queue masuk duluan, journal
+   belakangan) tetap durable: entri terminal dibuat dengan identitas sama;
+   `storeTransaction()` ingress yang datang terlambat jatuh ke cabang
+   idempotent-duplicate dan **tidak pernah menimpa** ack terminal dengan
+   ack QUEUED basi.
+
+## p.414 — Reboot menghapus seluruh result ring (🔴 P1) → SELESAI
+
+**Temuan**: `begin()` menghapus ring → outcome prareboot tak terjawab.
+
+**Remediasi**:
+1. `TransactionJournal::begin()` memuat ulang entri dari NVS; terminal
+   outcome prareboot terjawab dari journal (`source: journal`).
+2. **Boot marker**: journal menyimpan boot counter monotonik (NVS,
+   `putUInt("boot")`). Kedua ack submission relay (`handleRelayCommand` +
+   `handleAllOff`) membubuhkan `boot: N`. Resolusi GET:
+   - ack submission + `boot == boot sekarang` → `QUEUED` (in-flight jujur);
+   - ack submission + `boot != boot sekarang` (atau legacy tanpa marker,
+     yang pasti prareboot) → **`TERMINAL/UNKNOWN`** — "lost at reboot /
+     interrupted mid-execution" — rekonsiliasi berhenti, tidak berlarut
+     menjadi PENDING. (Antrean command bersifat RAM-only; tanpa marker,
+     entri lama tak mungkin masih dieksekusi.)
+
+## p.415 — Queue-8 vs Result-8 vs lifecycle (🟠) → SELESAI
+
+**Remediasi** (model lifecycle jurnalistik, diadaptasi dari usulan auditor):
+
+```
+RECEIVED → DURABLE → QUEUED   = satu tulisan NVS di ingress (submission ack)
+EXECUTING                      = antrean RAM → executor (implisit)
+EXECUTED/BLOCKED/REJECTED/
+FAILED/UNKNOWN                 = tulisan NVS kedua di verdict executor
+```
+
+- `RESULT_RING_SIZE=8` dipertahankan **hanya** sebagai fast RAM cache —
+  auditor eksplisit membolehkannya; sumber authoritative = journal 16 slot
+  (retensi didokumentasikan di `TransactionJournal.h`).
+- Identitas immutabel: `commandAck` tidak pernah ditulis ulang dengan hash
+  berbeda (`updateAck` menolak mismatch); `commandHash` tidak berubah.
+- **Mutasi lintas-task diserialisasi**: `storeTransaction` (networkTask,
+  ingress) vs `updateAck` (relayTask, verdict) kini dilindungi mutex
+  internal — tanpa ini, eviksi slot oleh ingress bisa berpacu dengan
+  re-commit slot oleh executor dan RAM/NVS saling kontradiksi.
+- `relayTask` stack 4K→6K (frame `StaticJsonDocument<512>` baru di jalur
+  executor; preseden yang sama dengan `otaTask` [v1.6.3]).
+
+## Deployment status (Vercel FAILURE pada `5d36f166`) → SELESAI
+
+Akar masalah: project Vercel `plts-monitor-push-alarm` **ter-link ke repo
+yang salah** (`PLTSMonitoring_Firmware-Backend`, tanpa rootDirectory) —
+setiap push firmware memicu build push-alarm yang pasti ERROR (fail-closed;
+alias produksi tidak pernah tertimpa). Perbaikan via Vercel API:
+project di-delete + di-recreate dengan nama sama (domain default
+`plts-monitor-push-alarm.vercel.app` tetap), link benar ke
+`PLTSMonitoring_PWA` + `rootDirectory=pwa-push-alarm`, lalu produksi
+di-restore via deployment git (sha `f81b7aee`, READY). Semua rute statis
+200 terverifikasi ulang. Push ke repo firmware tidak lagi memicu konteks
+Vercel — combined GitHub status firmware kini bersih.
+
+## Item acceptance fisik baru (lanjutan T9–T11)
+
+### T12 — Durabilitas transaksi lintas reboot (membuktikan p.413/414 di hardware)
+1. Kirim ON CH0 → catat TX-R; konfirmasi `GET /transactions/TX-R` =
+   `TERMINAL/EXECUTED` (`source: ring`).
+2. Reboot ESP32 (power-cycle).
+3. **PASS jika**: `GET /transactions/TX-R` tetap `TERMINAL/EXECUTED` dengan
+   `source: journal` (bukan PENDING/UNKNOWN).
+
+### T13 — Eviksi ring >8 transaksi (membuktikan p.413 di hardware)
+1. Kirim 10 perintah relay berurutan (TX-1 … TX-10), semua EXECUTED.
+2. **PASS jika**: `GET /transactions/TX-1` tetap `TERMINAL/EXECUTED`
+   (`source: journal`); `GET /transactions/TX-9/TX-10` `source: ring`.
+3. (Di luar jendela retensi 16: transaksi ke-17+ mengevict TX-1 →
+   `GET /transactions/TX-1` = `TERMINAL/UNKNOWN` jujur, bukan PENDING.)
+
+## Verifikasi Round 2
+
+- Compile: `pio run -e development -e staging` → SUCCESS.
+- `scripts/test_transaction_durability_2026_09.py`: **30/30 PASS**
+  (kontrak statis p.413/414/415 + Python mirror rantai resolusi:
+  eviksi, reboot, in-flight, lost-at-reboot, race create-on-demand,
+  never-accepted id).
+- Seluruh 26 file `scripts/test_*.py` lama tetap hijau (termasuk 39/39
+  dari `test_relay_safety_2026_09.py`).
+- T9–T13 tetap menunggu bukti fisik (lihat catatan auditor: source test ≠
+  physical acceptance evidence).

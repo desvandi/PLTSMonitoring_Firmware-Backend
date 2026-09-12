@@ -8,6 +8,7 @@
 #include "../Services/LogService.h"
 #include "../Services/AlarmRegistry.h"
 #include "../Services/HealthSupervisor.h"
+#include "../Services/TransactionJournal.h"
 #include <Preferences.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -35,7 +36,11 @@ void RelayController::begin() {
     _commandQueueHandle = xQueueCreate(COMMAND_QUEUE_SIZE, sizeof(QueuedRelayCommand));
   }
 
-  // [RG-RELAY-09] Clear the transaction result ring
+  // [RG-RELAY-09 + audit p.414] Clear the result-ring CACHE. Final outcomes
+  // are DURABLE in the NVS TransactionJournal (already reloaded by
+  // TransactionJournal::begin() earlier in boot), so post-reboot
+  // reconciliation for ring-lost transactions answers from the journal —
+  // the ring wipe below only drops the fast cache, never the truth.
   for (uint8_t i = 0; i < RESULT_RING_SIZE; i++) _resultRing[i] = RelayTransactionRecord{};
   _resultRingNext = 0;
 
@@ -604,6 +609,44 @@ void RelayController::_recordTransactionResult(const QueuedRelayCommand& cmd,
   rec.completedAtMs = millis();
   rec.valid = true;
   _resultRingNext = (_resultRingNext + 1) % RESULT_RING_SIZE;
+
+  // [audit p.413/414/415] DURABLE TERMINAL OUTCOME — the journal is the
+  // authoritative final-result store; the ring write above is only a fast
+  // cache. Persisting here (executor context, immediately after the hardware
+  // verdict) means the outcome survives BOTH ring eviction and reboot.
+  // Write frequency is bounded by operator command cadence, so flash wear
+  // stays negligible (one small blob rewrite per terminal result, on top of
+  // the existing ingress write for the same transaction).
+  // Failure here is OBSERVABLE DEGRADATION, never a wrong answer: the fresh
+  // ring record still answers this transaction until eviction, after which
+  // reconciliation reports UNKNOWN rather than inventing a result.
+  if (cmd.transactionId[0] != '\0') {
+    static const char* kResultMap[] =
+        { "EXECUTED", "BLOCKED", "REJECTED", "FAILED", "UNKNOWN" };
+    StaticJsonDocument<512> jDoc;
+    jDoc["transactionId"] = rec.transactionId;
+    jDoc["state"] = "TERMINAL";
+    jDoc["result"] = kResultMap[(size_t)result];
+    jDoc["channel"] = rec.channel;
+    jDoc["desiredState"] = rec.desiredState;
+    jDoc["reportedState"] = rec.reportedState;
+    jDoc["stateSequence"] = rec.stateSequence;
+    jDoc["message"] = rec.message;
+    jDoc["completedAtMs"] = rec.completedAtMs;
+    jDoc["boot"] = journal.bootCount();
+    String ack;
+    serializeJson(jDoc, ack);
+    // commandHash is passed so updateAck can verify/create the journal
+    // identity — see the create-on-demand contract (audit p.413).
+    if (!journal.updateAck(cmd.transactionId, cmd.commandHash, ack)) {
+      // Identity mismatch or NVS commit failure — surface it so the operator
+      // sees durability degradation (the RAM ring still answers until the
+      // entry is evicted; after that, reconciliation reports UNKNOWN).
+      Services::Log.append(Core::LogType::Custom,
+          String("RELAY: terminal result NOT durable (journal hash-mismatch/fail) TX=") +
+          String(cmd.transactionId), 0);
+    }
+  }
 }
 
 // [audit p.403] Attribute a pulse lifecycle event (auto-OFF, supersede,

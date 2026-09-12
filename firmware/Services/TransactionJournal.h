@@ -1,11 +1,37 @@
 // =============================================================================
-// Services/TransactionJournal.h — NVS-backed dedup for config/calib commands
+// Services/TransactionJournal.h — NVS-backed transaction identity + durable
+// terminal outcomes
 // -----------------------------------------------------------------------------
-// 64-entry ring. 2-phase commit (write valid=0, flip to valid=1). Magic +
-// version + CRC32. Used by CommandCanonicalizer to detect DUPLICATE / CONFLICT.
+// 16-entry ring (Core::JOURNAL_SIZE, ~19 KB of the 64 KB NVS partition).
+// 2-phase commit (write valid=0, flip to valid=1). Magic + version + CRC32.
+//
+// Two roles:
+//
+//   1. DEDUP — CommandCanonicalizer consults the journal to detect
+//      DUPLICATE / CONFLICT on requestId + commandHash.
+//
+//   2. DURABLE TERMINAL OUTCOMES (audit p.413-415) — when the relay executor
+//      reaches a final verdict, it UPDATES the stored ack of that
+//      transaction with the terminal result (updateAck). The journal — not
+//      the 8-entry RAM result ring — is the AUTHORITATIVE final-outcome
+//      store:
+//
+//          GET /api/relays/transactions/{id}
+//            1. RAM result ring   (fast cache, latest 8)
+//            2. this journal      (durable — survives eviction + reboot)
+//            3. honest UNKNOWN   (never an eternal PENDING)
+//
+//      Submission acks carry a BOOT MARKER (bootCount) so reconciliation can
+//      distinguish "queued in the current boot" (still in flight) from
+//      "accepted in a previous boot that restarted before the executor
+//      reached terminal" (lost at reboot → honest UNKNOWN).
+//
+//      Mutations from both networkTask (storeTransaction) and relayTask
+//      (updateAck) are serialized by an internal mutex — the RAM mirror
+//      (ids/hashes/acks) and the slot-eviction pointer are shared state.
 //
 // [P2-1 REMEDIATION 2026-09 — RETENTION CONTRACT (cross-layer invariant)]
-// The journal guarantees AT-MOST-64-COMMAND dedup memory, NOT a time window.
+// The journal guarantees AT-MOST-16-COMMAND dedup memory, NOT a time window.
 // Once the ring wraps, an old requestId is forgotten and a byte-identical
 // replay of that command would be re-executed as NEW. The cross-layer
 // contract that closes this hole is COMMAND FRESHNESS, not journal size:
@@ -50,6 +76,26 @@ public:
   bool storeTransaction(const String& requestId, const String& commandHash,
                         const String& ackJson);
 
+  // [audit p.414] Monotonic boot counter — NVS-persisted, incremented on every
+  // begin(). Relay submission acks stamp it so reconciliation can distinguish
+  // "in flight this boot" (QUEUED) from "lost at reboot" (UNKNOWN).
+  uint32_t bootCount() const { return _bootCount; }
+
+  // [audit p.413/414/415] Update the stored ack of a journaled transaction
+  // with its TERMINAL outcome — the journal is the authoritative final-result
+  // store; the executor's 8-entry RAM result ring is only a fast cache.
+  // Identity (commandHash) is immutable — only the outcome evolves. If the
+  // transaction is not yet journaled (terminal verdict raced ahead of the
+  // ingress journal write, or that write failed while the command still
+  // executed), the terminal record is CREATED on demand under the same
+  // identity — a later ingress storeTransaction for this id then lands in the
+  // idempotent duplicate branch and never overwrites the terminal ack with a
+  // QUEUED one. RAM is mutated only AFTER the NVS commit succeeds. Returns
+  // false only on identity mismatch or NVS commit failure — observable
+  // degradation, never a wrong answer.
+  bool updateAck(const String& requestId, const String& commandHash,
+                 const String& ackJson);
+
   // Look up requestId + compare hash → returns decision + previousAck if DUPLICATE
   TransactionDecision decide(const String& requestId, const String& commandHash,
                               String& outPreviousAck);
@@ -80,6 +126,20 @@ private:
   void _loadFromNVS();
   void _clearSlotNVS(uint8_t idx);
   uint32_t _computeCRC(const uint8_t* data, size_t len);
+
+  // [audit p.413-415] Shared staging/commit path for NEW entries — used by
+  // storeTransaction (networkTask ingress) AND updateAck's create-on-demand
+  // (relayTask terminal verdict). Assumes _mutex is HELD by the caller.
+  bool _storeNewEntryLocked(const String& requestId, const String& commandHash,
+                            const String& ackJson);
+
+  // [audit p.413-415] Cross-task serialization — storeTransaction runs in
+  // networkTask (ingress), updateAck runs in relayTask (executor terminal
+  // verdict). Both mutate the shared RAM mirror and the NVS slot contents.
+  void* _mutex = nullptr;  // SemaphoreHandle_t (kept opaque in header)
+  void _lock();
+  void _unlock();
+  uint32_t _bootCount = 0;
 };
 
 extern TransactionJournal journal;

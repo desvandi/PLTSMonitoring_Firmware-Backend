@@ -495,7 +495,10 @@ void setup() {
   xTaskCreatePinnedToCore(gasEmergencyTask, "gasemg",      6144, NULL, 2, NULL, 1);
 #endif
 #if PLTS_ENABLE_RELAYS
-  xTaskCreatePinnedToCore(relayTask,        "relay",       4096, NULL, 2, NULL, 0);
+  // [audit p.413-415] 4K→6K: relayTask now persists terminal results into the
+  // NVS journal inside _recordTransactionResult() (StaticJsonDocument<512> on
+  // the executor stack, on top of the existing applyCommand frame chain).
+  xTaskCreatePinnedToCore(relayTask,        "relay",       6144, NULL, 2, NULL, 0);
 #endif
 
   Serial.println("[BOOT] All tasks started. System ready.");

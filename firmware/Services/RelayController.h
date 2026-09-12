@@ -19,6 +19,19 @@
 //     the full envelope; the final execution result is recorded and queryable
 //     via getTransactionResult() / GET /api/relays/transactions/{id}.
 //
+//   DURABLE FINAL OUTCOMES (audit p.413-415):
+//     Every terminal verdict is persisted into the NVS TransactionJournal
+//     (the AUTHORITATIVE final-result store) at the moment it is recorded in
+//     the 8-entry RAM result ring (which is only a fast cache).
+//     GET /api/relays/transactions/{id} resolves:
+//         ring (fast) → journal (durable: survives eviction + reboot)
+//         → honest UNKNOWN.
+//     A terminal transaction can therefore never regress to PENDING — not
+//     after ring eviction (>8 newer transactions), not after a reboot. A
+//     journaled command that never reached terminal in the boot that
+//     accepted it is reported as UNKNOWN ("lost at reboot"), never as an
+//     eternally pending state.
+//
 //   SAFETY GENERATION (audit p.366-369):
 //     emergencyAllOff() increments _safetyGeneration; every command queued
 //     BEFORE the emergency is re-validated at EXECUTION time and BLOCKED as
@@ -226,8 +239,10 @@ public:
   /// Current safety generation — incremented by every emergency trip.
   uint32_t safetyGeneration() const { return _safetyGeneration; }
 
-  /// [RG-RELAY-09] Look up the final outcome of a relay transaction.
-  /// Returns true + fills `out` when a record exists for this transactionId.
+  /// [RG-RELAY-09 + audit p.413] Look up the final outcome of a relay
+  /// transaction — RAM ring FAST CACHE only. On a miss the caller falls
+  /// back to the durable TransactionJournal (RelayHandlers), which survives
+  /// ring eviction and reboots.
   bool getTransactionResult(const String& transactionId,
                             RelayTransactionRecord& out) const;
 
@@ -282,7 +297,11 @@ private:
   void* _commandQueueHandle = nullptr;  // QueueHandle_t (kept opaque in header)
   static const uint8_t COMMAND_QUEUE_SIZE = 8;
 
-  // [RG-RELAY-09] Recent final results — small ring for PWA reconciliation.
+  // [RG-RELAY-09 + audit p.413/414/415] FAST CACHE of the most recent final
+  // results — NOT the authoritative store. Every write here is mirrored into
+  // the NVS TransactionJournal by _recordTransactionResult(); once an entry is
+  // evicted (8 newer transactions) or the ring is wiped by a reboot,
+  // reconciliation answers from the journal instead.
   static const uint8_t RESULT_RING_SIZE = 8;
   RelayTransactionRecord _resultRing[RESULT_RING_SIZE];
   uint8_t _resultRingNext = 0;
@@ -324,7 +343,8 @@ private:
   /// Validate channel index
   bool _validChannel(uint8_t ch) const { return ch < Core::RELAY_CHANNEL_COUNT; }
 
-  /// Record a final transaction outcome into the result ring.
+  /// Record a final transaction outcome into the result ring (fast cache)
+  /// AND persist it into the durable TransactionJournal (audit p.413-415).
   void _recordTransactionResult(const QueuedRelayCommand& cmd,
                                 RelayTerminalResult result,
                                 const String& message);
