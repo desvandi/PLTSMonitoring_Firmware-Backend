@@ -475,6 +475,33 @@ static constexpr const char* OTA_ALLOWED_HOSTS[] = {
   nullptr
 };
 
+// [AUDIT 2026-09 ROUND 4 — device security provisioning / p.436+p.437]
+// -----------------------------------------------------------------------------
+// Hardware security posture + hardware-rooted anti-rollback. Implemented in
+// Services/SecurityPosture; operator runbook: docs/SECURE_PROVISIONING.md.
+//
+// Layer map (what answers which auditor question):
+//   Ed25519 OTA signature  — "is this IMAGE from the trusted releaser?"
+//   Flash Encryption (eFuse)— "is the DEVICE's flash ciphertext at rest?"
+//   Secure Boot (eFuse)     — "will the BOOT ROM/bootloader run untrusted code?"
+//   eFuse SECURE_VERSION    — "can this DEVICE ever run a lower security
+//                              epoch again, even past the app OTA path?"
+// The last three are one-way, per-device provisioning acts (espefuse); the
+// firmware READS them, ENFORCES OTA policy on them, and SELF-REPORTS them
+// via GET /api/security for acceptance evidence.
+//
+// Policy flags (escape hatches are compile-time + documented, never runtime):
+//   PLTS_ALLOW_UNENCRYPTED_OTA — ONLY for a sealed bench unit running a
+//       PRODUCTION build without flash encryption. Absent => production
+//       builds REFUSE OTA on unencrypted flash (fail-closed, p.437).
+//   PLTS_DISABLE_EFUSE_BURN    — production build that must never burn the
+//       anti-rollback floor (e.g. a demo fleet). Absent => the floor burns
+//       one eFuse bit per confirmed (major, minor) advance.
+// Development/staging builds NEVER burn and never require encryption.
+// -----------------------------------------------------------------------------
+// (policies are evaluated in Services/SecurityPosture.cpp — no runtime knobs
+//  to tamper with from NVS/MQTT/REST by design)
+
 // Auth (brief §71)
 static constexpr uint32_t JWT_ACCESS_TTL_SEC       = 900;     // 15 min
 static constexpr uint32_t JWT_REFRESH_TTL_SEC      = 604800;  // 7 days

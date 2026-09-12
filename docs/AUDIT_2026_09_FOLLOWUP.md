@@ -422,3 +422,148 @@ membalas "Config updated" TANPA menerapkan apa pun (misleading success).
 - Seluruh 28 file `scripts/test_*.py` hijau (termasuk 39/39 relay safety
   dan 30/30 transaction durability).
 - Compile: `pio run -e development -e staging` → SUCCESS.
+
+---
+
+# Round 4 — Device security provisioning + hardware acceptance (12 Sep 2026)
+
+Audit round 4 mengonfirmasi penutupan p.398–415, p.418/425/427/432/434 di
+commit 18af0ae. Temuan tersisa auditor bukan lagi arsitektur software,
+melainkan **security provisioning perangkat + hardware acceptance**. Round
+ini menjawab poin-poin tersebut pada level yang bisa dijawab dari source,
+dan memberikan runbook + tooling untuk bagian yang menuntut tindakan fisik.
+
+## Ringkasan status round 4
+
+| Temuan auditor | Status | Bentuk jawaban |
+|---|---|---|
+| OTA anti-rollback hanya software-level (tanpa eFuse secure_version) | 🟠→🟢 app-layer **TERPASANG** (bootloader-layer = Gate B) | SecurityPosture + OtaManager floor gate |
+| Secure Boot + Flash Encryption belum terbukti aktif | 🟠→🟡 fail-closed gate + evidence endpoint + runbook | Gate A runbook + `/api/security` |
+| OTA rollback software matang | 🟢 disetujui auditor | — |
+| INA219_SIGN_CORRECTION masih ASSUMED | 🟠 **BENAR & DIPERTAHANKAN** (honesty contract) | acceptance endpoint, bukan perubahan konstanta |
+| Dynamic INA219 gain perlu acceptance fisik | 🟠 **BENAR** — tooling acceptance diberikan | `/api/diagnostics/ina219` |
+| MQTT honest (QoS 0 + spool) | 🟢 disetujui auditor | — |
+| Factory reset 13 namespace | 🟢 disetujui auditor | — |
+| Build variant TLS | 🟢 disetujui auditor | sisa "pastikan binary production" → dijawab §bawah |
+
+## 1. Hardware-rooted anti-rollback (p.436) → APP-LAYER CLOSED
+
+Kritik auditor tepat: `new version must be > current` adalah software gate;
+tidak ada mekanisme yang membuat device *secara cryptographic* menolak
+security version lebih rendah. Round ini menutupnya pada lapis aplikasi
+dengan jangkar hardware:
+
+- **Floor**: `esp_efuse_read_secure_version()` (BLK3 SECURE_VERSION, 32 bit,
+  one-way) — semantik **sama dengan bootloader ESP-IDF** (popcount/unary,
+  `esp_efuse_check_secure_version`). Diverifikasi terhadap source IDF v4.4.7
+  (core Arduino prebuilt) — API ini berfungsi tanpa config bootloader.
+- **Ledger**: NVS namespace `plts_sec` (sengaja di luar sweep factory
+  reset) menginterpretasikan tiap bit terbakar sebagai satu security epoch
+  dan merekam versi (major, minor) yang diwakilinya. Boot melakukan
+  **reconcile** ledger vs floor: selisih satu epoch + running image lebih
+  baru → self-heal terbukti aman; selisih lain → `TAMPER`/`NO_LEDGER`
+  (bukti rollback) → **OTA ditolak**.
+- **Gate**: kedua jalur OTA (REST upload + MQTT download) kini juga
+  menjalankan `_validateSecurityFloor()` — kandidat dengan (major, minor)
+  di bawah epoch terbakar ditolak, *termasuk* saat running image lebih
+  tua darinya (skenario post-rollback). Patch dalam epoch tetap bebas.
+- **Burn**: satu bit eFuse dibakar **hanya saat aktivasi** (healthy window
+  lolos, `esp_ota_mark_app_valid_cancel_rollback`), **hanya build
+  production** (`PLTS_DISABLE_EFUSE_BURN` = escape hatch terdokumentasi).
+  Gagal burn dilaporkan jujur (`BURN_FAIL`, verdict DEGRADED), tidak
+  pernah dipalsukan sukses.
+
+**Batas yang diakui secara eksplisit**: ini menutup jalur OTA; jalur fisik
+(UART re-flash) ditutup oleh flash encryption + secure boot (Gate A/B),
+bukan oleh gate aplikasi. Kepatuhan penuh bootloader (ABS_DONE +
+CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK) membutuhkan migrasi build yang
+didokumentasikan sebagai **Gate B** di `docs/SECURE_PROVISIONING.md` §6 —
+dan **tidak boleh** diaktifkan sebelum pipeline release menstempel
+`secure_version` ke app descriptor (image Arduino hari ini bernilai 0).
+
+## 2. Secure Boot + Flash Encryption (p.437) → GATE + BUKTI + RUNBOOK
+
+Auditor benar bahwa sebelumnya tidak ada evidence per-device. Jawaban
+round ini tiga lapis:
+
+1. **Fail-closed gate** — build PRODUCTION menolak SELURUH OTA selama flash
+   encryption belum diaktifkan pada device (`otaProvisioningOk`).
+   Artinya: binary production *tidak bisa lagi dipakai* pada device yang
+   tidak diprovision — persis "production provisioning gate" yang diminta.
+2. **Evidence endpoint** — `GET /api/security` (authenticated):
+   flashEncryption (paritas FLASH_CRYPT_CNT), secureBoot V1/V2 (ABS_DONE),
+   floor eFuse + kapasitas + coding scheme, ledger status, build identity,
+   **self-measurement SHA-256 image berjalan** (mmap lewat cache yang
+   mendekripsi transparan — cocok byte-per-byte dengan `release.json`
+   firmwareSha256), plus verdict provisioning terkomputasi
+   (PASS/DEGRADED/FAIL + alasan). Tidak ada nilai yang dipalsukan; yang
+   tak terukur dilaporkan apa adanya.
+3. **Runbook** — `docs/SECURE_PROVISIONING.md`: layer map ancaman,
+   prosedur per-device Gate A (generate key → burn BLK1 → FLASH_CRYPT_CNT
+   → re-flash terenkripsi → verifikasi), arsip baseline/post eFuse,
+   checklist acceptance per device, batas jujur (NVS tidak terenkripsi;
+   bootloader belum secure-boot), dan Gate B (migrasi secure boot).
+
+## 3. Bukti binary production = artifact teraudit (kesimpulan auditor #4)
+
+- **Sisi device**: `/api/security` → `runningImage.sha256` (self-measured).
+- **Sisi operator**: `scripts/verify_flashed_image.py`:
+  - mode `--device-url`: bandingkan digest device dengan `release.json`
+    (berlaku untuk device terenkripsi sekalipun — device mengukur dirinya
+    melalui cache);
+  - mode `--port` (esptool read-back): hash kedua slot app pada flash
+    plaintext dan cocokkan dengan manifest (untuk bench pra-provisioning);
+  - `--self-test` masuk CI.
+- **Sisi build**: tidak berubah dari v1.9.3 — reproducible-build 2x
+  (REL-04) + provenance + Ed25519 + tag-signed release chain sudah hijau;
+  build profile kini juga diverifiable at-runtime via `/api/security`
+  (`buildProfile` + digest self-measured).
+
+## 4. INA219 (item 4 & 5 auditor) — kejujuran dipertahankan, tooling diberikan
+
+Auditor menyebut `INA219_SIGN_CORRECTION = -1.0f` berstatus
+**ASSUMED — NOT HARDWARE VERIFIED** sebagai P1 acceptance. Kami **setuju
+dan sengaja tidak mengubahnya** — flag itu hanya boleh turun setelah
+bukti INA-004 berada di `docs/hardware-acceptance/`. Yang diberikan round
+ini adalah jalur eksekusinya:
+
+- `GET /api/diagnostics/ina219` (authenticated): readback register config
+  (bukti bit PGA), raw shunt/bus segar + decode, rantai konstanta lengkap
+  (shunt Ω, sign correction + status ASSUMED, LSB, EMA), kebijakan PGA
+  (threshold up/down, max), nilai pipeline, dan **cross-check BMS live**
+  (konvensi tanda sama: +charging) termasuk kesepakatan tanda dan status
+  alarm mismatch.
+- Endpoint ini dirancang untuk prosedur INA-001..INA-004 (low-current
+  accuracy, transisi PGA + hysteresis, saturasi + transient, tanda) tanpa
+  debugger — mengurangi biaya eksekusi acceptance fisik tanpa mengklaim
+  hasil yang belum diukur.
+
+## 5. Factory reset & ledger (amplifikasi p.427)
+
+Namespace ledger keamanan `plts_sec` sengaja **tidak** masuk sweep 13
+namespace: state epoch adalah state perangkat, bukan konfigurasi user.
+Menghapusnya bersama factory reset akan membuat setiap device pasca-reset
+terlihat sebagai rollback (ledger absen, floor > 0) dan menolak OTA
+selamanya. Kontrak ini di-enforce statis oleh test round-4 (C1–C3).
+
+## 6. Verifikasi Round 4
+
+- `scripts/test_audit_round4_2026_09.py`: **83/83 PASS** (gate wiring,
+  burn hanya di production, endpoint, ledger survival, honesty INA219,
+  tooling + runbook, mirror keputusan ledger/floor/paritas/verdict).
+- `scripts/verify_flashed_image.py --self-test`: PASS (parser header +
+  partition table + perbandingan digest).
+- Regresi: seluruh 29 skrip `scripts/test_*.py` hijau (termasuk round 1–3).
+- Compile: `pio run -e development -e staging` SUCCESS.
+
+## 7. Yang tetap menunggu tindakan fisik (tidak berubah, kini ber-runbook)
+
+1. **Gate A** — provisioning flash encryption per device produksi
+   (runbook §3; bukti via `/api/security` + `verify_flashed_image.py`).
+2. **Gate B** — migrasi secure boot + bootloader anti-rollback (runbook §6).
+3. **T9–T13** — physical acceptance relay/journal (Gate F rilis).
+4. **INA-001..INA-004** — pengukuran fisik rantai INA219 (endianness
+   konstanta tanda baru boleh berubah SETELAH bukti; endpoint eksekusi
+   kini tersedia).
+5. Keputusan produk p.429 (retensi journal) dan p.430/431 (kontrak
+   telemetry lintas-layer) — tetap di cycle berikutnya.

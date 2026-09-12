@@ -163,6 +163,20 @@ private:
   bool _validateUrlAllowlist(const String& url);
   bool _validateCa();
 
+  // [AUDIT ROUND 4 / p.436+p.437] Hardware-security gates — both run in
+  // BOTH OTA paths (REST upload + MQTT download) BEFORE any bytes are
+  // accepted:
+  //   _validateProvisioning()  — fail-closed: production builds refuse OTA
+  //     when flash encryption is not provisioned; ANY build refuses when the
+  //     anti-rollback ledger is inconsistent with the eFuse floor.
+  //   _validateSecurityFloor() — hardware-rooted anti-downgrade: the
+  //     candidate's (major, minor) must be >= the last burned security epoch
+  //     (eFuse floor, interpreted by the NVS ledger). Patch-level freedom is
+  //     preserved; crossing below the burned floor is rejected even if the
+  //     running image is older (e.g. after a bootloader rollback).
+  bool _validateProvisioning();
+  bool _validateSecurityFloor(const String& newVer);
+
   // [P1-6 AUDIT 2026-09] Publish an OTA lifecycle event to GAS via MQTT.
   // Wrapper around Network::mqttTelemetry.publishOtaLifecycle() that fills in
   // the current job id (derived from the active OTA session) and progress

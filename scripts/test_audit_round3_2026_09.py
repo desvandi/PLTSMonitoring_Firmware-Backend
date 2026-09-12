@@ -248,8 +248,14 @@ for root, _dirs, files in os.walk(FW):
         src = strip_comments(read(os.path.join(root, fn)))
         for m in re.finditer(r'\.begin\("([a-z_]+)"', src):
             used_ns.add(m.group(1))
-unswept = used_ns - REQUIRED_NS - {"plts_audit"}   # plts_audit = preserve vessel, cleared by restore
-check("427-9 mirror: every persisted namespace is swept (except the audit vessel)",
+# plts_audit = preserve vessel, cleared by restore.
+# [ROUND 4] plts_sec = security epoch ledger — intentionally PRESERVED by
+# design (wiping it with user config would make every factory-reset device
+# look like a rollback attack and permanently refuse OTA; the eFuse floor
+# is one-way hardware, so its interpretation layer must survive the reset).
+# test_audit_round4_2026_09.py C1-C3 enforce this preservation contract.
+unswept = used_ns - REQUIRED_NS - {"plts_audit", "plts_sec"}
+check("427-9 mirror: every persisted namespace is swept (except audit vessel + security ledger)",
       not unswept,
       f"namespaces never factory-reset: {sorted(unswept)}")
 

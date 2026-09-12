@@ -13,6 +13,7 @@
 #include "LogHandlers.h"
 #include "AlarmHandlers.h"
 #include "DiagnosticsHandlers.h"
+#include "SecurityHandlers.h"     // [AUDIT ROUND 4] GET /api/security
 #include "EventHandlers.h"
 #include "AuthHandlers.h"
 #include "VersionHandlers.h"
@@ -76,6 +77,8 @@ void HttpServer::begin() {
   LogHandlers::registerRoutes();
   AlarmHandlers::registerRoutes();
   DiagnosticsHandlers::registerRoutes();
+  // [AUDIT ROUND 4] device hardware-security posture + self-attestation
+  SecurityHandlers::registerRoutes();
   EventHandlers::registerRoutes();
   AuthHandlers::registerRoutes();
   VersionHandlers::registerRoutes();

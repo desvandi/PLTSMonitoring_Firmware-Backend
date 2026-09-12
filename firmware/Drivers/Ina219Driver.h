@@ -58,6 +58,23 @@ struct Ina219Reading {
   Ina219PgaMode pgaMode;   // [v1.9.0] current PGA mode (for telemetry)
 };
 
+// [AUDIT 2026-09 ROUND 4 / INA219 hardware acceptance] Read-only register
+// snapshot for the acceptance endpoint (GET /api/diagnostics/ina219) — the
+// raw evidence the acceptance engineer needs for INA-001..INA-004 without
+// a debugger: config-register readback, fresh raw shunt/bus registers, and
+// the constant chain that turns them into amperes. NO side effects: does
+// not switch PGA, does not touch the reading pipeline.
+struct Ina219Diag {
+  bool     ok;             // I2C read sequence succeeded
+  uint16_t configReg;      // register 0x00 as read back NOW
+  uint16_t shuntReg;      // register 0x01 raw (two's complement)
+  uint16_t busReg;        // register 0x02 raw (incl. status bits 2:0)
+  uint16_t calibrationReg;// register 0x05 as read back NOW
+  float    shuntVoltageV; // decoded: shuntReg × 10 µV
+  float    busVoltageV;   // decoded: (busReg >> 3) × 4 mV
+  uint32_t readMs;        // millis() at read
+};
+
 class Ina219Driver {
 public:
   Ina219Driver(uint8_t address, float shuntOhms, float signCorrection);
@@ -74,6 +91,15 @@ public:
   // [v1.9.0] PGA mode accessors
   Ina219PgaMode getPgaMode() const { return _pgaMode; }
   const char* getPgaModeStr() const { return pgaModeToStr(_pgaMode); }
+
+  // [AUDIT ROUND 4 / INA219 acceptance] Fresh read-only register snapshot
+  // (config + calibration readback + raw shunt/bus). Fails closed (ok=false)
+  // on any I2C error. See Ina219Diag above.
+  Ina219Diag readDiagnostic();
+
+  // Sign-correction constant actually in use (acceptance evidence for
+  // INA-004 — the ASSUMED flag in Config.h stays until that passes).
+  float getSignCorrection() const { return _signCorrection; }
 
 private:
   uint8_t  _address;

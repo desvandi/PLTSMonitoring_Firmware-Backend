@@ -84,6 +84,7 @@
 #include "Services/FactoryReset.h"      // [audit p.427] shared factory-reset sweep
 #include "Services/AuthManager.h"
 #include "Services/OtaManager.h"
+#include "Services/SecurityPosture.h"   // [AUDIT ROUND 4] eFuse posture + floor
 #include "Services/LogService.h"
 #include "Services/WifiManager.h"
 #include "Services/TimeManager.h"
@@ -360,6 +361,12 @@ void setup() {
 
   // Auth & OTA
   Services::auth.begin();
+  // [AUDIT ROUND 4] Hardware-security posture FIRST: the eFuse floor +
+  // ledger reconcile feed the OTA gates (OtaManager consults them), so
+  // they must be settled before any OTA path can run. Boot-logs the
+  // provisioning verdict and refuses nothing by itself (policy is enforced
+  // at the OTA boundary, fail-closed there).
+  Services::securityPosture.begin();
   Services::ota.begin();
 
   // WiFi + time
