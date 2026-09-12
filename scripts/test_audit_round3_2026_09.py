@@ -134,9 +134,10 @@ check("418-9 GET /transactions/{id} surfaces requestId (ring path)",
       'doc["requestId"] = rec.requestId' in RH_CPP_NC,
       "reconciliation response must include the transport identity")
 
+n_ack_rid = RH_CPP_NC.count('ackDoc["requestId"] = canon.requestId')
 check("418-10 submission ack echoes requestId (per-channel + all_off)",
-      RH_CPP_NC.count('ackDoc["requestId"] = canon.requestId') == 2,
-      f"found {RH_CPP_NC.count('ackDoc[\"requestId\"] = canon.requestId')} of 2")
+      n_ack_rid == 2,
+      "found {} of 2".format(n_ack_rid))
 
 check("418-10b MQTT journal/published ACK carries requestId",
       'ack["requestId"] = canon.requestId' in MCR_CPP_NC,
