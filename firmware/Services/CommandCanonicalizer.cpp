@@ -78,6 +78,11 @@ static const CommandDef COMMAND_REGISTRY[] = {
     {"channel","durationMs","source", nullptr}},
   {"relay", "all_off",
     {nullptr}},
+  // [audit p.434] Schema registered for CANONICAL VALIDATION only — relay
+  // config (maxOnTime/minOnTime/interlock/...) has NO runtime mutation
+  // ingress: MQTT rejects "config" before queueing and applyCommand("config")
+  // fails closed. Kept so a future provisioning ingress can adopt the exact
+  // same field whitelist instead of inventing a second schema.
   {"relay", "config",
     {"channel","name","maxOnTimeSec","minOnTimeSec","minOffTimeSec",
      "minSwitchIntervalSec","enabled","interlockGroup", nullptr}},
@@ -166,10 +171,15 @@ bool CommandCanonicalizer::isCommandExpired(JsonDocument& doc, String& errOut) {
 }
 
 // [CORE-02] Mandatory mutation envelope — audit p.314-318, p.330.
-// version + transactionId/requestId + issuedAt + expiresAt must ALL be
+// version + transactionId + issuedAt + expiresAt must ALL be
 // present. Freshness evaluation may be impossible (no clock), but the
 // envelope claim is mandatory so replay protection is never silently
 // downgraded to journal-retention-only.
+// [audit p.418] requestId is the TRANSPORT identity and is optional; it MAY
+// differ from transactionId (the logical/dedup identity). A retry presents
+// a fresh requestId with the SAME transactionId so attempts stay
+// distinguishable in the audit trail. When requestId is absent it falls
+// back to transactionId (v2 single-id clients remain fully compatible).
 bool CommandCanonicalizer::validateCommandEnvelope(JsonDocument& doc, String& errOut) {
   // version: mandatory + valid
   if (!doc.containsKey("version")) {
@@ -181,13 +191,12 @@ bool CommandCanonicalizer::validateCommandEnvelope(JsonDocument& doc, String& er
     String err;
     if (!validateProtocolVersion(v, err)) { errOut = err; return false; }
   }
-  // transactionId / requestId: mandatory, non-empty, well-formed
-  String tid = doc["requestId"] | "";
-  String tidAlt = doc["transactionId"] | "";
-  if (tid.length() == 0 && tidAlt.length() > 0) tid = tidAlt;
-  else if (tid.length() > 0 && tidAlt.length() > 0 && tid != tidAlt) {
-    errOut = "requestId and transactionId differ";
-    return false;
+  // transactionId: MANDATORY logical mutation identity (journal dedup key)
+  String tid = doc["transactionId"] | "";
+  if (tid.length() == 0) {
+    // v2 compatibility: clients that only send requestId use it as both
+    // identities (single-logical-command semantics).
+    tid = doc["requestId"] | "";
   }
   if (tid.length() == 0) {
     errOut = "missing transactionId/requestId (required for mutation)";
@@ -196,6 +205,15 @@ bool CommandCanonicalizer::validateCommandEnvelope(JsonDocument& doc, String& er
   {
     String err;
     if (!validateTransactionId(tid, err)) { errOut = err; return false; }
+  }
+  // requestId: OPTIONAL transport identity — MAY differ from transactionId.
+  // If present it must be well-formed (same charset/length rules).
+  {
+    String rid = doc["requestId"] | "";
+    if (rid.length() > 0) {
+      String err;
+      if (!validateTransactionId(rid, err)) { errOut = err; return false; }
+    }
   }
   // issuedAt: mandatory, plausible (> 2020-01-01)
   if (!doc.containsKey("issuedAt")) {
@@ -330,17 +348,25 @@ CanonicalResult CommandCanonicalizer::canonicalizeAndHash(JsonDocument& doc) {
     }
   }
 
-  // Extract + validate transactionId (requestId alias)
-  String tid = doc["requestId"] | "";
-  String tidAlt = doc["transactionId"] | "";
-  if (tid.length() == 0 && tidAlt.length() > 0) tid = tidAlt;
-  else if (tid.length() > 0 && tidAlt.length() > 0 && tid != tidAlt) {
-    r.errorMessage = "requestId and transactionId differ";
-    return r;
-  }
+  // Extract + validate transactionId (logical identity) and requestId
+  // (transport identity — audit p.418). transactionId is the dedup key and
+  // MAY be aliased by requestId for v2 single-id clients; requestId MAY
+  // differ from transactionId (v3 retry-traceable clients).
+  String tid = doc["transactionId"] | "";
+  String rid = doc["requestId"] | "";
+  if (tid.length() == 0) tid = rid;            // v2 alias fallback
+  if (rid.length() == 0) rid = tid;            // v2/no-requestId fallback
   if (tid.length() > 0) {
     String err;
     if (!validateTransactionId(tid, err)) {
+      r.errorMessage = err;
+      return r;
+    }
+  }
+  // Transport identity, when present, must itself be well-formed.
+  if (rid.length() > 0 && rid != tid) {
+    String err;
+    if (!validateTransactionId(rid, err)) {
       r.errorMessage = err;
       return r;
     }
@@ -353,6 +379,7 @@ CanonicalResult CommandCanonicalizer::canonicalizeAndHash(JsonDocument& doc) {
     return r;
   }
   r.transactionId = tid;
+  r.requestId = rid;   // [audit p.418] survives the queue for the audit trail
   r.canonicalString = canon;
   r.commandHash = Utils::sha256Hex(canon);
   r.ok = true;

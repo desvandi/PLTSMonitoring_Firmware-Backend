@@ -77,9 +77,12 @@ public:
   // [FW-29 REMEDIATION 2026-08] Callback now receives the RECORD TYPE so the
   // publisher routes to the correct topic (plts/<id>/status vs .../log).
   // The old signature passed a literal topic string ("critical"/"status")
-  // that no broker would route. Returns true ONLY on confirmed delivery
-  // (QoS 1 PUBACK) — records are removed exclusively after delivery
-  // confirmation (P1-005 ACK semantics).
+  // that no broker would route.
+  // [audit p.432 — HONEST CONTRACT] Returns true ONLY on a confirmed socket
+  // write — PubSubClient 2.8 publish() is ALWAYS QoS 0 (fire-and-forget);
+  // this is NOT a broker PUBACK. End-to-end delivery is achieved by
+  // at-least-once spool replay + GAS-side sequence dedup, not by transport
+  // acknowledgement (P1-005 spool semantics).
   typedef bool (*PublishCb)(uint8_t recordType, const char* payload, size_t len);
   void setPublishCallback(PublishCb cb) { _publishCb = cb; }
 

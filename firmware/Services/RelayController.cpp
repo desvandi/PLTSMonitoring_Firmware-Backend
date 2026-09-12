@@ -182,15 +182,16 @@ RelayCommandResult RelayController::applyCommand(
            : RelayCommandResult::Failed;
   }
 
-  // Handle "config" command
+  // Handle "config" command — [audit p.434] HONEST NO-OP GUARD.
+  // Runtime relay config mutation has NO wired ingress (REST routes only
+  // on/off/pulse/acknowledge/clear; MQTT rejects "config" before queueing).
+  // This stub is kept only as defense-in-depth for any future ingress that
+  // accidentally routes here: it must NEVER report success for a mutation
+  // it does not perform (the old "Config updated" ACK was a silent no-op).
   if (command == "config") {
-    if (!_validChannel(channel)) {
-      messageOut = "Invalid channel";
-      return RelayCommandResult::Rejected;
-    }
-    // Config is set via setChannelConfig() — just return OK
-    messageOut = "Config updated";
-    return RelayCommandResult::Applied;
+    messageOut = "relay config is not a runtime mutation path "
+                "(provisioned via NVS, not via the command queue)";
+    return RelayCommandResult::Rejected;
   }
 
   // Handle "acknowledge" command
@@ -599,6 +600,10 @@ void RelayController::_recordTransactionResult(const QueuedRelayCommand& cmd,
   RelayTransactionRecord& rec = _resultRing[_resultRingNext];
   strncpy(rec.transactionId, cmd.transactionId, sizeof(rec.transactionId) - 1);
   rec.transactionId[sizeof(rec.transactionId) - 1] = '\0';
+  // [audit p.418] Transport identity — distinct from the logical identity;
+  // the attempt that actually carried the command into the executor.
+  strncpy(rec.requestId, cmd.requestId, sizeof(rec.requestId) - 1);
+  rec.requestId[sizeof(rec.requestId) - 1] = '\0';
   rec.result = result;
   rec.channel = cmd.channel;
   rec.desiredState = cmd.desiredState;
@@ -625,6 +630,7 @@ void RelayController::_recordTransactionResult(const QueuedRelayCommand& cmd,
         { "EXECUTED", "BLOCKED", "REJECTED", "FAILED", "UNKNOWN" };
     StaticJsonDocument<512> jDoc;
     jDoc["transactionId"] = rec.transactionId;
+    jDoc["requestId"] = rec.requestId;   // [audit p.418] transport identity
     jDoc["state"] = "TERMINAL";
     jDoc["result"] = kResultMap[(size_t)result];
     jDoc["channel"] = rec.channel;

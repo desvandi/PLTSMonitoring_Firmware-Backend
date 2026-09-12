@@ -182,8 +182,11 @@ struct QueuedRelayCommand {
 
 // [RG-RELAY-09] Final transaction record — bounded ring of the most recent
 // relay command outcomes, queryable by transactionId (PWA reconciliation).
+// [audit p.418] requestId preserves the TRANSPORT attempt identity so the
+// audit trail can distinguish retries of the same logical transaction.
 struct RelayTransactionRecord {
   char transactionId[65] = {0};
+  char requestId[65] = {0};
   RelayTerminalResult result = RelayTerminalResult::Unknown;
   uint8_t channel = 0;
   bool desiredState = false;

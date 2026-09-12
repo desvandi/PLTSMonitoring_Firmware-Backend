@@ -34,6 +34,13 @@ static const size_t MIN_TRANSACTION_ID_LEN = 1;
 struct CanonicalResult {
   bool ok;
   String transactionId;
+  // [audit p.418] Transport/request identity — DISTINCT from the logical
+  // mutation identity. transactionId is the journal/dedup key and MUST stay
+  // stable across transport retries; requestId identifies THIS transport
+  // attempt (a retry may present a fresh requestId with the SAME
+  // transactionId, making attempts distinguishable in the audit trail).
+  // Falls back to transactionId when the client sends no requestId.
+  String requestId;
   String commandHash;
   String canonicalString;
   String errorMessage;
