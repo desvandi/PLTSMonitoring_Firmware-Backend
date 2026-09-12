@@ -57,6 +57,19 @@ inline uint32_t elapsedSince(uint32_t sinceMs, uint32_t nowMs) {
   return (0xFFFFFFFFu - sinceMs) + nowMs + 1;
 }
 
+// [audit 2026-09 p.402] Rollover-safe absolute-deadline check.
+// `nowMs >= deadlineMs` is WRONG across the millis() wrap (~49.7 days):
+//  - a deadline that wraps (deadline < now after the wrap) is reported as
+//    already expired the moment it is scheduled, and
+//  - a deadline scheduled before the wrap is reported as never reached for
+//    a further ~49.7 days after it passed.
+// The correct pattern is a SIGNED 32-bit difference, valid for any pair of
+// timestamps less than 2^31 ms (~24.8 days) apart — far beyond every relay
+// timing bound in this firmware (maxOnTime/pulse/minOn ≤ hours).
+inline bool deadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
+  return (int32_t)(nowMs - deadlineMs) >= 0;
+}
+
 // ---------------------------------------------------------------------------
 // String helpers
 // ---------------------------------------------------------------------------
