@@ -85,15 +85,22 @@ void RelayController::tick() {
   // Record heartbeat for health supervisor
   _recordHeartbeat();
 
-  // [P1-10] Process queued commands FIRST — single-threaded mutation
-  processCommandQueue();
-
-  if (!_driverAvailable) return;
+  // Drain the queue even when the driver is unavailable so pending commands
+  // receive a FINAL result (Failed) instead of hanging without an outcome.
+  if (!_driverAvailable) {
+    processCommandQueue();
+    return;
+  }
 
   // [audit p.92-93] Automatic verified safe-recovery after a failed I²C
   // write: the driver refuses normal mutations while its shadow register is
   // unknown. Recovery drives 0xFF (ALL OFF — safe direction) and verifies by
   // readback, restoring the driver to a known state.
+  //
+  // Runs FIRST (before safety enforcement and the command queue) so the
+  // executor works against a healthy driver in everything that follows
+  // (audit p.407: commands dequeued while SHADOW_UNKNOWN must fail closed —
+  // with recovery up front, the surviving window is one tick at most).
   if (Drivers::relayExpander.isShadowUnknown()) {
     if (Drivers::relayExpander.recoverWithAllOff()) {
       for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
@@ -105,6 +112,9 @@ void RelayController::tick() {
           _state[ch].onSinceMs = 0;
           _state[ch].confidence = Core::RelayStateConfidence::SoftwareOnly;
         }
+        if (_pulses[ch].active) {
+          _annotatePulseOutcome(ch, "cancelled by I²C shadow recovery (ALL OFF)");
+        }
         _pulses[ch].active = false;  // any pending pulse is moot — channel is OFF
       }
       Services::Log.append(Core::LogType::Custom,
@@ -113,13 +123,24 @@ void RelayController::tick() {
     // Recovery failed — remain in refused state; fault alarms already raised.
   }
 
-  // 1. Check maxOnTime for all channels — FORCE OFF if exceeded
+  // 1. [audit p.401] SAFETY ENFORCEMENT BEFORE THE COMMAND QUEUE —
+  //    maxOnTime FORCE OFF is evaluated and applied FIRST, so any queued
+  //    ON command is judged against an up-to-date maxOnTimeForced flag.
+  //    This closes the previous one-tick (≤200 ms) window in which a normal
+  //    ON could execute before the safety supervisor had refreshed the flag.
   _checkMaxOnTime();
 
-  // 2. Process pending pulses (turn OFF after duration)
+  // 2. Process queued commands — single-threaded mutation authority.
+  //    Safety + interlock are re-evaluated inside applyCommand immediately
+  //    before each write.
+  processCommandQueue();
+
+  // 3. Process pending pulses (turn OFF after duration) — after safety, so
+  //    a maxOnTime force-off in step 1 has already cancelled any pending
+  //    pulse for the tripped channel (audit p.409 precedence).
   _processPulses();
 
-  // 3. Process lockout state transitions (ARMED → NORMAL)
+  // 4. Process lockout state transitions (ARMED → NORMAL)
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
     if (_state[ch].lockout == Core::RelayLockoutState::Armed) {
       _state[ch].lockout = Core::RelayLockoutState::Normal;
@@ -134,7 +155,8 @@ RelayCommandResult RelayController::applyCommand(
     bool desiredState,
     uint32_t pulseDurationMs,
     const String& source,
-    String& messageOut) {
+    String& messageOut,
+    const char* transactionId) {
 
   if (!_driverAvailable) {
     messageOut = "Relay driver unavailable (PCF8574 not responding)";
@@ -220,6 +242,36 @@ RelayCommandResult RelayController::applyCommand(
     return RelayCommandResult::Blocked;
   }
 
+  // [audit p.401] DIRECT maxOnTime evaluation — defense-in-depth. The
+  // maxOnTimeForced flag above is refreshed by _checkMaxOnTime() at the
+  // START of each executor tick (safety runs BEFORE the command queue),
+  // but the executor must ALSO verify the hard limit from raw timestamps
+  // so the invariant holds even if this ever executes outside the tick
+  // ordering contract (future call sites, harnesses). A channel whose hard
+  // ON-limit is already exceeded is force-OFF NOW and the ON is blocked.
+  if (desiredState && _config[channel].maxOnTimeSec > 0 &&
+      _state[channel].reportedState && _state[channel].onSinceMs > 0) {
+    uint32_t onDuration = (millis() - _state[channel].onSinceMs) / 1000;
+    if (onDuration >= _config[channel].maxOnTimeSec) {
+      if (_pulses[channel].active) {
+        _annotatePulseOutcome(channel, "cancelled by maxOnTime FORCE OFF");
+        _pulses[channel].active = false;  // [audit p.409] maxOnTime outranks pulse
+      }
+      _applyChannelState(channel, false, Core::RelaySource::Safety);
+      _state[channel].maxOnTimeForced = true;
+      _state[channel].lockout = Core::RelayLockoutState::Tripped;
+      _saveLockoutStates();
+      String msg = "Channel " + String(channel) + " maxOnTime exceeded (" +
+                   String(onDuration) + "s >= " + String(_config[channel].maxOnTimeSec) +
+                   "s) — ON blocked, FORCE OFF";
+      Services::Log.append(Core::LogType::Custom, "RELAY: " + msg, 0);
+      Services::alarms.raise(Core::AlarmCode::RELAY_MAX_ON_TIME,
+                   Core::AlarmSeverity::Critical, msg.c_str());
+      messageOut = msg;
+      return RelayCommandResult::Blocked;
+    }
+  }
+
   // Determine source
   Core::RelaySource src = Core::RelaySource::Manual;
   if (source == "SCHEDULE") src = Core::RelaySource::Schedule;
@@ -251,6 +303,14 @@ RelayCommandResult RelayController::applyCommand(
     }
 
     _applyChannelState(channel, true, src);
+    // [audit p.407] An unverified I²C write must NEVER be reported as
+    // Applied/EXECUTED — _applyChannelState flags the channel on failure
+    // without reverting the contract; surface it as Failed (the executor
+    // promotes it to Unknown when the driver shadow is unknown).
+    if (_state[channel].fault) {
+      messageOut = "Channel " + String(channel) + " ON — I²C write FAILED, state UNKNOWN";
+      return RelayCommandResult::Failed;
+    }
     messageOut = "Channel " + String(channel) + " ON";
     return RelayCommandResult::Applied;
   }
@@ -265,6 +325,11 @@ RelayCommandResult RelayController::applyCommand(
     }
 
     _applyChannelState(channel, false, src);
+    // [audit p.407] Same honesty contract as the ON path — see above.
+    if (_state[channel].fault) {
+      messageOut = "Channel " + String(channel) + " OFF — I²C write FAILED, state UNKNOWN";
+      return RelayCommandResult::Failed;
+    }
     messageOut = "Channel " + String(channel) + " OFF";
     return RelayCommandResult::Applied;
   }
@@ -298,8 +363,27 @@ RelayCommandResult RelayController::applyCommand(
 
     // Turn ON
     _applyChannelState(channel, true, src);
+    // [audit p.407] If the ON write failed, do NOT schedule the pulse and
+    // do NOT report Applied — the transaction must land Failed/Unknown.
+    if (_state[channel].fault) {
+      messageOut = "Channel " + String(channel) + " PULSE — I²C write FAILED, state UNKNOWN";
+      return RelayCommandResult::Failed;
+    }
 
-    // [P1-8] Schedule pulse OFF — one slot per channel, deterministic
+    // [audit p.403] Overwrite semantics are now explicit and auditable: a
+    // newer pulse on the same channel supersedes the pending one — the
+    // superseded transaction is annotated in the result ring first.
+    if (_pulses[channel].active) {
+      _annotatePulseOutcome(channel, "superseded by newer pulse");
+    }
+
+    // [P1-8 + audit p.403] Schedule pulse OFF — one slot per channel,
+    // deterministic, owned by this transaction.
+    strncpy(_pulses[channel].transactionId,
+            transactionId ? transactionId : "",
+            sizeof(_pulses[channel].transactionId) - 1);
+    _pulses[channel].transactionId[sizeof(_pulses[channel].transactionId) - 1] = '\0';
+    _pulses[channel].generation = _safetyGeneration;
     _pulses[channel].offAtMs = millis() + pulseDurationMs;
     _pulses[channel].active = true;
 
@@ -334,6 +418,9 @@ void RelayController::emergencyAllOff() {
   AllOffResult result;
   result.requested = Core::RELAY_CHANNEL_COUNT;
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+    if (_pulses[ch].active) {
+      _annotatePulseOutcome(ch, "cancelled by E-WAVE emergency cascade");
+    }
     _pulses[ch].active = false;  // cancel pending pulses first
 
     // Attempt OFF regardless of reportedState (audit p.364).
@@ -463,10 +550,13 @@ void RelayController::processCommandQueue() {
 
     // 3. Execute through the single mutation path (safety + interlock are
     //    re-evaluated inside applyCommand immediately before the write).
+    //    transactionId is passed through so pulse lifecycle events are
+    //    attributed to the owning transaction (audit p.403).
     String messageOut;
     RelayCommandResult r = applyCommand(String(cmd.command), cmd.channel,
                                         cmd.desiredState, cmd.pulseDurationMs,
-                                        String(cmd.source), messageOut);
+                                        String(cmd.source), messageOut,
+                                        cmd.transactionId);
 
     RelayTerminalResult terminal;
     switch (r) {
@@ -514,6 +604,28 @@ void RelayController::_recordTransactionResult(const QueuedRelayCommand& cmd,
   rec.completedAtMs = millis();
   rec.valid = true;
   _resultRingNext = (_resultRingNext + 1) % RESULT_RING_SIZE;
+}
+
+// [audit p.403] Attribute a pulse lifecycle event (auto-OFF, supersede,
+// cancellation) to the owning transaction by annotating its record in the
+// result ring. The terminal result is NOT rewritten — this only enriches
+// the audit trail so the physical OFF can be correlated to the pulse
+// transaction that scheduled it.
+void RelayController::_annotatePulseOutcome(uint8_t ch, const char* note) {
+  if (!_validChannel(ch)) return;
+  const char* txId = _pulses[ch].transactionId;
+  if (txId == nullptr || txId[0] == '\0') return;  // legacy/internal pulse
+
+  for (uint8_t i = 0; i < RESULT_RING_SIZE; i++) {
+    RelayTransactionRecord& rec = _resultRing[i];
+    if (rec.valid && strncmp(rec.transactionId, txId, sizeof(rec.transactionId)) == 0) {
+      String m = String(rec.message) + " | " + note;
+      strncpy(rec.message, m.c_str(), sizeof(rec.message) - 1);
+      rec.message[sizeof(rec.message) - 1] = '\0';
+      rec.completedAtMs = millis();
+      break;  // most recent record wins — ring lookup returns first match
+    }
+  }
 }
 
 // ============================================================================
@@ -647,7 +759,13 @@ void RelayController::_checkMaxOnTime() {
 
     uint32_t onDuration = (now - _state[ch].onSinceMs) / 1000;
     if (onDuration >= _config[ch].maxOnTimeSec && !_state[ch].maxOnTimeForced) {
-      // FORCE OFF — safety authority, cannot be overridden
+      // FORCE OFF — safety authority, cannot be overridden.
+      // [audit p.409] Safety decision matrix: maxOnTime outranks pulse
+      // expiry — cancel the pending pulse so the two timers never race.
+      if (_pulses[ch].active) {
+        _annotatePulseOutcome(ch, "cancelled by maxOnTime FORCE OFF");
+        _pulses[ch].active = false;
+      }
       _applyChannelState(ch, false, Core::RelaySource::Safety);
       _state[ch].maxOnTimeForced = true;
       _state[ch].lockout = Core::RelayLockoutState::Tripped;
@@ -668,14 +786,29 @@ void RelayController::_processPulses() {
   // [P1-8] 8 slots — one per channel, deterministic
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
     if (!_pulses[ch].active) continue;
-    if (now >= _pulses[ch].offAtMs) {
-      // [P1-9] Check minOnTime before turning OFF
+    // [audit p.402] Rollover-safe deadline check. millis() wraps every
+    // ~49.7 days; the absolute comparison `now >= offAtMs` misjudges across
+    // the wrap (a just-scheduled pulse whose deadline wrapped is seen as
+    // already expired; a deadline that passed just before the wrap is seen
+    // as not-yet-reached for another ~49.7 days). The signed-difference
+    // pattern in Core::deadlineReached is correct for any deadline less
+    // than 2^31 ms in the future — pulse durations are bounded to 60 s.
+    if (Core::deadlineReached(now, _pulses[ch].offAtMs)) {
       uint32_t onDuration = (now - _state[ch].onSinceMs) / 1000;
       if (_config[ch].minOnTimeSec > 0 && onDuration < _config[ch].minOnTimeSec) {
-        // Delay the OFF until minOnTime is satisfied
+        // [audit p.409] Safety matrix: pulse expiry WAITS for minOnTime
+        // (deferred, never skipped) — the OFF is rescheduled, not dropped.
         _pulses[ch].offAtMs = _state[ch].onSinceMs + (_config[ch].minOnTimeSec * 1000);
       } else {
         _applyChannelState(ch, false, Core::RelaySource::Manual);
+        if (_state[ch].fault) {
+          // The auto-OFF write itself failed — the pending I²C shadow
+          // recovery will drive ALL OFF (safe direction) within one tick.
+          // Attribute honestly; do not report the pulse as completed.
+          _annotatePulseOutcome(ch, "auto-OFF write FAILED — deferred to I²C recovery");
+        } else {
+          _annotatePulseOutcome(ch, "pulse completed (auto-OFF)");
+        }
         _pulses[ch].active = false;
       }
     }
@@ -829,6 +962,9 @@ AllOffResult RelayController::allOffWithResult() {
   result.requested = Core::RELAY_CHANNEL_COUNT;
 
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+    if (_pulses[ch].active) {
+      _annotatePulseOutcome(ch, "cancelled by all_off");
+    }
     _pulses[ch].active = false;  // cancel any pending pulse for this channel
     _applyChannelState(ch, false, Core::RelaySource::Manual);
 

@@ -30,6 +30,30 @@
 //     command is DEQUEUED, immediately before the hardware mutation —
 //     ingress validation and execution validation are two boundaries.
 //
+//   SAFETY DECISION MATRIX (audit p.409 — precedence, highest first):
+//     1. EMERGENCY (E-WAVE cascade)   — bypasses minOnTime, lockout, queue;
+//                                      executed by the safety authority on
+//                                      its own execution context, bumps the
+//                                      safety generation (stale queued
+//                                      commands are BLOCKED).
+//     2. maxOnTime FORCE OFF          — hard limit; tick() enforces it BEFORE
+//                                      the command queue is drained, and
+//                                      applyCommand() re-evaluates it
+//                                      directly from millis()-onSinceMs as
+//                                      defense-in-depth (audit p.401).
+//     3. pulse expiry (auto-OFF)      — bounded by minOnTime: the auto-OFF is
+//                                      DEFERRED until minOnTime is
+//                                      satisfied, never dropped; cancelled
+//                                      by 1/2 above.
+//     4. normal OFF / minOnTime /
+//        interlock / antiChatter     — lowest; evaluated per command.
+//
+//   EXECUTOR TICK ORDERING CONTRACT (audit p.401):
+//     I²C shadow recovery → maxOnTime enforcement → command queue →
+//     pulse expiry → lockout transitions. Safety state is refreshed BEFORE
+//     normal commands are evaluated, so no queued ON can execute inside
+//     the window between "limit exceeded" and "flag updated".
+//
 // Safety features:
 //   - maxOnTime (FORCE OFF, cannot be bypassed)
 //   - minOnTime (protect inductive loads; bypassed ONLY by safety/emergency)
@@ -166,12 +190,15 @@ public:
   /// EXECUTOR-ONLY: called from relayTask (processCommandQueue). Ingress
   /// (REST/MQTT) must use queueCommand() — never this method.
   /// Commands: "on", "off", "pulse", "all_off", "config", "acknowledge", "clear"
+  /// transactionId (optional): identity of the queued command — used to
+  /// attribute pulse lifecycle events (audit p.403).
   RelayCommandResult applyCommand(const String& command,
                                    uint8_t channel,
                                    bool desiredState,
                                    uint32_t pulseDurationMs,
                                    const String& source,
-                                   String& messageOut);
+                                   String& messageOut,
+                                   const char* transactionId = nullptr);
 
   /// E-WAVE safety cascade — called from EmergencySupervisor (safety
   /// authority, separate execution context). Attempts OFF on EVERY channel
@@ -235,10 +262,16 @@ private:
   // time BLOCKS the command as stale (no post-emergency reactivation).
   uint32_t _safetyGeneration = 0;
 
-  // [P1-8] Pulse tracking — one slot per channel (deterministic, no overflow)
+  // [P1-8 + audit p.403] Pulse tracking — one slot per channel (deterministic,
+  // no overflow). Each entry carries the identity of the transaction that
+  // scheduled it, so the eventual auto-OFF (or its cancellation / supersede)
+  // is correlated back to the owning transaction in the result ring.
   struct PulseEntry {
     bool active = false;
-    uint32_t offAtMs = 0;  // when to turn OFF
+    uint32_t offAtMs = 0;               // when to turn OFF (deadline — checked
+                                        // rollover-safe via deadlineReached)
+    char transactionId[65] = {0};        // owning TX ("" for legacy internal calls)
+    uint32_t generation = 0;            // safety generation at schedule time
   };
   PulseEntry _pulses[Core::RELAY_CHANNEL_COUNT];  // 8 slots — one per channel
 
@@ -295,6 +328,13 @@ private:
   void _recordTransactionResult(const QueuedRelayCommand& cmd,
                                 RelayTerminalResult result,
                                 const String& message);
+
+  /// [audit p.403] Attribute a pulse lifecycle event (auto-OFF, supersede,
+  /// cancellation) to the owning transaction by annotating its record in
+  /// the result ring. The terminal result is NOT rewritten — this enriches
+  /// the audit trail so the physical OFF can be correlated to the pulse
+  /// transaction that scheduled it.
+  void _annotatePulseOutcome(uint8_t ch, const char* note);
 };
 
 extern RelayController relaysController;
