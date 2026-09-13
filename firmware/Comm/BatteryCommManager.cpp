@@ -157,9 +157,27 @@ bool BatteryCommManager::socAuthoritative() const {
   // Reads _state/_data without mutex: single-writer semantics make this
   // benign (worst case one poll-cycle lag). The canonical data path for
   // consumers is getData() (mutex-copied).
+  //
+  // [AUDIT 2026-09 ROUND 5 / p.448] The authority gate is no longer just
+  // "locked + plausible + fresh". A BMS that reports LOCKED, a plausible SOC
+  // and fresh data while its own faultFlags != 0 is a battery that says
+  // "something about me is wrong" — its gauge reading must NOT be treated as
+  // an authoritative SOC source until the faults clear. (The BMS_FAULT
+  // alarm is raised separately by energyTask; this gate stops the FAULTY
+  // data from being *consumed as truth*, which the alarm alone did not.)
+  //
+  // [AUDIT 2026-09 ROUND 5 / p.449] While the sustained BMS↔shunt current
+  // mismatch is ACTIVE, neither instrument has proven which one is wrong —
+  // the BMS loses SOC authority for the same reason the shunt integration is
+  // quality-gated to Suspect by energyTask: disagreement suspends authority
+  // until agreement returns. This turns the cross-check from a detector
+  // into an interlock: wrong-sign/wrong-scale current can no longer flow
+  // into the SOC path while the two instruments disagree.
   return _state == State::Locked &&
          bmsSocPlausible(_data.soc) &&
-         _data.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000);
+         _data.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000) &&
+         _data.faultFlags == 0 &&
+         !_mismatchActive;
 }
 
 void BatteryCommManager::tick(uint32_t nowMs) {
@@ -297,6 +315,19 @@ float BatteryCommManager::crossCheckShunt(float shuntCurrentA, uint32_t nowMs) {
   (void)nowMs;
   float bmsI = _data.current;
   if (!_mutex) return NAN;
+  // [AUDIT 2026-09 ROUND 5 / p.449 — freshness guard] Only arbitrate while the
+  // BMS data is FRESH. A stale last-reading is not a second opinion: after a
+  // BMS dropout (State::Lost keeps _data for observability) comparing the
+  // frozen value against the LIVE shunt would false-trigger the mismatch —
+  // and with the round-5 interlock that would freeze SOC/energy integration
+  // for the whole BMS-absent period even though the shunt is the only live
+  // instrument. Fresh BMS data or no arbitration at all.
+  if (!_data.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000)) {
+    _mismatchStreak = 0;
+    _lastMismatchA = NAN;
+    _mismatchActive = false;
+    return NAN;
+  }
   if (!Core::isValidFloat(shuntCurrentA) || !bmsCurrentPlausible(bmsI)) {
     _mismatchStreak = 0;
     _lastMismatchA = NAN;

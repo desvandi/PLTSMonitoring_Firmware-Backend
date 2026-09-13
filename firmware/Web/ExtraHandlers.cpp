@@ -327,8 +327,16 @@ void handlePasswordPost() {
   memcpy(Core::salt, newSalt, Core::SALT_LEN);
   memset(hash, 0, sizeof(hash));
   memset(newSalt, 0, sizeof(newSalt));
+  // [AUDIT 2026-09 ROUND 5 / p.444] First successful password change closes
+  // the commissioning boundary: the UART-revealed default is no longer in
+  // force, so the DEFAULT_CREDENTIALS_ACTIVE alarm clears on the next
+  // evaluation and /api/security reports the boundary as closed.
+  bool wasDefault = !Core::credentialsProvisioned;
+  Core::credentialsProvisioned = true;
   Storage::config.saveUserConfig();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Operator password changed", 0);
+  Services::Log.append(Core::LogType::ConfigurationChanged,
+                       wasDefault ? "Operator password changed — commissioning boundary CLOSED (default credential no longer active)"
+                                  : "Operator password changed", 0);
   // [PARITY-4] journal AFTER the mutation succeeds (same 2-phase ordering as
   // ConfigHandlers — failed attempts stay retryable, successes are idempotent).
   String ack = "{\"success\":true,\"message\":\"Password changed\",\"data\":{\"changed\":true}}";

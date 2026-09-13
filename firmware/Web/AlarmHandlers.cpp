@@ -113,6 +113,11 @@ void handleGetAlarms() {
     o["clearedAt"] = a->clearedAt;
     o["message"] = a->message;
   }
+  // [AUDIT 2026-09 ROUND 5 / p.451] Registry saturation observability — a
+  // non-zero overflowCount means at least one alarm was REJECTED because all
+  // MAX_ALARMS slots held non-cleared entries (no active safety alarm is ever
+  // evicted to make room). Additive field; consumers treat absent as 0.
+  doc["overflowCount"] = Services::alarms.overflowCount();
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);
 }

@@ -320,6 +320,15 @@ namespace AlarmCode {
   constexpr const char* WATCHDOG_RESET          = "WATCHDOG_RESET";
   constexpr const char* BROWNOUT_RESET          = "BROWNOUT_RESET";
   constexpr const char* BOOT_LOOP               = "BOOT_LOOP";
+  // [AUDIT 2026-09 ROUND 5 / p.443] Hardware-security provisioning posture:
+  // production build running on unencrypted flash (Gate A not provisioned).
+  // Makes the WRONG provisioning order an OPERATIONAL signal instead of a
+  // silent fact discoverable only via /api/security.
+  constexpr const char* SECURITY_PROVISIONING   = "SECURITY_PROVISIONING";
+  // [AUDIT 2026-09 ROUND 5 / p.444] Commissioning boundary: default admin
+  // password (revealed once via UART at generation) has not yet been changed
+  // by the operator. Clears on first successful password change.
+  constexpr const char* DEFAULT_CREDENTIALS_ACTIVE = "DEFAULT_CREDENTIALS_ACTIVE";
   // Emergency layer (v1.7.0 E-WAVE port) — raised on ANY transition into
   // EMERGENCY (sensor trip / E-stop / operator DISARM / crash-loop hold),
   // cleared on operator ARM. The relay itself is latched in hardware; this

@@ -567,3 +567,175 @@ selamanya. Kontrak ini di-enforce statis oleh test round-4 (C1–C3).
    kini tersedia).
 5. Keputusan produk p.429 (retensi journal) dan p.430/431 (kontrak
    telemetry lintas-layer) — tetap di cycle berikutnya.
+
+---
+
+# Round 5 — Telemetry durability, persistence failure propagation, BMS/shunt authority, alarm safety policy (13 Sep 2026)
+
+Baseline auditor: `6dd991e` (merge PR #33). Auditor membedah area baru:
+telemetry/spool, energy persistence, storage/auth, lalu SocStateMachine +
+BMS + alarm registry — total 16 temuan p.437–p.452. Semua diverifikasi di
+source sebelum diperbaiki; prioritas diikuti sesuai urutan auditor
+(p.451 → p.445 → p.448/449 → p.439/452 → sisanya).
+
+## Ringkasan status round 5
+
+| Temuan | Severity | Status |
+|---|---|---|
+| p.437 spool reguler hilang saat reboot | 🔴 P1* | ✅ CLOSED — regular ring kini persist ke LittleFS |
+| p.438 spool()==true menyembunyikan eviksi | 🟠 P2 | ✅ CLOSED — SpoolResult eksplisit |
+| p.439 energy NVS failure tak terpropagasi | 🟠/🔴 P1 | ✅ CLOSED — bool + read-back verify + alarm |
+| p.440 legacy fallback mixed-generation | 🟠 P2 | ✅ CLOSED — migration-only + auto-normalisasi |
+| p.441 kontrak waktu lintas-layer | 🟠 P1 | 🔶 firmware-side evidence lengkap; GAS/PWA = audit berikutnya (sesuai rencana auditor) |
+| p.442 gap sequence vs spool vs reboot | 🟡 | ✅ firmware-side CLOSED — spoolDrops di envelope |
+| p.443 credential plaintext (app-level) | 🟠 P2 | ✅ CLOSED sbg posture alarm + dokumentasi urutan provisioning |
+| p.444 UART one-time reveal boundary | 🟠 P2 | ✅ CLOSED — auditable event + alarm DEFAULT_CREDENTIALS_ACTIVE |
+| p.445 SOC lastSyncTs campur domain waktu | 🔴 P1 | ✅ CLOSED — epoch domain tunggal + sanitasi legacy |
+| p.446 OCV kurva kasar | 🟠 P1 | ✅ gates + confidence LOW (kurva tetap honest-rough, menunggu data karakterisasi fisik) |
+| p.447 full-charge 100% hanya dari V+I | 🟠 P1 | ✅ CLOSED — BMS authority + evidence gates |
+| p.448 BMS authoritative abaikan faultFlags | 🟠 P1 | ✅ CLOSED — faultFlags==0 masuk gate |
+| p.449 cross-check hanya detector | 🟠 P1 | ✅ CLOSED — interlock (Suspect + authority suspension) |
+| p.450 update alarm existing tak durable | 🟠 P2 | ✅ CLOSED — persist saat eskalasi severity/pesan |
+| p.451 registry buang alarm aktif | 🔴 P1 | ✅ CLOSED — eviksi CLEARED-only, reject jujur |
+| p.452 SOC NVS failure tak dilaporkan | 🟠 P1 | ✅ CLOSED — bool + counter + alarm |
+
+## 1. Alarm registry tidak pernah mengorbankan state safety aktif (p.451, p.450)
+
+Kebijakan eviksi baru di `AlarmRegistry::raise()`:
+
+- Kandidat eviksi **hanya** entri CLEARED (tertua `clearedAt`, tie-break
+  `raisedAt` — memperbaiki pemilihan "oldest" yang sebelumnya tidak
+  terjamin).
+- Registry penuh entri ACTIVE/ACKNOWLEDGED → alarm baru **REJECTED**
+  jujur: `raise()` mengembalikan `false`, `overflowCount++`, log
+  rate-limited (60 s / kode berbeda). Rejection recoverable — evaluator
+  re-raise tiap tick; alarm masuk begitu slot dibebaskan. Eviksi alarm
+  aktif adalah kehilangan permanen dan silent — itu yang dihilangkan.
+- Saturasi dapat diamati: `overflowCount` di `/api/alarms` dan
+  `/api/diagnostics` (`alarmRegistryOverflow`).
+- Update existing yang MEANINGFUL (eskalasi severity / pesan berubah)
+  kini persist langsung — simetri dengan clear()/acknowledge() [p.450].
+  Pure refresh tetap menunggu checkpoint periodik (wear bound).
+
+## 2. Domain waktu SOC tunggal (p.445)
+
+Jalur full-charge semula menulis `_lastSyncTs = monotonicMs / 1000`
+(uptime-seconds) ke field yang dipersistenkan sebagai `lastSyncUnix` dan
+dibaca PWA sebagai epoch — setelah reboot tampil sebagai tanggal 1970.
+Fix: semua jalur sync (OCV, full-charge, manual, BMS) kini seragam
+`rtc.getUnixTime()` (0 = unsynced-honest, konvensi driver RTC).
+Load dari firmware lama membersihkan nilai implausibel (< 2020-01-01)
+menjadi 0 dengan log — nilai SOC sendiri tetap valid (CRC + basis lolos).
+
+## 3. Otoritas BMS vs INA219 ditegakkan (p.448, p.449)
+
+`BatteryCommManager::socAuthoritative()` kini menuntut
+`faultFlags == 0` DAN `!_mismatchActive` di samping locked + plausible +
+fresh. BMS yang melaporkan fault tidak lagi dikonsumsi sebagai kebenaran
+SOC; alarm BMS_FAULT tetap dinaikkan terpisah.
+
+Mismatch kini INTERLOCK, bukan sekadar detektor:
+
+- energyTask mengevaluasi cross-check **sebelum** tick integrasi
+  (keputusan arbitrase cycle ini menggate cycle ini).
+- Saat mismatch aktif: `snap.batteryCurrent.quality` didemote ke
+  **Suspect** → quality gate SocStateMachine (SOC FREEZE) dan
+  EnergyCounters (integrasi diblokir) sudah menolaknya — arus salah-tanda
+  tidak bisa lagi masuk senyap ke jalur SOC/energi.
+- Re-baseline `setSoc(bms.soc, "BMS_SYNC")` unreachable saat mismatch
+  (gate authority menolak BMS yang berselisih dengan shunt).
+- Konfirmasi full-charge juga defer saat mismatch [p.447].
+- Kedua instrumen non-authoritative sampai sepakat lagi; alarm
+  BMS_CURRENT_MISMATCH memberi tahu operator alasannya.
+
+## 4. Persistence fail-closed (p.439, p.452)
+
+`EnergyCounters::saveToNVS()`, `SocStateMachine::saveToNVS()`, dan
+`AlarmRegistry::saveToNVS()` kini mengembalikan `bool` dan memverifikasi:
+
+1. `Preferences::begin()` sukses,
+2. `putBytes` menulis penuh (size check),
+3. energy: **read-back memcmp** — menangkap korupsi bit yang lolos
+   size-only check.
+
+persistenceTask mengonversi kegagalan menjadi alarm STORAGE_ERROR
+(Critical) sekali per transisi gagal→pulih. Counter `persistFailures()`
+diekspos di `/api/diagnostics`. Device dengan NVS sekarat tidak lagi
+menunggu reboot untuk ketahuan.
+
+## 5. Spool reguler tahan reboot + semantik eksplisit (p.437, p.438)
+
+- Regular ring (8 × ~2.6 KB) kini di-flush ke snapshot LittleFS
+  `/spool_reg.bin` — atomic `.tmp → rename`, header magic/version +
+  CRC32 atas seluruh array, per-record CRC saat restore (record korup
+  di-drop jujur, dihitung).
+- Kebijakan wear-bounded: flush saat record pertama masuk episode
+  buffering, lalu maksimal 1× per 30 s selama ada pending; file dihapus
+  saat ring kosong (tidak ada resurreksi record yang sudah terkirim).
+  Jalur sehat tidak menyentuh file sama sekali. Reboot di tengah outage
+  kehilangan maksimal 1 interval flush (30 s) — kontrak yang sebelumnya
+  "hilang seluruhnya" (RAM-only).
+- `spool()` mengembalikan `SpoolResult`:
+  `Stored | EvictedOldest | Rejected`. Caller (publishTelemetry)
+  mem-log transisi eviksi; `dropCount` masuk envelope sebagai
+  `health.spoolDrops` [p.442] — bersama sequence + reboot margin, backend
+  kini bisa membedakan gap outage vs overflow vs reboot.
+
+## 6. Evidence gates untuk sinkronisasi V-based (p.446, p.447)
+
+`SocSyncEvidence` (plain data, engine bebas dependensi Comm):
+
+- **Full-charge** (event basis SOC "100%"): BMS sehat = otoritas —
+  konfirmasi memerlukan persetujuan (SOC ≥ `BMS_FULL_AGREE_PCT` 95%).
+  BMS sehat bilang "belum penuh" → DEFER (tetap FullCandidate, tidak
+  pernah paksa 100%). Cells buruk (overvoltage > 3.65 V / imbalance >
+  250 mV) → defer. Mismatch aktif → defer. Suhu di luar [0, 45] °C →
+  defer. Bukti tak diketahui (tanpa BMS/sensor) → jalur V+I legacy
+  berlaku (fallback terdokumentasi).
+- **OCV-at-rest**: resolusi SOC dari OCV ditolak saat cells buruk atau
+  suhu di luar jendela — rejeksi, bukan kurva kompensasi rekaan (tidak
+  ada dataset karakterisasi; kejujuran dipertahankan). Provenance
+  OCV ditandai `method=OCV_AT_REST, confidence=LOW`.
+- Kurva kasar TIDAK diubah/dipalsukan — tetap menunggu data
+  karakterisasi fisik (sejalan kejujuran INA219 round 4).
+
+## 7. Legacy energy = migration-only (p.440)
+
+Path legacy 6 key kini: deteksi kehadiran key (`isKey`, bukan
+default-vs-nol), lalu **normalisasi langsung** ke blob atomik — path
+dieksekusi tepat sekali per device. `loadedFromLegacy()` diekspos di
+diagnostics untuk fleet visibility.
+
+## 8. Boundary credential operasional (p.443, p.444)
+
+- **p.443**: PRODUCTION build di flash tak terenkripsi → alarm Critical
+  `SECURITY_PROVISIONING` saat boot (di samping OTA yang sudah menolak).
+  Urutan provisioning yang salah sekarang teriak di telemetry, bukan
+  hanya di `/api/security`.
+- **p.444**: reveal UART satu kali tetap (kontrak commissioning F-G18)
+  namun kini: (1) event teraudit dengan marker SECURITY; (2) alarm
+  Warning `DEFAULT_CREDENTIALS_ACTIVE` aktif sampai password diganti —
+  flag `credentialsProvisioned` dipersist di config.json (`credProv`),
+  ditutup di endpoint ganti password, diekspos di `/api/security`
+  (`credentialBoundary`). Config lama tanpa flag dianggap
+  sudah-provisioned (tidak ada nagging retroaktif).
+
+## 9. Verifikasi Round 5
+
+- `scripts/test_audit_round5_2026_09.py`: **71/71 PASS** (wiring statis
+  8 grup + mirror Python: kebijakan eviksi alarm 4 kasus, tabel keputusan
+  full-charge defer 8 kasus, interlock mismatch 3 kasus, sanitasi
+  timestamp 3 kasus, semantik SpoolResult 3 kasus).
+- Regresi: seluruh 30 skrip `scripts/test_*.py` hijau.
+- Compile: `pio run -e development -e staging -e production` SUCCESS
+  (RAM 36.8%, flash dev 92.6%).
+
+## 10. Yang tetap menunggu (tidak berubah dari round 4)
+
+1. **Gate A/B provisioning** + T9–T13 + INA-001..004 (fisik).
+2. **p.441/p.442 lintas-layer**: firmware-side evidence kini lengkap
+   (timeQuality, uptimeSeconds, spoolDrops, sequence, monotonicMs
+   tersedia di envelope) — bedah GAS/Sheets/PWA menjadi audit
+   berikutnya persis seperti rencana auditor (p.430/431).
+3. Keputusan produk p.429 (retensi journal) — kini disertai bukti bahwa
+   alarm/energy/SOC persistence sudah fail-closed di sisi device.

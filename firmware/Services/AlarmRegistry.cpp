@@ -48,19 +48,29 @@ uint8_t AlarmRegistry::_findIdx(const char* code) const {
   return 0xFF;
 }
 
-void AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char* message) {
-  if (!code) return;
+bool AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char* message) {
+  if (!code) return false;
   uint8_t idx = _findIdx(code);
   if (idx == 0xFF) {
     // New alarm
     if (_count >= MAX_ALARMS) {
-      // Evict oldest CLEARED
+      // [AUDIT 2026-09 ROUND 5 / p.451] Eviction candidates are CLEARED
+      // entries ONLY. ACTIVE / ACKNOWLEDGED alarms are safety state and are
+      // NEVER sacrificed to make room — the old fallback ("drop the
+      // lowest-severity active") silently deleted live safety state, and its
+      // severity scan had no timestamp tie-break so "oldest" was not even
+      // guaranteed. Rejection here is recoverable: evaluators re-raise every
+      // tick, so the alarm is admitted the moment a slot frees.
       uint8_t oldest = 0xFF;
-      uint32_t oldestTime = 0xFFFFFFFF;
+      uint32_t oldestClearedAt = 0xFFFFFFFF;
+      uint32_t oldestRaisedAt = 0xFFFFFFFF;   // tie-break: stable order
       for (uint8_t i = 0; i < _count; i++) {
         if (_alarms[i].lifecycle == Core::AlarmLifecycle::Cleared &&
-            _alarms[i].clearedAt < oldestTime) {
-          oldestTime = _alarms[i].clearedAt;
+            (_alarms[i].clearedAt < oldestClearedAt ||
+             (_alarms[i].clearedAt == oldestClearedAt &&
+              _alarms[i].raisedAt < oldestRaisedAt))) {
+          oldestClearedAt = _alarms[i].clearedAt;
+          oldestRaisedAt = _alarms[i].raisedAt;
           oldest = i;
         }
       }
@@ -69,11 +79,22 @@ void AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char*
         _count--;
         idx = _count;
       } else {
-        // No cleared alarms — drop the lowest-severity oldest active
-        idx = 0;
-        for (uint8_t i = 1; i < _count; i++) {
-          if ((uint8_t)_alarms[i].severity < (uint8_t)_alarms[idx].severity) idx = i;
+        // Registry saturated with non-cleared alarms — REJECT honestly.
+        _overflowCount++;
+        static uint32_t lastOverflowLogMs = 0;
+        static char lastOverflowCode[Alarm::CODE_LEN] = {0};
+        uint32_t now = millis();
+        if (now - lastOverflowLogMs > 60000UL ||
+            strncmp(lastOverflowCode, code, Alarm::CODE_LEN) != 0) {
+          lastOverflowLogMs = now;
+          strncpy(lastOverflowCode, code, Alarm::CODE_LEN - 1);
+          lastOverflowCode[Alarm::CODE_LEN - 1] = '\0';
+          Log.append(Core::LogType::StorageError,
+                     String("[ALARM] registry saturated (") + _count +
+                     " active/ack) — new alarm REJECTED (not stored): " + code +
+                     ". Clear or acknowledge alarms to free slots.", -1);
         }
+        return false;   // honest: the caller knows the alarm was not stored
       }
     }
     Alarm& a = _alarms[idx];
@@ -93,18 +114,34 @@ void AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char*
     }
     if (idx == _count) _count++;
     _dirty = true;
+    // [p.450] A NEW alarm is a state transition — durable immediately (the
+    // periodic checkpoint remains as backstop for multi-raise bursts).
+    saveToNVS();
     Log.append(Core::LogType::AlarmActive,
                String("[ALARM:") + code + "] " + (message ? message : ""), -1);
+    return true;
   } else {
     // Refresh existing alarm
     Alarm& a = _alarms[idx];
+    bool meaningful = false;   // [p.450] durability applies to real mutations only
     // Upgrade severity (never downgrade)
-    if ((uint8_t)sev > (uint8_t)a.severity) a.severity = sev;
+    if ((uint8_t)sev > (uint8_t)a.severity) { a.severity = sev; meaningful = true; }
     a.lastUpdatedAt = Drivers::rtc.getUnixTime();
-    if (message && message[0]) {
+    if (message && message[0] && strncmp(a.message, message, sizeof(a.message)) != 0) {
       strncpy(a.message, message, sizeof(a.message) - 1);
       a.message[sizeof(a.message) - 1] = '\0';
+      meaningful = true;
     }
+    // [p.450] Severity escalation / message change = safety-relevant update →
+    // persist NOW, same contract as clear()/acknowledge(). A pure refresh
+    // (same severity, same message) only touches lastUpdatedAt and rides the
+    // periodic checkpoint — writing NVS on every evaluator tick (≈1 Hz × N
+    // alarms) would burn flash without adding durability guarantees.
+    if (meaningful) {
+      _dirty = true;
+      saveToNVS();
+    }
+    return true;
   }
 }
 
@@ -163,7 +200,7 @@ uint8_t AlarmRegistry::copyActiveAlarms(Alarm* dst, uint8_t max) const {
   return n;
 }
 
-void AlarmRegistry::saveToNVS() {
+bool AlarmRegistry::saveToNVS() {
   AlarmPersistHeader hdr = {};
   hdr.magic = ALARM_NVS_MAGIC;
   hdr.version = ALARM_STATE_VERSION;
@@ -177,12 +214,19 @@ void AlarmRegistry::saveToNVS() {
   hdr.crc32 = crc;
 
   Preferences p;
-  if (p.begin("plts_alarm", false)) {
-    p.putBytes("hdr", &hdr, sizeof(hdr));
-    if (_count > 0) p.putBytes("arr", _alarms, _count * sizeof(Alarm));
-    p.end();
-    _dirty = false;
+  if (!p.begin("plts_alarm", false)) {
+    _persistFailures++;   // [p.439-family] fail-closed accounting, no fake "saved"
+    return false;
   }
+  size_t w1 = p.putBytes("hdr", &hdr, sizeof(hdr));
+  size_t w2 = (_count > 0) ? p.putBytes("arr", _alarms, _count * sizeof(Alarm)) : 1;
+  p.end();
+  if (w1 != sizeof(hdr) || w2 == 0) {
+    _persistFailures++;
+    return false;
+  }
+  _dirty = false;
+  return true;
 }
 
 void AlarmRegistry::loadFromNVS() {

@@ -45,6 +45,7 @@ void ConfigStore::initDefaultUserConfig() {
   strcpy(Core::wwwUser, "admin");
   Utils::generateRandomBytes(Core::salt, Core::SALT_LEN);
   Core::iterations = Core::PBKDF2_ITERATIONS;
+  Core::credentialsProvisioned = false;   // [p.444] default credential active until changed
   uint8_t hash[32];
   if (!Utils::pbkdf2HmacSha256(defaultPass, strlen(defaultPass),
                                Core::salt, Core::SALT_LEN,
@@ -71,6 +72,15 @@ void ConfigStore::initDefaultUserConfig() {
   Serial.println(F("[ConfigStore] Hanya ditampilkan SEKALI saat di-generate."));
   Serial.println(F("[ConfigStore] Segera ganti setelah login pertama!"));
   Serial.println(F("========================================================="));
+  // [AUDIT 2026-09 ROUND 5 / p.444] SECURITY BOUNDARY, made operational:
+  // (1) the UART reveal is an auditable event, not just console noise —
+  // logged with an explicit security marker; (2) the device will hold the
+  // DEFAULT_CREDENTIALS_ACTIVE alarm until the operator changes the
+  // password, so "reveal window still open" is visible in telemetry.
+  Services::Log.append(Core::LogType::ConfigurationChanged,
+             "SECURITY: admin credential GENERATED and revealed via UART "
+             "(commissioning one-time reveal). DEFAULT_CREDENTIALS_ACTIVE "
+             "alarm stays on until first password change.", -1);
   memset(defaultPass, 0, sizeof(defaultPass));
 }
 
@@ -128,6 +138,11 @@ void ConfigStore::loadUserConfig() {
     Core::iterations = doc["iterations"] | Core::PBKDF2_ITERATIONS;
     if (Core::iterations < 1000) Core::iterations = Core::PBKDF2_ITERATIONS;
   }
+  // [p.444] Commissioning boundary flag — absent on legacy config.json means
+  // "pre-flag state": treat as already-provisioned (no retroactive nagging
+  // for devices whose operator changed the password before this field
+  // existed; a re-generation re-falsifies it explicitly).
+  Core::credentialsProvisioned = doc["credProv"] | true;
 }
 
 void ConfigStore::saveUserConfig() {
@@ -138,6 +153,7 @@ void ConfigStore::saveUserConfig() {
   Utils::bytesToHex(Core::salt, Core::SALT_LEN, saltHex);
   doc["salt"] = saltHex;              // [FW-06] same key as the loader
   doc["iterations"] = Core::iterations;  // [FW-06] same key as the loader
+  doc["credProv"] = Core::credentialsProvisioned;   // [p.444]
   Utils::appendCRC(doc);
   String out; serializeJson(doc, out);
   if (fs.atomicWrite(Core::PATH_CONFIG_JSON, out)) {

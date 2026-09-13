@@ -81,7 +81,7 @@ Core::MeasurementQuality SocStateMachine::getSocQuality() const {
   return Core::MeasurementQuality::Estimated;
 }
 
-void SocStateMachine::saveToNVS() {
+bool SocStateMachine::saveToNVS() {
   SocPersistState st = {};
   st.magic = SOC_NVS_MAGIC;
   st.version = SOC_STATE_VERSION;
@@ -93,10 +93,17 @@ void SocStateMachine::saveToNVS() {
   st.crc32 = Utils::crc32((const uint8_t*)&st, sizeof(st) - sizeof(uint32_t));
 
   Preferences p;
-  if (p.begin("plts_soc", false)) {
-    p.putBytes("state", &st, sizeof(st));
-    p.end();
+  if (!p.begin("plts_soc", false)) {
+    _persistFailures++;   // [p.452] honest failure accounting — never fake "saved"
+    return false;
   }
+  size_t w = p.putBytes("state", &st, sizeof(st));
+  p.end();
+  if (w != sizeof(st)) {
+    _persistFailures++;
+    return false;
+  }
+  return true;
 }
 
 void SocStateMachine::loadFromNVS() {
@@ -121,6 +128,20 @@ void SocStateMachine::loadFromNVS() {
     return;
   }
   if (!Core::isValidFloat(st.soc) || st.soc < 0.0f || st.soc > 100.0f) return;
+
+  // [p.445] Single time-domain enforcement on load: lastSyncUnix must be a
+  // plausible UNIX epoch for this product. Builds ≤ 1.9.4 wrote UPTIME
+  // seconds into this field on the full-charge path (monotonicMs / 1000),
+  // producing values like 43812 that read as 1970-01-01 epoch dates after a
+  // reboot. Anything older than 2020-01-01 is treated as "unknown sync
+  // time" (0) — the SOC value itself is still valid (CRC + basis checks
+  // passed), only the sync timestamp is discarded.
+  if (st.lastSyncUnix != 0 && st.lastSyncUnix < 1577836800u) {
+    Log.append(Core::LogType::SocBaselineCorrected,
+               "Persisted SOC sync timestamp in wrong time domain (legacy "
+               "uptime-seconds) — sync time reset to unknown", 0);
+    st.lastSyncUnix = 0;
+  }
 
   _soc = st.soc;
   _coulombBaselineAh = st.coulombBaselineAh;
@@ -208,11 +229,43 @@ void SocStateMachine::tick(float voltage, float current,
   // [FW-12] Boot-OCV-at-rest resolution: while SOC is UNKNOWN, track how long
   // the pack has been at rest. Open-circuit voltage is only a valid SOC basis
   // at rest — this is evidence, not fabrication.
+  //
+  // [AUDIT 2026-09 ROUND 5 / p.446] OCV-based resolution now additionally
+  // REJECTS the sync when the available evidence says the pack voltage is
+  // not a trustworthy SOC proxy:
+  //   - BMS cell imbalance  → the pack mean OCV does not represent any cell;
+  //   - temperature outside [OCV_TEMP_MIN_C, OCV_TEMP_MAX_C] → LiFePO4 OCV
+  //     is too temperature-dependent (rejection, NOT an invented
+  //     compensation curve — no characterized dataset exists for that).
+  // When the evidence is UNKNOWN (no BMS, no temp sensor) the legacy
+  // rest-window-only path applies — the documented fallback.
   if (!_socValid) {
     bool atRest = (std::fabs(current) < Core::cfgIdleCurrentThreshold) &&
                   Core::isValidFloat(voltage) &&
                   voltage >= Core::cfgLowVoltage && voltage <= Core::cfgFullVoltage;
-    if (atRest) {
+    // Evidence-based rejection (unknown evidence ≠ rejection — fail-open only
+    // for genuinely absent instruments, matching the rest of the design).
+    bool ocvBlocked = _evidence.cellsBad;
+    if (_evidence.tempValid &&
+        (_evidence.temperatureC < OCV_TEMP_MIN_C ||
+         _evidence.temperatureC > OCV_TEMP_MAX_C)) {
+      ocvBlocked = true;
+    }
+    if (atRest && ocvBlocked) {
+      // Restart the rest window — the moment evidence turns sane again the
+      // 30-minute window restarts from scratch. One rate-limited log line.
+      if (_restStartMonotonicMs != 0) {
+        static uint32_t lastOcvRejectLogMs = 0;
+        if (monotonicMs - lastOcvRejectLogMs > 300000UL) {   // 5 min
+          lastOcvRejectLogMs = monotonicMs;
+          Log.append(Core::LogType::SocBaselineCorrected,
+                     "OCV-at-rest SOC resolution BLOCKED (cell imbalance / "
+                     "temperature out of range) — SOC stays UNKNOWN", 0);
+        }
+      }
+      _restStartMonotonicMs = 0;
+      _restWindowSatisfied = false;
+    } else if (atRest) {
       if (_restStartMonotonicMs == 0) _restStartMonotonicMs = monotonicMs;
       if ((monotonicMs - _restStartMonotonicMs) >= REST_WINDOW_SEC * 1000u &&
           !_restWindowSatisfied) {
@@ -221,7 +274,7 @@ void SocStateMachine::tick(float voltage, float current,
         _soc = clampSoc(ocvSoc);
         _coulombBaselineAh = (ocvSoc - 50.0f) * capAh / 100.0f;
         _socValid = true;
-        _lastSyncTs = Drivers::rtc.getUnixTime();
+        _lastSyncTs = Drivers::rtc.getUnixTime();   // [p.445] epoch domain, 0 = unsynced-honest
         _state = Core::SocState::Synchronized;
         _socFromOcv = true;    // v1.6.0 provenance: OCV is the basis now
         _recordBaselineCorrection(NAN, ocvSoc, voltage, current,
@@ -257,20 +310,58 @@ void SocStateMachine::tick(float voltage, float current,
         _state = Core::SocState::Normal;
       }
       break;
-    case Core::SocState::FullCandidate:
+    case Core::SocState::FullCandidate: {
       // Directive §38: voltage transient must not reset SOC too easily
       if (!vFull || !iTrickle) {
         _state = Core::SocState::Normal;
         _fullCandidateStartMs = 0;
       } else if ((monotonicMs - _fullCandidateStartMs) >= (Core::cfgFullChargePersistenceSec * 1000)) {
-        // Persistence elapsed → confirm full
+        // ================================================================
+        // [AUDIT 2026-09 ROUND 5 / p.447] Full-charge is a SOC BASIS event.
+        // Declaring "100%" from pack V + I alone can false-positive when a
+        // cell is already overcharged, the pack is imbalanced, the battery
+        // is out of temperature range, or a healthy BMS gauge reports a
+        // different SOC. Authority policy (explicit, fail-closed):
+        //   - BMS healthy (locked + fresh + no faults + no current mismatch)
+        //     → the BMS is the SOC authority: confirmation additionally
+        //     requires agreement (BMS SOC >= BMS_FULL_AGREE_PCT). A healthy
+        //     BMS reporting "not full" DEFERS confirmation — it never forces
+        //     100%. Cells reported and bad (overvoltage/imbalance) → defer.
+        //   - BMS↔shunt current mismatch ACTIVE → defer: with the two
+        //     current instruments in dispute, neither V+I reading chain is
+        //     trustworthy enough to mint a new 100% SOC basis.
+        //   - Temperature evidence available and outside the window → defer.
+        //   - No BMS / no temp sensor (unknown evidence) → legacy V+I path
+        //     applies (documented fallback — this is how a BMS-less system
+        //     anchors its coulomb engine at all).
+        // ================================================================
+        bool bmsBlocks = _evidence.bmsHealthy &&
+                        (!_evidence.bmsAgreesFull || _evidence.cellsBad);
+        bool mismatchBlocks = _evidence.mismatchActive;   // instruments in dispute
+        bool tempBlocks = _evidence.tempValid &&
+                         (_evidence.temperatureC < OCV_TEMP_MIN_C ||
+                          _evidence.temperatureC > OCV_TEMP_MAX_C);
+        if (bmsBlocks || mismatchBlocks || tempBlocks) {
+          static uint32_t lastDeferLogMs = 0;
+          if (monotonicMs - lastDeferLogMs > 300000UL) {   // 5 min rate limit
+            lastDeferLogMs = monotonicMs;
+            Log.append(Core::LogType::SocBaselineCorrected,
+                       "Full-charge confirmation DEFERRED (BMS authority "
+                       "disagrees / cells or temperature out of range) — "
+                       "V+I candidate stays unconfirmed", 0);
+          }
+          // Stay FullCandidate — re-evaluated next tick; the candidate window
+          // keeps running because the V+I condition itself still holds.
+          break;
+        }
+        // Persistence elapsed + evidence does not contradict → confirm full
         float oldSoc = _soc;
         _soc = 100.0f;
         _coulombBaselineAh = Core::cfgBatteryCapacityAh * 0.5f;
         _socValid = true;                // [FW-12] full charge = valid basis
         _socFromOcv = false;             // v1.6.0: full-charge sync replaces OCV basis
         _state = Core::SocState::FullConfirmed;
-        _lastSyncTs = monotonicMs / 1000;  // store as seconds for telemetry
+        _lastSyncTs = Drivers::rtc.getUnixTime();  // [p.445] UNIX EPOCH — was monotonicMs/1000 (uptime-seconds domain mixed into a field persisted and consumed as Unix time; after reboot it read as a 1970 date). 0 when RTC unsynced = honest "unknown".
         saveToNVS();                       // [FW-12] persist immediately
         _recordBaselineCorrection(oldSoc, 100.0f, voltage, current,
                                     (monotonicMs - _fullCandidateStartMs) / 1000,
@@ -281,6 +372,7 @@ void SocStateMachine::tick(float voltage, float current,
         }
       }
       break;
+    }
     case Core::SocState::FullConfirmed:
       if (current < -Core::cfgIdleCurrentThreshold) {
         _state = Core::SocState::Normal;

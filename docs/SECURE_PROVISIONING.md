@@ -48,6 +48,11 @@ Shipped in this release (see `Services/SecurityPosture.*`):
    - PRODUCTION builds **refuse every OTA while flash encryption is off**
      (compile escape hatch `PLTS_ALLOW_UNENCRYPTED_OTA` exists for a sealed
      bench unit only — see `firmware/Core/Config.h`).
+   - **[AUDIT ROUND 5 / p.443]** The same wrong-order state is now also
+     *operationally loud*: a PRODUCTION build on unencrypted flash raises the
+     persistent `SECURITY_PROVISIONING` Critical alarm at boot. The device
+     says it in telemetry until Gate A completes — it is no longer a fact
+     discoverable only via `/api/security`.
    - ANY build **refuses OTA when the anti-rollback ledger is inconsistent
      with the eFuse floor** (NVS rolled back / wiped after epochs burned —
      rollback evidence).
@@ -55,6 +60,15 @@ Shipped in this release (see `Services/SecurityPosture.*`):
      burned security epoch** — even when the running image is itself older
      (e.g. after a bootloader rollback). Patch-level updates within the
      epoch remain free.
+2b. **[AUDIT ROUND 5 / p.444] Commissioning credential boundary:**
+   the one-time UART reveal of the generated admin password stays (F-G18
+   commissioning contract) but is now an *auditable, closable* window:
+   - the generation moment is logged with an explicit SECURITY marker;
+   - the `DEFAULT_CREDENTIALS_ACTIVE` Warning alarm stays raised until the
+     operator changes the password (PWA Settings → Security), mirrored as
+     `credentialBoundary.defaultCredentialActive` on `/api/security`;
+   - the flag is persisted (`credProv` in config.json); configs written
+     before the flag existed are treated as already provisioned.
 3. **Burns the anti-rollback floor on activation** — when a freshly updated
    image survives its healthy window (`esp_ota_mark_app_valid_cancel_
    rollback`), a PRODUCTION build burns one more eFuse bit (BLK3

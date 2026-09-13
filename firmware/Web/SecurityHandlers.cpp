@@ -21,6 +21,7 @@
 #include "SecurityHandlers.h"
 #include "HttpServer.h"
 #include "Common.h"
+#include "../Core/Globals.h"        // [p.444] credentialsProvisioned
 #include "../Services/SecurityPosture.h"
 #include <ArduinoJson.h>
 
@@ -123,6 +124,19 @@ void handleGet() {
     }
   }
   doc["provisioning"] = verdict;
+  // [AUDIT 2026-09 ROUND 5 / p.444] Commissioning credential boundary —
+  // false while the admin password is still the generated default (the one
+  // revealed once via UART at generation). The DEFAULT_CREDENTIALS_ACTIVE
+  // alarm mirrors this in telemetry so the open window is operationally
+  // visible, not only fetchable on demand.
+  {
+    JsonObject cb = doc.createNestedObject("credentialBoundary");
+    cb["defaultCredentialActive"] = !Core::credentialsProvisioned;
+    cb["detail"] = Core::credentialsProvisioned
+        ? "operator changed the admin password (commissioning complete)"
+        : "admin password is still the UART-revealed default — change it "
+          "(PWA Settings \u2192 Security) to close the boundary";
+  }
   doc["verifyHint"] = "compare runningImage.sha256 with release.json "
                       "firmwareSha256 (scripts/verify_flashed_image.py "
                       "--device-url http://<device>/api/security --release-json "

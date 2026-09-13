@@ -210,6 +210,10 @@ namespace Core {
   char siteName[64] = "Site A";
   char apPassword[33] = "PLTS-AP-PASSWORD";
   bool calibrationDirty = false;
+  // [AUDIT 2026-09 ROUND 5 / p.444] false while the admin password is still
+  // the generated default (UART one-time reveal window effectively open).
+  // Set true on the first successful operator password change.
+  bool credentialsProvisioned = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +371,21 @@ void setup() {
   // provisioning verdict and refuses nothing by itself (policy is enforced
   // at the OTA boundary, fail-closed there).
   Services::securityPosture.begin();
+  // [AUDIT 2026-09 ROUND 5 / p.443] Wrong provisioning order made OPERATIONAL:
+  // a PRODUCTION build on unencrypted flash is exactly the state the auditor
+  // flagged (bench/pre-provisioning devices holding production credentials
+  // readable from a plaintext NVS dump). OTA already refuses in this state;
+  // the persistent alarm makes the device SAY it, in telemetry, until Gate A
+  // provisioning (espefuse flash-encryption) is completed. Development and
+  // staging builds are exempt by design.
+#ifdef PRODUCTION_BUILD
+  if (!Services::securityPosture.flashEncryptionEnabled()) {
+    Services::alarms.raise(Core::AlarmCode::SECURITY_PROVISIONING,
+                 Core::AlarmSeverity::Critical,
+                 "Production firmware on UNENCRYPTED flash — run Gate A "
+                 "provisioning (docs/SECURE_PROVISIONING.md); OTA refused");
+  }
+#endif
   Services::ota.begin();
 
   // WiFi + time
@@ -965,6 +984,75 @@ void energyTask(void* pv) {
   while (true) {
     esp_task_wdt_reset();
     if (xQueueReceive(measurementQueue, &snap, pdMS_TO_TICKS(500)) == pdTRUE) {
+      // -----------------------------------------------------------------
+      // v1.6.0 — BMS/inverter snapshot + SOC provenance cascade, evaluated
+      // BEFORE the integration ticks so this cycle's arbitration decision
+      // gates THIS cycle's integration.
+      //   BMS (LOCKED + fresh + plausible SOC + faultFlags == 0 + no current
+      //   mismatch) is AUTHORITATIVE for SOC [p.448]; the coulomb engine
+      //   keeps running underneath as the warm fallback and is re-baselined
+      //   to the BMS SOC every 60 s so a later BMS dropout hands over
+      //   seamlessly (never a jump, never a silent switch).
+      // -----------------------------------------------------------------
+      Comm::BmsData bms = Comm::batteryComm.getData();
+      uint32_t nowMs = snap.monotonicMs;
+      bool bmsAuthoritative = Comm::batteryComm.socAuthoritative();
+
+      // Cross-check BMS current vs INA219 shunt (redundancy — catches wrong
+      // sign conventions and failing shunts within one poll cycle).
+      float mismatchA = Comm::batteryComm.crossCheckShunt(snap.batteryCurrent.value, nowMs);
+
+      // -----------------------------------------------------------------
+      // [AUDIT 2026-09 ROUND 5 / p.449 — INTERLOCK] A sustained BMS↔shunt
+      // disagreement means one of the two current instruments is wrong, and
+      // nothing in the data can say which. Previously the mismatch only
+      // annotated the displayed SOC as Suspect while the shunt kept feeding
+      // the SOC/energy integrators at Valid quality — exactly the path a
+      // wrong-sign current takes to silently reverse SOC. Now the mismatch
+      // is an INTERLOCK: while active, the shunt current is demoted to
+      // Suspect, which the quality gates of SocStateMachine and
+      // EnergyCounters already block for integration (SOC FREEZE, no
+      // phantom energy). Both instruments are non-authoritative until they
+      // agree again — the alarm (below) tells the operator why.
+      // -----------------------------------------------------------------
+      bool mismatchActive = Comm::batteryComm.isMismatchActive();
+      if (mismatchActive) {
+        snap.batteryCurrent.quality = Core::MeasurementQuality::Suspect;
+      }
+
+      // -----------------------------------------------------------------
+      // [AUDIT 2026-09 ROUND 5 / p.446 + p.447] SOC sync evidence for the
+      // two V-based sync events (boot OCV-at-rest, full-charge confirm).
+      // Plain-data evidence keeps SocStateMachine free of Comm deps; the
+      // ENGINE decides from evidence, the TASK gathers it.
+      // -----------------------------------------------------------------
+      Services::SocSyncEvidence ev = {};
+      ev.bmsHealthy = bmsAuthoritative;            // new gate: no faults, no mismatch
+      ev.mismatchActive = mismatchActive;
+      if (Comm::batteryComm.isLocked() &&
+          bms.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000)) {
+        // Cells + temperature evidence come from the BMS whenever its data
+        // is live — independent of SOC authority (a mismatched CURRENT does
+        // not invalidate reported CELL VOLTAGES or the battery temperature).
+        if (Core::isValidFloat(bms.cellVoltageMin) && Core::isValidFloat(bms.cellVoltageMax)) {
+          float cellDelta = bms.cellVoltageMax - bms.cellVoltageMin;
+          ev.cellsBad = (cellDelta > Core::BMS_CELL_IMBALANCE_V) ||
+                        (bms.cellVoltageMax > Core::BMS_CELL_OVERVOLTAGE_V);
+        }
+        if (Core::isValidFloat(bms.temperature)) {
+          ev.tempValid = true; ev.temperatureC = bms.temperature;
+        } else if (snap.temperature.isValid()) {
+          ev.tempValid = true; ev.temperatureC = snap.temperature.value;
+        }
+        if (ev.bmsHealthy) {
+          ev.bmsAgreesFull = (bms.soc >= Core::BMS_FULL_AGREE_PCT);
+        }
+      } else if (snap.temperature.isValid()) {
+        // BMS absent: ambient temperature is the only thermal evidence.
+        ev.tempValid = true; ev.temperatureC = snap.temperature.value;
+      }
+      Services::socStateMachine.setSyncEvidence(ev);
+
       // Phase 13-D: tick() now accepts monotonicMs and computes dt internally.
       // Services enforce quality gate (only Valid integrates) and dt bounds.
       // No wall-clock used for integration. No fabricated dt fallback.
@@ -975,23 +1063,10 @@ void energyTask(void* pv) {
                             snap.batteryVoltage.quality, snap.batteryCurrent.quality,
                             snap.monotonicMs);
 
-      // -----------------------------------------------------------------
-      // v1.6.0 — BMS/inverter merge + SOC provenance cascade.
-      // BMS (LOCKED + fresh + plausible SOC) is AUTHORITATIVE for SOC;
-      // the coulomb engine keeps running underneath as the warm fallback and
-      // is re-baselined to the BMS SOC every 60 s so a later BMS dropout
-      // hands over seamlessly (never a jump, never a silent switch).
-      // -----------------------------------------------------------------
-      Comm::BmsData bms = Comm::batteryComm.getData();
-      uint32_t nowMs = snap.monotonicMs;
-      bool bmsAuthoritative = Comm::batteryComm.socAuthoritative();
-
-      // Cross-check BMS current vs INA219 shunt (redundancy — catches wrong
-      // sign conventions and failing shunts within one poll cycle).
-      float mismatchA = Comm::batteryComm.crossCheckShunt(snap.batteryCurrent.value, nowMs);
-
       if (bmsAuthoritative) {
         // Periodic re-baseline of the coulomb engine to BMS truth.
+        // [p.449] unreachable while a mismatch is active — the gate itself
+        // refuses authority to a BMS that disagrees with the shunt.
         if (nowMs - lastBmsBaselineSyncMs >= 60000UL) {
           Services::socStateMachine.setSoc(bms.soc, "BMS_SYNC");
           lastBmsBaselineSyncMs = nowMs;
@@ -1027,8 +1102,14 @@ void energyTask(void* pv) {
           latestStatus.battery.soc.value = Services::socStateMachine.getSoc();
           latestStatus.battery.soc.quality = Services::socStateMachine.getSocQuality();
           latestStatus.battery.soc.source = Core::MeasurementSource::Estimated;
-          latestStatus.battery.soc.method = "ESTIMATED";
-          latestStatus.battery.soc.confidence = "MEDIUM";
+          // [p.446] OCV-derived basis is honestly LOW confidence: the 15S
+          // LiFePO4 OCV curve is a coarse hard-coded rest map (no per-cell
+          // normalization, no characterized calibration dataset) — the
+          // provenance label must not imply coulomb-grade accuracy.
+          latestStatus.battery.soc.method = Services::socStateMachine.socCameFromOcv()
+              ? "OCV_AT_REST" : "ESTIMATED";
+          latestStatus.battery.soc.confidence = Services::socStateMachine.socCameFromOcv()
+              ? "LOW" : "MEDIUM";
           latestStatus.battery.soc.provenance = Services::socStateMachine.isSocValid()
               ? Core::SocProvenance::ShuntCoulomb
               : Core::SocProvenance::Unknown;
@@ -1215,6 +1296,11 @@ void publishTelemetry() {
     // [P2-009] REAL spool occupancy — was hardcoded 0 (a fabricated "all ok").
     latestStatus.health.spoolSize = Services::telemetrySpool.pendingCount() +
                                     Services::telemetrySpool.criticalPendingCount();
+    // [p.442] Dropped-record counter in the envelope: with the monotonic
+    // sequence + reboot margin, the backend can now distinguish a
+    // spool-overflow gap from a reboot gap from a device that stopped
+    // sending — evidence for the cross-layer telemetry audit.
+    latestStatus.health.spoolDrops = Services::telemetrySpool.dropCount();
     latestStatus.health.highestAlarmSeverity = Services::alarms.highestActiveSeverity();
     // [FW-23 REMEDIATION 2026-08] Alarms — ACTIVE ONLY (Active + Acknowledged,
     // never Cleared). The old pointer + count pair exposed the full registry
@@ -1246,8 +1332,22 @@ void publishTelemetry() {
   // spooled, so transient broker failures silently dropped telemetry).
   bool delivered = Network::mqttTelemetry.publishStatus(json.c_str(), json.length());
   if (!delivered) {
-    Services::telemetrySpool.spool(snapshot.sequence, snapshot.timestamp,
-                                   json.c_str(), (uint16_t)json.length());
+    Services::SpoolResult sr = Services::telemetrySpool.spool(
+        snapshot.sequence, snapshot.timestamp, json.c_str(), (uint16_t)json.length());
+    // [p.438] Explicit outcome handling — EvictedOldest is a data-loss event
+    // (an older buffered record was just dropped), logged so the operator
+    // sees the store-and-forward boundary being hit instead of trusting a
+    // silent "accepted". Rejected (dup/invalid) is already counted in
+    // dropCount and surfaced via health.spoolDrops [p.442].
+    static bool evictLogged = false;
+    if (sr == Services::SpoolResult::EvictedOldest && !evictLogged) {
+      evictLogged = true;
+      Services::Log.append(Core::LogType::StorageError,
+          String("Telemetry spool ring FULL — oldest buffered record evicted "
+                 "(dropCount=") + Services::telemetrySpool.dropCount() + ")", -1);
+    } else if (sr == Services::SpoolResult::Stored) {
+      evictLogged = false;
+    }
   }
   // Drain the spool oldest-first when the transport is fully operational.
   Network::mqttTelemetry.replaySpool();
@@ -1301,11 +1401,34 @@ void persistenceTask(void* pv) {
     esp_task_wdt_reset();
     // Save energy counters + SOC state (brief §45)
     // [FW-12 CLOSED 2026-08] SOC persistence implemented in SocStateMachine.
-    Services::energyCounters.saveToNVS();
-    Services::socStateMachine.saveToNVS();
+    // [AUDIT 2026-09 ROUND 5 / p.439 + p.452 — FAIL-CLOSED PERSISTENCE] The
+    // saves now RETURN their result; a failure is converted into the
+    // STORAGE_ERROR alarm instead of being silently assumed successful. A
+    // device whose NVS is failing must not discover the resulting energy /
+    // SOC history discontinuity only after its next reboot.
+    bool energyOk = Services::energyCounters.saveToNVS();
+    bool socOk = Services::socStateMachine.saveToNVS();
+    static bool storageAlarmActive = false;
+    if (!energyOk || !socOk) {
+      if (!storageAlarmActive) {
+        storageAlarmActive = true;
+        Services::alarms.raise(Core::AlarmCode::STORAGE_ERROR, Core::AlarmSeverity::Critical,
+                     "Energy/SOC state persistence FAILED — counters may not survive reboot");
+      }
+    } else if (storageAlarmActive) {
+      // Recovered — clear only if the alarm registry copy is ours.
+      storageAlarmActive = false;
+      Services::alarms.clear(Core::AlarmCode::STORAGE_ERROR);
+    }
     // [FW-23] Alarm checkpoint — persist when dirty (raise() marks dirty;
     // operator clear/ack already saved immediately).
-    if (Services::alarms.isDirty()) Services::alarms.saveToNVS();
+    if (Services::alarms.isDirty()) {
+      if (!Services::alarms.saveToNVS() && !storageAlarmActive) {
+        storageAlarmActive = true;
+        Services::alarms.raise(Core::AlarmCode::STORAGE_ERROR, Core::AlarmSeverity::Critical,
+                     "Alarm state persistence FAILED");
+      }
+    }
     // [FW-17] Sequence high-water mark: persist current counter PLUS a safety
     // margin covering the maximum possible increments between checkpoints
     // (PERSIST_INTERVAL_MS / SENSOR_SAMPLE_INTERVAL_MS = 1500). Post-reboot
@@ -1375,6 +1498,19 @@ void healthTask(void* pv) {
                    "System time not synchronized");
     } else {
       Services::alarms.clear(Core::AlarmCode::TIME_UNSYNCED);
+    }
+
+    // [AUDIT 2026-09 ROUND 5 / p.444] Commissioning credential boundary —
+    // single owner healthTask. The UART one-time reveal is the commissioning
+    // contract (F-G18), but the window it opens must be OPERATIONALLY visible:
+    // the alarm stays active until the operator changes the default admin
+    // password, exactly like TIME_UNSYNCED stays until NTP syncs.
+    if (!Core::credentialsProvisioned) {
+      Services::alarms.raise(Core::AlarmCode::DEFAULT_CREDENTIALS_ACTIVE,
+                   Core::AlarmSeverity::Warning,
+                   "Default admin credential still active — change it (PWA Settings \xE2\x86\x92 Security)");
+    } else {
+      Services::alarms.clear(Core::AlarmCode::DEFAULT_CREDENTIALS_ACTIVE);
     }
 
     vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
