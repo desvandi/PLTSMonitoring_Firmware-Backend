@@ -42,6 +42,26 @@
 
 namespace Services {
 
+// [AUDIT 2026-09 ROUND 5 / p.447 + p.446] Evidence for the two V-based SOC
+// synchronization events (full-charge confirmation and boot OCV-at-rest).
+// Populated by energyTask from BMS + environment data every cycle — the SOC
+// engine itself stays free of Comm/ dependencies (plain data in, decision
+// out). Default: everything unknown/false → legacy V+I behavior, so a system
+// WITHOUT a BMS keeps working exactly as before (documented fallback).
+struct SocSyncEvidence {
+  // BMS-side evidence (valid only when bmsHealthy is true)
+  bool  bmsHealthy;       // LOCKED + fresh + plausible SOC + faultFlags == 0 + no current mismatch
+  bool  bmsAgreesFull;    // healthy BMS reports SOC >= BMS_FULL_AGREE_PCT
+  bool  cellsBad;         // cell voltages PRESENT and (overvoltage OR imbalance beyond limits)
+                           // (unknown cells ≠ bad — a BMS that reports no cell data
+                           //  must not veto the V+I path)
+  bool  mismatchActive;   // sustained BMS↔shunt current disagreement — both
+                           // instruments under dispute, no new SOC basis
+  // Environment-side evidence (NaN-safe flags computed by the caller)
+  bool  tempValid;         // battery (BMS) or ambient (SHT31) temperature is a valid float
+  float temperatureC;      // the selected temperature reading
+};
+
 struct SocBaselineCorrectionEvent {
   uint32_t timestamp;
   float    oldSoc;
@@ -92,10 +112,17 @@ public:
   SocBaselineCorrectionEvent getLastCorrection() const { return _lastCorrection; }
   void setCoulombBaseline(float baselineAh, const char* reason);
 
+  // [p.447/p.446] Evidence input — call every cycle BEFORE tick().
+  void setSyncEvidence(const SocSyncEvidence& e) { _evidence = e; }
+  const SocSyncEvidence& getSyncEvidence() const { return _evidence; }
+
   // [FW-12] Persistence — checkpoint (call from persistenceTask ~5 min and
   // before deliberate reboots). Load happens in begin().
-  void saveToNVS();
+  // [p.452] Returns false when the NVS write failed (begin/putBytes) so the
+  // persistence task can raise STORAGE_ERROR — never assume "saved".
+  bool saveToNVS();
   void loadFromNVS();
+  uint32_t persistFailures() const { return _persistFailures; }
 
   // Phase 13-D: quality gate
   static bool qualityAllowsIntegration(Core::MeasurementQuality q) {
@@ -107,15 +134,23 @@ public:
   // rest — integrating a loaded voltage would fabricate SOC).
   static constexpr uint32_t REST_WINDOW_SEC = 1800;   // 30 min at rest
 
+  // [p.446] OCV temperature window — outside it, a LiFePO4 OCV reading is
+  // too temperature-dependent to be trusted as an SOC basis (rejection, not
+  // a fabricated compensation curve — no characterized dataset exists yet).
+  static constexpr float OCV_TEMP_MIN_C =   0.0f;
+  static constexpr float OCV_TEMP_MAX_C =  45.0f;
+
 private:
   float    _soc = 0.0f;
   bool     _socValid = false;            // [P1-012] UNKNOWN until proven
   float    _coulombBaselineAh = 0.0f;
   Core::SocState _state = Core::SocState::Normal;
-  uint32_t _lastSyncTs = 0;
+  uint32_t _lastSyncTs = 0;              // UNIX EPOCH domain [p.445 — single domain]
   uint32_t _fullCandidateStartMs = 0;  // Phase 13-D: monotonic ms
   float    _estimatedUsableAh = 200.0f;
   SocBaselineCorrectionEvent _lastCorrection = {};
+  SocSyncEvidence _evidence = {};        // [p.446/p.447] default: all unknown
+  uint32_t _persistFailures = 0;         // [p.452] NVS write failures (this boot)
 
   // Phase 13-D: monotonic time tracking
   uint32_t _lastMonotonicMs = 0;

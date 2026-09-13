@@ -220,6 +220,12 @@ extern char devicePin[7];
 extern char deviceName[64];
 extern char siteName[64];
 extern char apPassword[33];
+// [AUDIT 2026-09 ROUND 5 / p.444] Commissioning boundary flag: false while
+// the admin password is still the one generated at first boot / factory
+// reset (the one revealed once via UART). Set true on the first successful
+// operator password change. Drives the DEFAULT_CREDENTIALS_ACTIVE alarm
+// and the /api/security credentialBoundary block.
+extern bool credentialsProvisioned;
 
 // ===========================================================================
 // DEVICE CONFIG (runtime, persisted)
@@ -365,6 +371,11 @@ struct SystemStatus {
     bool     ntpSynced;
     bool     storageOk;
     uint8_t  spoolSize;
+    // [AUDIT 2026-09 ROUND 5 / p.442] Dropped-telemetry counter IN the
+    // envelope — together with sequence gaps this lets the backend
+    // distinguish "device didn't send" from "spool overflow dropped a
+    // record" and "gap from reboot margin" (cross-layer audit evidence).
+    uint32_t spoolDrops;
     AlarmSeverity highestAlarmSeverity;
   } health;
 #if PLTS_ENABLE_EMERGENCY

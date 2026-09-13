@@ -144,7 +144,7 @@ void EnergyCounterService::reset(const char* reason) {
   saveToNVS();
 }
 
-void EnergyCounterService::saveToNVS() {
+bool EnergyCounterService::saveToNVS() {
   // [PRODUCTION-GRADE 2026-09 / audit p.131-133, STORAGE-GATE-01/02] The old
   // format wrote SIX independent float keys — a power loss between writes
   // left a snapshot of MIXED generations (some fields new, some old), and
@@ -152,8 +152,19 @@ void EnergyCounterService::saveToNVS() {
   // magic + version + CRC32, written (and verified) as a single NVS record
   // — the same pattern the SOC state machine already uses (the audit's
   // internal reference implementation).
+  //
+  // [AUDIT 2026-09 ROUND 5 / p.439] The write is now VERIFIED and its result
+  // REPORTED: begin() failure, a short putBytes, or a read-back mismatch
+  // (what NVS actually stored ≠ what we intended to store) return false and
+  // increment _persistFailures. persistenceTask turns that into STORAGE_ERROR
+  // so a failing NVS never masquerades as "persisted".
   Preferences p;
-  if (!p.begin("plts_energy", false)) return;
+  if (!p.begin("plts_energy", false)) {
+    _persistFailures++;
+    Log.append(Core::LogType::StorageError,
+               "Energy NVS begin() failed — counters NOT persisted", 0);
+    return false;
+  }
 
   // Scratch: keep legacy keys in sync during the transition so a rollback
   // firmware still finds coherent (if generation-atomic-weak) data.
@@ -175,8 +186,26 @@ void EnergyCounterService::saveToNVS() {
   blob[9] = (uint8_t)((crc >> 8) & 0xFF);
   blob[10] = (uint8_t)((crc >> 16) & 0xFF);
   blob[11] = (uint8_t)((crc >> 24) & 0xFF);
-  p.putBytes("state", blob, sizeof(blob));
+  size_t w = p.putBytes("state", blob, sizeof(blob));
+  if (w != sizeof(blob)) {
+    p.end();
+    _persistFailures++;
+    Log.append(Core::LogType::StorageError,
+               "Energy NVS putBytes short write — counters NOT persisted", 0);
+    return false;
+  }
+  // [p.439] Read-back verification — catches bit-level corruption that a
+  // size-only check cannot (e.g., worn sector returning stale bytes).
+  uint8_t rb[12 + sizeof(float) * 6] = {0};
+  size_t got = p.getBytes("state", rb, sizeof(rb));
   p.end();
+  if (got != sizeof(rb) || memcmp(rb, blob, sizeof(rb)) != 0) {
+    _persistFailures++;
+    Log.append(Core::LogType::StorageError,
+               "Energy NVS read-back mismatch — counters NOT verifiably persisted", 0);
+    return false;
+  }
+  return true;
 }
 
 void EnergyCounterService::loadFromNVS() {
@@ -223,6 +252,14 @@ void EnergyCounterService::loadFromNVS() {
 
   // Legacy path: independent keys (best-effort, may be a mixed-generation
   // snapshot — pre-existing behavior, kept only for migration).
+  //
+  // [AUDIT 2026-09 ROUND 5 / p.440] The legacy path is now MIGRATION-ONLY and
+  // SELF-NORMALIZING: the moment a legacy state is accepted, it is rewritten
+  // as the atomic CRC blob (saveToNVS) so this path is exercised exactly
+  // ONCE per device — subsequent loads use the blob. Without normalization
+  // a fleet could sit on the mixed-generation fallback indefinitely while
+  // believing it had migrated. _legacyLoadUsed is exposed via diagnostics
+  // for fleet visibility.
   _c.chargeAh        = p.getFloat("chAh", 0.0f);
   _c.dischargeAh     = p.getFloat("dchAh", 0.0f);
   _c.chargeWh        = p.getFloat("chWh", 0.0f);
@@ -231,9 +268,13 @@ void EnergyCounterService::loadFromNVS() {
   _c.peakDischargeA  = p.getFloat("pkDchA", 0.0f);
   // [STORAGE-GATE-09] Same sanity gate on the legacy fields.
   auto sane = [](float v) { return isfinite(v) && v >= 0.0f; };
+  // [p.440] Detect actual key presence so a FRESH namespace (all defaults)
+  // is not misreported as a legacy migration.
+  bool anyLegacyKey = p.isKey("chAh") || p.isKey("dchAh") ||
+                      p.isKey("chWh") || p.isKey("dchWh");
   if (!sane(_c.chargeAh) || !sane(_c.dischargeAh) || !sane(_c.chargeWh) ||
       !sane(_c.dischargeWh) || !sane(_c.peakChargeA) || !sane(_c.peakDischargeA)) {
-    Log.append(Core::LogType::Custom,
+    Log.append(Core::LogType::StorageError,
                "Legacy energy keys failed sanity — defaults applied", 0);
     _c = {};
   }
@@ -242,6 +283,12 @@ void EnergyCounterService::loadFromNVS() {
   float cap = Core::cfgBatteryCapacityAh > 0 ? Core::cfgBatteryCapacityAh : Core::BATTERY_CAPACITY_AH;
   _c.efc = (cap > 0) ? _c.dischargeAh / cap : 0.0f;
   p.end();
+  if (anyLegacyKey) {
+    _legacyLoadUsed = true;   // [p.440] diagnostics: state came from legacy keys
+    Log.append(Core::LogType::StorageError,
+               "Energy state loaded from LEGACY keys — normalizing to atomic blob", 0);
+    saveToNVS();              // [p.440] migration-only path normalizes immediately
+  }
 }
 
 } // namespace Services

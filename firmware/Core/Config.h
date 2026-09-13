@@ -199,6 +199,18 @@ static constexpr float MODBUS_RACK_CURRENT_SIGN  = -1.0f;
 // Cell-imbalance alarm threshold (15S LiFePO4 — healthy pack delta < ~80 mV).
 static constexpr float BMS_CELL_IMBALANCE_V      = 0.250f;
 
+// [AUDIT 2026-09 ROUND 5 / p.447] Full-charge agreement window: when the BMS
+// is healthy (LOCKED + fresh + no faults + no current mismatch) it is the SOC
+// authority — the V+I full-charge candidate only confirms 100% if the BMS
+// gauge agrees within this tolerance. A healthy BMS reporting < this means
+// "not full by the battery's own gauge" and the confirmation is DEFERRED.
+static constexpr float BMS_FULL_AGREE_PCT        = 95.0f;
+
+// [AUDIT 2026-09 ROUND 5 / p.447] Per-cell LiFePO4 overvoltage guard: with
+// cell voltages reported, a "full pack" whose highest cell exceeds this is
+// NOT a healthy full — it is an imbalanced pack hiding behind the mean.
+static constexpr float BMS_CELL_OVERVOLTAGE_V    = 3.65f;
+
 // Runtime BMS protocol selection strings (NVS cfgBmsProtocol values).
 static constexpr const char* BMS_PROTOCOL_DEFAULT = "auto";
 

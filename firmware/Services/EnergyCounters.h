@@ -66,8 +66,20 @@ public:
 
   EnergyCounters get() const { return _c; }
   void reset(const char* reason);
-  void saveToNVS();
+  // [AUDIT 2026-09 ROUND 5 / p.439] saveToNVS now REPORTS failure instead of
+  // silently returning: begin() failure, putBytes short-write, or a read-back
+  // mismatch all return false (and count in persistFailures()). The caller
+  // (persistenceTask) converts a failure into STORAGE_ERROR — an operator
+  // seeing "counters saved" that actually hit a failed NVS write would
+  // discover the silent energy-history discontinuity only after the next
+  // reboot rolled the counters back.
+  bool saveToNVS();
   void loadFromNVS();
+  uint32_t persistFailures() const { return _persistFailures; }
+  // [p.440] True when the loaded state came from the legacy six-key format
+  // (migration path) rather than the atomic CRC blob — exposed for fleet
+  // visibility via /api/diagnostics.
+  bool loadedFromLegacy() const { return _legacyLoadUsed; }
 
   // Phase 13-D: get integration state for diagnostics
   bool isIntegrating() const { return _integrating; }
@@ -82,6 +94,8 @@ private:
   float    _lastVoltage = 0.0f;
   float    _lastCurrent = 0.0f;
   bool     _integrating = false;    // true when last tick successfully integrated
+  uint32_t _persistFailures = 0;   // [p.439] failed NVS writes (this boot)
+  bool     _legacyLoadUsed = false; // [p.440] state loaded via legacy path this boot
 };
 
 extern EnergyCounterService energyCounters;

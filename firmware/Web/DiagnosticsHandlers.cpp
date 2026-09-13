@@ -7,6 +7,9 @@
 #include "Common.h"
 #include "../Services/HealthSupervisor.h"
 #include "../Services/TelemetrySpool.h"
+#include "../Services/EnergyCounters.h"
+#include "../Services/SocStateMachine.h"
+#include "../Services/AlarmRegistry.h"
 #include "../Drivers/Ina219Driver.h"
 #include "../Comm/BatteryCommManager.h"
 #include <ArduinoJson.h>
@@ -38,6 +41,17 @@ void handleGet() {
   doc["criticalSpoolSize"] = Services::telemetrySpool.criticalPendingCount();
   doc["spoolDrops"] = Services::telemetrySpool.dropCount();
   doc["spoolReplays"] = Services::telemetrySpool.replayCount();
+  // [AUDIT 2026-09 ROUND 5 / p.437] Regular-ring reboot persistence evidence.
+  doc["spoolFsRestored"] = Services::telemetrySpool.fsRestoredCount();
+  doc["spoolFsWriteFailures"] = Services::telemetrySpool.fsWriteFailures();
+  // [AUDIT 2026-09 ROUND 5 / p.439/p.440/p.451/p.452] Persistence-failure and
+  // registry-saturation observability — the auditor's core asks: failures must
+  // be countable, never silently assumed successful.
+  doc["energyPersistFailures"] = Services::energyCounters.persistFailures();
+  doc["energyLoadedFromLegacyKeys"] = Services::energyCounters.loadedFromLegacy();
+  doc["socPersistFailures"] = Services::socStateMachine.persistFailures();
+  doc["alarmPersistFailures"] = Services::alarms.persistFailures();
+  doc["alarmRegistryOverflow"] = Services::alarms.overflowCount();
   doc["systemState"] = Core::systemStateToStr(h.systemState);
   doc["bootLoopDetected"] = h.bootLoopDetected;
   doc["bootsInLast60s"] = h.bootsInLast60s;

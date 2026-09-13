@@ -225,6 +225,9 @@ inline String serialize(const Core::SystemStatus& s) {
   health["ntpSynced"]            = s.health.ntpSynced;
   health["storageOk"]            = s.health.storageOk;
   health["spoolSize"]            = s.health.spoolSize;
+  // [p.442] additive field — absent in <= 1.9.4 envelopes; consumers treat
+  // absent as 0. Lets the backend distinguish sequence-gap causes cross-layer.
+  health["spoolDrops"]           = s.health.spoolDrops;
   health["highestAlarmSeverity"]  = Core::severityToStr(s.health.highestAlarmSeverity);
 
 #if PLTS_ENABLE_EMERGENCY
