@@ -128,10 +128,27 @@ check("A2. Mutex created in begin() BEFORE loadFromNVS (pre-scheduler creation)"
                      r"if \(_mutex == nullptr\) _mutex = xSemaphoreCreateMutex\(\);",
                      alarm_code, re.S)))
 
-check("A3. _lock() lazy-create fallback + portMAX_DELAY take (AuthManager/LogService pattern)",
-      bool(re.search(r"void AlarmRegistry::_lock\(\) const \{[^}]*"
+# [ROUND-9 UPDATE 2026-09-15 / p.471] _lock() is now FAIL-CLOSED and
+# returns bool: it retries creation once and returns false (operation
+# refused) when the mutex is unavailable — the round-7 "if (_mutex) take"
+# fail-open shape is gone. begin() gained a FATAL boot guard. The gate pins
+# the NEW shape; the serialization semantics it has always protected are
+# unchanged (and are re-pinned harder by test_audit_round9_2026_09.py).
+check("A3. _lock() fail-closed (p.471): bool return, retry-create, reject + CRIT log on failure",
+      bool(re.search(r"bool AlarmRegistry::_lock\(\) const \{[^}]*"
                      r"if \(_mutex == nullptr\) _mutex = xSemaphoreCreateMutex\(\);[^}]*"
-                     r"xSemaphoreTake\(_mutex, portMAX_DELAY\);",
+                     r"xSemaphoreTake\(_mutex, portMAX_DELAY\);[^}]*return true;",
+                     alarm_code, re.S)) and
+      "return false;" in body_of(alarm_code, "bool AlarmRegistry::_lock() const",
+                                 ["void AlarmRegistry::_unlock"]) and
+      "_lockFailures.fetch_add" in alarm_code and
+      "if (_mutex)" not in body_of(alarm_code, "bool AlarmRegistry::_lock() const",
+                                   ["void AlarmRegistry::_unlock"]))
+
+check("A3b. begin() boot guard (p.471): mutex creation failure is FATAL pre-multi-task",
+      bool(re.search(r"void AlarmRegistry::begin\(\) \{[^}]*"
+                     r"if \(_mutex == nullptr\) _mutex = xSemaphoreCreateMutex\(\);[^}]*"
+                     r"if \(_mutex == nullptr\) \{[^}]*FATAL[^}]*while \(true\)",
                      alarm_code, re.S)))
 
 check("A4. begin() precedes every xTaskCreate in setup() (mutex exists before tasks)",
@@ -157,11 +174,15 @@ for name, sig, call in MUTATORS:
                                      "\nbool AlarmRegistry::_", "\nuint8_t AlarmRegistry::",
                                      "\nvoid AlarmRegistry::raise", "\nbool AlarmRegistry::raise",
                                      "} // namespace"])
-    ok = "_lock();" in body and "_unlock();" in body and call in body
+    # [ROUND-9 UPDATE 2026-09-15 / p.471] wrappers now GUARD the lock result
+    # before delegating ("if (!_lock()) return <fail-closed value>;") — the
+    # locked-wrapper semantics are unchanged, the guard is what p.471 adds.
+    ok = "if (!_lock())" in body and "_unlock();" in body and call in body and \
+         body.find("if (!_lock())") < body.find(call)
     if not ok:
         all_wrapped = False
-        print(f"      (mutator {name}: wrapper missing lock/unlock or delegation)")
-check("B1. Every public mutator: _lock() → *Unlocked() → _unlock()", all_wrapped)
+        print(f"      (mutator {name}: wrapper missing lock guard/unlock or delegation)")
+check("B1. Every public mutator: if (!_lock()) refuse → *Unlocked() → _unlock() (p.467/p.471)", all_wrapped)
 
 unlocked_bodies = []
 for sig in ["AlarmRegistry::_raiseTrackedUnlocked(", "AlarmRegistry::_clearUnlocked(",
@@ -195,8 +216,9 @@ print("\n[C] Coherent read snapshots — no interior pointers, no multi-call rea
 
 check("C1. Snapshot struct + snapshotInto() exist with the full state copy",
       "struct Snapshot {" in alarm_h and "void snapshotInto(Snapshot& out) const;" in alarm_h and
-      bool(re.search(r"void AlarmRegistry::snapshotInto\(Snapshot& out\) const \{[^}]*_lock\(\);",
-                     alarm_code, re.S)))
+      bool(re.search(r"void AlarmRegistry::snapshotInto\(Snapshot& out\) const \{[^}]*if \(!_lock\(\)\)",
+                     alarm_code, re.S)) and
+      "out = Snapshot{};" in alarm_code)
 
 check("C2. Raw-pointer accessors REMOVED (getAlarm / getActiveAlarms / getActiveAlarmCount)",
       "getAlarm(" not in alarm_hdr and "getActiveAlarms" not in alarm_hdr and
@@ -220,7 +242,7 @@ check("C5. Telemetry envelope derives severity + active list from ONE snapshot",
 
 check("C6. copyActiveAlarms() locks internally (single coherent copy)",
       bool(re.search(r"uint8_t AlarmRegistry::copyActiveAlarms\(Alarm\* dst, uint8_t max\) const \{"
-                     r"\s*_lock\(\);", alarm_code)))
+                     r"\s*if \(!_lock\(\)\) return 0;", alarm_code)))
 
 check("C7. MQTT + Web ack paths use the copy-out find()",
       "Services::alarms.find(code, a)" in strip_comments(mqtt_c) and
@@ -230,9 +252,9 @@ check("C7. MQTT + Web ack paths use the copy-out find()",
 print("\n[D] Atomic clearIfActive for evaluator tick loops (p.467 TOCTOU)")
 
 check("D1. clearIfActive() is a single locked test-and-clear",
-      bool(re.search(r"bool AlarmRegistry::clearIfActive\(const char\* code\) \{\s*_lock\(\);"
-                     r"\s*bool cleared = _clearIfActiveUnlocked\(code\);\s*_unlock\(\);",
-                     alarm_code)) and
+      bool(re.search(r"bool AlarmRegistry::clearIfActive\(const char\* code\) \{\s*"
+                     r"if \(!_lock\(\)\) return false;", alarm_code)) and
+      "_clearIfActiveUnlocked(code);" in alarm_code and
       bool(re.search(r"AlarmRegistry::_clearIfActiveUnlocked\(const char\* code\) \{[^}]*"
                      r"if \(a\.lifecycle == Core::AlarmLifecycle::Cleared\) return false;",
                      alarm_code, re.S)))
@@ -263,11 +285,14 @@ check("E3. Readers validate snapshot coherence invariants (count/dupes/terminati
 
 check("E4. Negative control compiles the ROUND-6 unlocked registry (REGISTRY_NO_LOCK)",
       "#ifdef REGISTRY_NO_LOCK" in harness and
-      "void _lock() const {}" in harness)
+      "bool _lock() const { return true; }" in harness and
+      "#elif defined(LOCK_FAIL_OPEN)" in harness)
 
-check("E5. Runner builds TSAN + ASAN/UBSAN treatment AND requires the negative control to FAIL",
+check("E5. Runner builds TSAN + ASAN/UBSAN treatment AND requires BOTH negative controls to FAIL",
       "-fsanitize=thread" in runner and "-DREGISTRY_NO_LOCK" in runner and
-      "NEGATIVE CONTROL FAILED" in runner and "harness sensitivity proven" in runner)
+      "-DLOCK_FAIL_OPEN" in runner and
+      "NEGATIVE CONTROL FAILED" in runner and "harness sensitivity proven" in runner and
+      "P471 NEGATIVE CONTROL TRIPPED" in runner)
 
 check("E6. Saturation/rejection + transient-NV-failure retry are exercised in-harness",
       "failNextWrite" in harness and "AcceptedPersistFailed" in harness and

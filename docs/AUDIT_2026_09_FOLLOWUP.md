@@ -1237,3 +1237,186 @@ acknowledge idempotent terhadap kode yang hilang; kasus ekstremnya adalah
 Mutex-create-failure fallback (registry tanpa kunci) hanya terjadi pada OOM
 ekstrem saat boot — pola yang sama dengan AuthManager/LogService.
 `generation` uint16 bisa wrap setelah 65.535 transaksi — diagnostik saja.
+
+## 15. Round 9 (2026-09-15): remediasi p.471 — akuisisi mutex fail-closed
+
+Auditor round-8 menutup p.467–p.470 dan menyisakan satu residual yang
+dipromosikan jadi temuan:
+
+> **p.471 (P3/P4)** — `_lock()` registry berbentuk fail-OPEN:
+> `if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex(); if (_mutex)
+> xSemaphoreTake(...)`. Bila pembuatan gagal (OOM ekstrem saat boot), kode
+> tetap melanjutkan TANPA sinkronisasi — "mutex gagal dibuat → serialization
+> guarantee hilang". Idealnya fail-closed: jangan izinkan mutable access
+> berjalan tanpa sinkronisasi setelah sistem masuk multi-task state.
+
+Strategi yang dipilih operator (hybrid): **boot guard FATAL di `begin()`**
+ditambah **runtime retry-sekali lalu tolak operasi**. Item observasi
+lock-hold-time (P3) TIDAK diubah sesuai peringatan eksplisit auditor
+(mengubahnya tanpa redesain protokol persistensi berisiko menghidupkan
+kembali p.468).
+
+### 15.1 Implementasi
+
+**`_lock()` → `bool`, fail-closed.** Handle null → coba buat ulang SEKALI;
+masih null → operasi DITOLAK: `_lockFailures.fetch_add` (atomic), log CRIT
+rate-limited 60 s (CAS atomic, tanpa state bersama non-atomik di jalur ini),
+`return false`. Sidik jari lama `if (_mutex) xSemaphoreTake(...)` dihapus
+total — gate statis memastikannya tidak kembali.
+
+**`begin()` — boot guard.** Kegagalan pembuatan mutex = FATAL: log Serial +
+LogService, lalu halt TANPA memberi makan task watchdog (loopTask sudah
+berlangganan TWDT 10 s panic-on-timeout sejak baris awal setup) → panic
+reset deterministik dengan reset reason tercatat, dihitung crash-chain
+EmergencySupervisor (BOOT/CRASHLOOP) — boot loop yang jujur dan terlihat
+operator, bukan zombie tanpa sinkronisasi. Relay darurat sudah ter-ISOLASI
+sejak baris pertama setup (fail-safe first), jadi halt di sini ADALAH kondisi
+aman. Sistem tidak pernah masuk multi-task state tanpa jaminan serialisasi
+p.467–p.469.
+
+**Kontrak fail-closed seluruh 16 entry publik terkunci + 1 aksesor
+lock-free** (dokumentasi per-metode di header): `raiseTracked()` →
+`RaiseResult::LockUnavailable` (nilai enum baru);
+`raise()` → false; `clear`/`acknowledge`/`acknowledgeAll` → no-op; 
+`clearIfActive`/`saveToNVS`/`find` → false; `snapshotInto()` → buffer
+pemanggil di-zero-fill + `lockFailures` diisi (view kosong lebih jujur
+daripada view basi yang mengaku current); pembaca enumerator → 0/Info;
+`isDirty()` → TRUE konservatif (checkpoint tetap mencoba, jalur sinyal
+STORAGE_ERROR tetap hidup). **`lockFailures()`** adalah satu-satunya aksesor
+lock-free (atomic read) — sengaja: diagnostik harus tetap bisa MELIHAT mode
+degraded, bukan ikut gagal. Eksposur: `lockFailures` additif di
+GET /api/alarms, `alarmLockFailures` di /api/diagnostics.
+
+**Boot guard simetris telemetryMutex** (.ino): handle null akan membuat
+helper deep-copy p.470 hard-fault pada `xSemaphoreTake(nullptr)` pertama;
+kini kegagalan pembuatan = FATAL yang sama (log + halt TWDT). Dua mutex
+lintas-task sistem kini punya disiplin boot yang identik.
+
+**Catatan desain — atomic di jalur kegagalan.** Satu-satunya member registry
+yang ditulis di jalur mutex-unavailable adalah `_lockFailures` dan
+`_lastLockFailLogMs` (keduanya `std::atomic` relaxed): di jalur yang BY
+DEFINISI tanpa sinkronisasi, akuntansi harus tetap bebas data race — dan
+bentuk ini pula yang membuat harness TSAN treatment tetap bersih saat
+kegagalan diinjeksi dari 8 thread.
+
+### 15.2 Bukti — harness konkurensi diperluas (fase nyata, bukan mirror statis)
+
+`verify_alarm_concurrency.cpp` kini TIGA mode build, dengan dua fase baru:
+
+- **Fase P (boot guard):** registri segar + injeksi kegagalan pembuatan →
+  `begin()` menolak boot; submit berikutnya `LockUnavailable`; snapshot
+  fail-closed kosong + `lockFailures>0`; aksesor lock-free terbaca.
+- **Fase Q (runtime fail-closed storm + recovery):** 6 alarm seed
+  deterministik → handle mutex dijatuhkan (model korupsi katastrofik; tak
+  terjangkau di firmware pasca-boot-guard) + injeksi ON → **8 thread**
+  menghantam SEMUA API publik (raise/raiseTracked/clear/clearIfActive/ack/
+  ackAll/saveToNVS/snapshotInto/find/isDirty/countAll/highestSeverity/
+  copyActiveAlarms) → setiap hasil harus sama dengan nilai kontrak
+  fail-closed; pasca-storm: injeksi OFF (single-threaded) → mutex dibuat
+  ulang lazy → 6 seed **byte-identical**, generation tidak berubah,
+  **nol operasi NVS selama storm** (delta `nvs.ops` = 0), `lockFailures>0`.
+  Recovery deterministik dibuktikan, bukan diasumsikan.
+
+Hasil reproduksibel (`bash scripts/native/run-native-tests.sh`, g++ 14.2):
+
+| Build | Hasil |
+|---|---|
+| Treatment + **TSAN** | **0 laporan race**; 560.129 check PASS (termasuk fase P+Q) |
+| Treatment + ASAN/UBSAN | 0 error; 584.329 check PASS |
+| Negative control round-6 (`-DREGISTRY_NO_LOCK`) + TSAN | 624 laporan race — sensitivitas kelas p.467–469 tetap terbukti |
+| **Negative control p.471** (`-DLOCK_FAIL_OPEN`, bentuk `_lock()` round-7) + TSAN | **489 laporan TSAN + sentinel `P471 NEGATIVE CONTROL TRIPPED`** (1.716 asersi gagal saat storm tanpa sanitizer) — harness TERBUKTI peka terhadap kelas fail-open yang dihapus round ini |
+| verify_status_snapshot_detach (p.470) | tetap hijau: 0 race, 0 torn (65k+ pembacaan) |
+
+Runner CI membangun keempatnya; exit-0 pada mode fail-open = kegagalan
+suite ("harness blind"), nonzero tanpa laporan TSAN/sentinel = INCONCLUSIVE.
+
+### 15.3 Gate statis round-9 + update gate lama (justifikasi terdokumentasi)
+
+`scripts/test_audit_round9_2026_09.py` — **34/34 PASS**: (A) bentuk
+`_lock()` fail-closed + boot guard FATAL + halt tanpa feed WDT; (B) ke-16
+entry terkunci membawa guard fail-closed sesuai kontrak + tak ada
+implementasi Unlocked yang mengambil kunci; (C) enum/Snapshot/aksesor
+lock-free + field JSON additif; (D) boot guard simetris telemetryMutex
+sebelum xTaskCreate pertama; (E) harness: hook injeksi, fase P/Q, sentinel,
+negative control fail-open di runner; (F) invariant round-6/7/8 utuh
+(immediate-save tetap di dalam kunci, aksesor pointer mentah tetap hilang,
+helper p.470 tak tersentuh).
+
+Empat asersi gate lama di-update dengan justifikasi tertulis di tempat
+(mengikuti preseden r5-G6/G7 dan r6-F5): r5-G3 & r6-G2 (bentuk `raise()`
+kini mengenumerasi Accepted* — `LockUnavailable` harus false), r7-A3/B1/C1/
+C6/D1/E4/E5 dan r8-E1/E2 (wrapper kini mengguard hasil `_lock()`). Semantik
+yang dipin tidak berubah. **34/34 suite Python PASS** (r3–r9 + seluruh suite
+legacy: relay 39, tx-durability 30, emg-modular 85, alarm-config 111, dst.).
+
+### 15.4 Full-sweep re-verifikasi p.453–p.470 atas baseline fe1905f
+
+Sesuai keputusan operator, seluruh item tertutup diverifikasi ulang dari
+source pada baseline sebelum remediasi:
+
+- **p.453–p.466** (round-6): satu record NVS + CRC + read-back, eviksi
+  CLEARED-only + reject jujur, raiseTracked, reaktivasi, quality gates
+  anomaly, TELEMETRY_STALE, watchdog starvation emergency — terkonfirmasi
+  utuh; seluruh gate r5/r6 hijau pada baseline DAN pasca-fix.
+- **p.467/p.468/p.469** (round-7): 7 mutator publik = wrapper locked →
+  Unlocked; tak ada Unlocked yang memilih kunci; immediate-save di dalam
+  kunci; snapshot tunggal; aksesor pointer mentah absen; clearIfActive
+  atomik — terkonfirmasi via gate r7 + harness TSAN treatment 0 race.
+- **p.470** (round-8): `serializeLatestStatusLocked()` deep-copy di bawah
+  telemetryMutex → rilis → serialisasi copy → free; dua konsumen bermigrasi;
+  pengecualian penulis-tunggal publishTelemetry terdokumentasi — terkonfirmasi
+  via gate r8 + harness detach 0 torn.
+- **Gap CI auditor ditutup**: commit baseline `fe1905f` diverifikasi langsung
+  dari Checks API GitHub — run `#131` [build-firmware] push-main **success**:
+  Python unit+property tests, PlatformIO staging+development, production
+  signed, reproducible-build 2x, firmware-generic legacy, master release gate
+  semua hijau (3 check `skipped` = job bertanda tag/manual yang memang tidak
+  berlaku untuk event push). Legacy Status API memang mengembalikan
+  `pending (total 0)` — semua hasil hidup di Checks API; itulah sumber
+  kegagalan connector auditor sebelumnya.
+
+### 15.5 Status kelas fail-open di layanan lain (terverifikasi, didokumentasikan, tidak diubah round ini)
+
+Pola lazy-create fail-open yang sama teridentifikasi di:
+`AuthManager._lockAuth`, `LogService.append` (`if (_mutex && take...)` —
+handle null → lolos tanpa kunci), `BatteryCommManager._lock`,
+`TransactionJournal._lock`. `EmergencySupervisor.tick` sebaliknya sudah
+fail-closed (`if (_mutex == nullptr) return;` — evaluasi dihentikan, state
+latched, relay aman di hardware). Keputusan TIDAK mengubah kelima layanan
+round ini: (1) auditor mempromosikan hanya registry ke p.471 — registry
+adalah otoritas state keselamatan yang remediasi round-7-nya menjadikan
+mutex sebagai jaminan correctness; (2) disiplin diff — memperluas ke jalur
+auth/logging/emergency tanpa harness spesifiknya masing-masing adalah risiko
+regresi yang tidak sepadan untuk hardening item; (3) secara praktis, boot
+guard registry kini berfungsi sebagai **canary heap saat boot** untuk
+keluarga mutex: LogService.begin() (baris 307) berjalan sebelum
+alarms.begin() (343), dan seluruh layanan lain membuat mutex-nya SETELAH
+baris 343 — heap yang terlalu habis untuk alokasi mutex ~80 byte akan
+menghentikan boot di registry guard sebelum task apa pun lahir. Window
+residual yang tersisa hanyalah "alokasi gagal di 307 lalu berhasil di 343"
+— kelas kontraksi yang ekstrem. Residual ini dicatat untuk auditor;
+remediasi penuh keluarga (mirror + gate per-layanan) diusulkan sebagai
+round terpisah bila auditor mempromosikannya.
+
+### 15.6 Lock-hold-time (P3) — tetap DITERIMA, tanpa perubahan
+
+Sesuai analisis auditor: hold time tipikal belasan–puluhan ms (RTC + NVS +
+Log.append di dalam kunci), worst-case terbatas timeout Wire 50 ms per
+transaksi, peta kunci asiklik, priority inheritance aktif, aksi fisik relay
+darurat mendahului `alarms.raise`. Tidak ada perubahan apa pun pada bentuk
+critical section round ini — optimasi (stempel waktu/blob immutable di luar
+kunci) menunggu redesain protokol persistensi agar p.468 tidak hidup kembali,
+persis seperti peringatan auditor.
+
+### 15.7 Regresi & dampak konsumen
+
+`pio run` lokal tidak tersedia di lingkungan eksekusi round ini;
+verifikasi kompilasi firmware dilakukan via syntax-check gnu++17
+(-Wall -Wextra, 0 warning) atas berkas yang diubah + build CI penuh
+(6 job) pada commit hasil — hasilnya tercantum di 15.4 untuk baseline dan
+dicek ulang pasca-push untuk commit round-9. Perubahan wire/API bersifat
+additif: field JSON baru (`lockFailures` di /api/alarms,
+`alarmLockFailures` di /api/diagnostics) mengikuti preseden `overflowCount`
+("consumers treat absent as 0") — konsumen PWA tidak tersentuh. Konsumen
+`raise()` yang mengabaikan nilai balik tetap aman (perilaku normal tidak
+berubah; jalur baru hanya aktif saat mutex unavailable).

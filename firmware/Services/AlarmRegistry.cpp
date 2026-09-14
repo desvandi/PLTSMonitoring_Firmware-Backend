@@ -78,25 +78,85 @@ struct AlarmPersistHeaderV1 {
 // ---------------------------------------------------------------------------
 // [p.467] Mutex primitives. begin() runs in setup() BEFORE any task exists
 // (firmware_v1.ino: alarms.begin() precedes every xTaskCreatePinnedToCore),
-// so the primary creation is race-free; the lazy-create fallback below only
-// serves pre-scheduler single-threaded callers, the same pattern already
-// audited in AuthManager / LogService / BatteryCommManager. FreeRTOS
-// mutexes carry priority inheritance, so a high-priority emergency raise()
-// blocked behind a web-task saveToNVS() boosts the holder instead of
-// starving. NOT callable from ISR context (see header contract).
+// so the primary creation is race-free. FreeRTOS mutexes carry priority
+// inheritance, so a high-priority emergency raise() blocked behind a
+// web-task saveToNVS() boosts the holder instead of starving. NOT callable
+// from ISR context (see header contract).
+//
+// [AUDIT 2026-09 ROUND 9 / p.471] ACQUISITION IS FAIL-CLOSED.
+// The round-7 shape was:
+//     if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
+//     if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);   // ← fail-OPEN
+// i.e. a failed creation silently proceeded WITHOUT synchronization — the
+// auditor's residual p.471: "mutex gagal dibuat → serialization guarantee
+// hilang". Now:
+//   - begin() treats creation failure as FATAL (boot guard): the device
+//     must not enter multi-task state without the p.467–p.469 guarantees.
+//     The emergency relay has been ISOLATED since the first lines of
+//     setup() (fail-safe first), so halting here is the SAFE state; the
+//     halt deliberately does NOT feed the task watchdog (subscribed at the
+//     top of setup(), 10 s, panic-on-timeout) → deterministic TWDT panic
+//     reset with an observable reset reason, counted by the EmergencySupervisor
+//     crash chain (BOOT/CRASHLOOP) — an honest, operator-visible boot loop,
+//     never an unsynchronized zombie.
+//   - _lock() retries the creation ONCE (pre-scheduler callers; catastrophic
+//     post-boot corruption) and returns FALSE when unavailable — every
+//     public wrapper refuses the operation (fail-closed contract, header).
+//     Accounting is ATOMIC (no synchronization exists on this path) and the
+//     CRIT log is rate-limited so a degraded registry cannot flood LittleFS.
 // ---------------------------------------------------------------------------
-void AlarmRegistry::_lock() const {
-  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
-  if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+bool AlarmRegistry::_lock() const {
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();   // retry-create ONCE
+  if (_mutex != nullptr) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    return true;
+  }
+  // FAIL-CLOSED: no lock → no registry access. Count + rate-limited CRIT log
+  // (LogService owns its own mutex; if the heap is so exhausted that even
+  // that fails, the log is best-effort — the counter still moves).
+  _lockFailures.fetch_add(1, std::memory_order_relaxed);
+  uint32_t last = _lastLockFailLogMs.load(std::memory_order_relaxed);
+  uint32_t now = millis();
+  if (now - last > 60000UL &&
+      _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    Log.append(Core::LogType::StorageError,
+               String("[ALARM] registry mutex UNAVAILABLE — operation REJECTED "
+                      "(fail-closed, p.471); lockFailures=") +
+                   _lockFailures.load(std::memory_order_relaxed),
+               -1);
+  }
+  return false;
 }
 
 void AlarmRegistry::_unlock() const {
-  if (_mutex) xSemaphoreGive(_mutex);
+  // Only ever called after _lock() returned TRUE (wrappers enforce the
+  // order) — the handle is non-null and HELD here by construction.
+  xSemaphoreGive(_mutex);
 }
 
 void AlarmRegistry::begin() {
   // Create the mutex FIRST — loadFromNVS() locks through the public entry.
   if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
+  // [p.471] BOOT GUARD — fail-closed. Without the mutex there is no
+  // serialization, and without serialization the p.467/p.468/p.469
+  // remediations do not exist. Refuse to bring the registry (and the
+  // system behind it) up: log FATAL, keep the already-isolated emergency
+  // relay isolated, and halt WITHOUT feeding the task watchdog so the
+  // ~10 s TWDT panic reset records an honest reset reason (crash chain
+  // BOOT/CRASHLOOP accounting makes the loop operator-visible).
+  if (_mutex == nullptr) {
+    Serial.println(F("[FATAL] AlarmRegistry mutex creation failed (heap exhausted at boot) "
+                     "— refusing to enter multi-task state (p.471 fail-closed)"));
+    Serial.flush();
+    Log.append(Core::LogType::StorageError,
+               String("[FATAL] AlarmRegistry mutex creation failed — boot REFUSED "
+                      "(p.471): serialization guarantees p.467-p.469 require the "
+                      "mutex; halting for TWDT panic reset"),
+               -1);
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
+  }
   _count = 0;
   _dirty = false;
   _generation = 0;
@@ -127,38 +187,42 @@ uint8_t AlarmRegistry::_findIdx(const char* code) const {
 bool AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char* message) {
   // [p.454] Thin wrapper: TRUE = accepted in the RAM registry (NOT a
   // durability claim — see raiseTracked()).
-  return raiseTracked(code, sev, message) != RaiseResult::Rejected;
+  // [p.471] LockUnavailable must also surface as FALSE — a refused
+  // submission is never a success.
+  RaiseResult r = raiseTracked(code, sev, message);
+  return r == RaiseResult::AcceptedRam || r == RaiseResult::AcceptedPersisted ||
+         r == RaiseResult::AcceptedPersistFailed;
 }
 
 RaiseResult AlarmRegistry::raiseTracked(const char* code, Core::AlarmSeverity sev,
                                         const char* message) {
-  _lock();
+  if (!_lock()) return RaiseResult::LockUnavailable;   // [p.471] fail-closed
   RaiseResult r = _raiseTrackedUnlocked(code, sev, message);
   _unlock();
   return r;
 }
 
 void AlarmRegistry::clear(const char* code) {
-  _lock();
+  if (!_lock()) return;   // [p.471] fail-closed: mutation refused, never unsynchronized
   _clearUnlocked(code);
   _unlock();
 }
 
 bool AlarmRegistry::clearIfActive(const char* code) {
-  _lock();
+  if (!_lock()) return false;   // [p.471] fail-closed
   bool cleared = _clearIfActiveUnlocked(code);
   _unlock();
   return cleared;
 }
 
 void AlarmRegistry::acknowledge(const char* code) {
-  _lock();
+  if (!_lock()) return;   // [p.471] fail-closed
   _acknowledgeUnlocked(code);
   _unlock();
 }
 
 void AlarmRegistry::acknowledgeAll() {
-  _lock();
+  if (!_lock()) return;   // [p.471] fail-closed
   _acknowledgeAllUnlocked();
   _unlock();
 }
@@ -367,19 +431,29 @@ void AlarmRegistry::_acknowledgeAllUnlocked() {
 // ===========================================================================
 
 void AlarmRegistry::snapshotInto(Snapshot& out) const {
-  _lock();
+  if (!_lock()) {
+    // [p.471] Fail-closed: without the mutex there IS no coherent snapshot.
+    // Zero-fill the caller buffer (a stale view would lie twice: wrong data
+    // presented as current) and surface the failure counter so consumers
+    // can see the degraded mode. An empty view + lockFailures>0 is the
+    // honest answer.
+    out = Snapshot{};
+    out.lockFailures = _lockFailures.load(std::memory_order_relaxed);
+    return;
+  }
   memcpy(out.alarms, _alarms, sizeof(_alarms));
   out.count = _count;
   out.overflowCount = _overflowCount;
   out.persistFailures = _persistFailures;
   out.generation = _generation;
   out.dirty = _dirty;
+  out.lockFailures = _lockFailures.load(std::memory_order_relaxed);
   _unlock();
 }
 
 uint8_t AlarmRegistry::countActive() const {
+  if (!_lock()) return 0;   // [p.471] fail-closed: no unsynchronized read
   uint8_t n = 0;
-  _lock();
   for (uint8_t i = 0; i < _count; i++) {
     if (_alarms[i].lifecycle != Core::AlarmLifecycle::Cleared) n++;
   }
@@ -388,14 +462,14 @@ uint8_t AlarmRegistry::countActive() const {
 }
 
 uint8_t AlarmRegistry::countAll() const {
-  _lock();
+  if (!_lock()) return 0;   // [p.471] fail-closed
   uint8_t c = _count;
   _unlock();
   return c;
 }
 
 bool AlarmRegistry::find(const char* code, Alarm& out) const {
-  _lock();
+  if (!_lock()) return false;   // [p.471] fail-closed ("not found" — CRIT log marks why)
   uint8_t idx = _findIdx(code);
   bool found = (idx != 0xFF);
   if (found) out = _alarms[idx];   // copy under the lock — no interior pointer escapes
@@ -415,7 +489,7 @@ Core::AlarmSeverity AlarmRegistry::highestSeverityIn(const Alarm* list, uint8_t 
 }
 
 Core::AlarmSeverity AlarmRegistry::highestActiveSeverity() const {
-  _lock();
+  if (!_lock()) return Core::AlarmSeverity::Info;   // [p.471] fail-closed: no claim
   Core::AlarmSeverity h = highestSeverityIn(_alarms, _count);
   _unlock();
   return h;
@@ -432,38 +506,48 @@ uint8_t AlarmRegistry::copyActiveFrom(const Alarm* list, uint8_t count, Alarm* d
 }
 
 uint8_t AlarmRegistry::copyActiveAlarms(Alarm* dst, uint8_t max) const {
-  _lock();
+  if (!_lock()) return 0;   // [p.471] fail-closed
   uint8_t n = copyActiveFrom(_alarms, _count, dst, max);
   _unlock();
   return n;
 }
 
 uint32_t AlarmRegistry::overflowCount() const {
-  _lock();
+  if (!_lock()) return 0;   // [p.471] fail-closed
   uint32_t v = _overflowCount;
   _unlock();
   return v;
 }
 
 bool AlarmRegistry::isDirty() const {
-  _lock();
+  // [p.471] Fail-closed → TRUE (conservative): the persistence checkpoint
+  // keeps attempting saveToNVS() — which also fails closed — so the
+  // STORAGE_ERROR signaling path stays live instead of silently skipping.
+  if (!_lock()) return true;
   bool d = _dirty;
   _unlock();
   return d;
 }
 
 uint32_t AlarmRegistry::persistFailures() const {
-  _lock();
+  if (!_lock()) return 0;   // [p.471] fail-closed (lockFailures() tells the real story)
   uint32_t v = _persistFailures;
   _unlock();
   return v;
 }
 
 uint16_t AlarmRegistry::generation() const {
-  _lock();
+  if (!_lock()) return 0;   // [p.471] fail-closed
   uint16_t g = _generation;
   _unlock();
   return g;
+}
+
+uint32_t AlarmRegistry::lockFailures() const {
+  // [p.471] LOCK-FREE by design: the one accessor that keeps working when
+  // the mutex is unavailable — diagnostics must be able to SEE the degraded
+  // mode, not fail alongside it.
+  return _lockFailures.load(std::memory_order_relaxed);
 }
 
 // ===========================================================================
@@ -475,7 +559,7 @@ uint16_t AlarmRegistry::generation() const {
 // ===========================================================================
 
 bool AlarmRegistry::saveToNVS() {
-  _lock();
+  if (!_lock()) return false;   // [p.471] fail-closed — caller sees a failed save
   bool ok = _saveToNVSUnlocked();
   _unlock();
   return ok;
@@ -550,7 +634,7 @@ bool AlarmRegistry::_saveToNVSUnlocked() {
 }
 
 void AlarmRegistry::loadFromNVS() {
-  _lock();
+  if (!_lock()) return;   // [p.471] fail-closed (only reachable from begin(), post-guard)
   _loadFromNVSUnlocked();
   _unlock();
 }

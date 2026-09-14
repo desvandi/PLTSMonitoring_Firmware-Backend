@@ -131,6 +131,12 @@ void handleGetAlarms() {
   // [p.469] Taken from the SAME snapshot — the counters and the list can
   // no longer describe two different instants.
   doc["overflowCount"] = snap->overflowCount;
+  // [AUDIT 2026-09 ROUND 9 / p.471] Fail-closed observability — non-zero
+  // means at least one registry operation was REFUSED since boot because the
+  // registry mutex was unavailable (degraded mode; CRIT log fires
+  // rate-limited). The alarm list above is only authoritative when this is
+  // 0. Additive field; consumers treat absent as 0.
+  doc["lockFailures"] = snap->lockFailures;
   free(snap);
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);

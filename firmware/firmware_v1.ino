@@ -455,6 +455,28 @@ void setup() {
 
   // Mutexes & queues
   telemetryMutex = xSemaphoreCreateMutex();
+  // [AUDIT 2026-09 ROUND 9 / p.471 — symmetric boot guard] The registry got
+  // the fail-closed treatment; telemetryMutex gets the same boot discipline:
+  // a null handle would make Web::serializeLatestStatusLocked() (the p.470
+  // deep-copy helper) hard-fault on the first xSemaphoreTake(nullptr) the
+  // moment a task touched it. Creation failure at boot = heap exhausted =
+  // FATAL: log, keep the (already isolated) emergency relay isolated, halt
+  // WITHOUT feeding the task watchdog → TWDT panic reset → honest reset
+  // reason + crash-chain accounting. The system never enters multi-task
+  // state without its cross-task mutexes.
+  if (telemetryMutex == nullptr) {
+    Serial.println(F("[FATAL] telemetryMutex creation failed (heap exhausted at boot) "
+                     "— refusing to enter multi-task state (p.471 fail-closed)"));
+    Serial.flush();
+    Services::Log.append(Core::LogType::StorageError,
+                         String("[FATAL] telemetryMutex creation failed — boot REFUSED "
+                                "(p.471): the p.470 status-snapshot serialization "
+                                "requires the mutex; halting for TWDT panic reset"),
+                         -1);
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
+  }
   sensorQueue = xQueueCreate(16, sizeof(Core::SensorSample));
   measurementQueue = xQueueCreate(8, sizeof(Core::MeasurementSnapshot));
 
