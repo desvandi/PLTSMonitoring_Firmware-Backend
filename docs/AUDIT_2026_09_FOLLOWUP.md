@@ -798,3 +798,145 @@ registry-penuh; jalur normal justru yang rusak):
 - `test_audit_round5_2026_09.py` 74/74; seluruh 30 skrip regresi hijau.
 - `pio run -e development -e staging` SUCCESS.
 - PWA: vitest 201/201, lint 0 error, typecheck bersih.
+
+## 12. Round 6 (2026-09-14): eligibility keamanan, quality gate anomali, atomicity persistensi alarm
+
+Audit round-6 (p.453–p.466) membedah AnomalyDetector → sensor-quality
+pipeline → EmergencySupervisor plus persistensi alarm. Empat temuan
+p.445–p.452-family dari round 5 diverifikasi CLOSED oleh auditor; round ini
+menutup seluruh temuan terbuka:
+
+### 12.1 p.457 + p.466 (P1): predikat kelayakan kelas-keselamatan
+
+- **Akar masalah**: satu API `Measurement::isValid()` melayani dua kebutuhan
+  yang berbeda — dashboard (Valid/Derived/Estimated = usable) dan interlock
+  keselamatan (harusnya hanya pengukuran langsung yang segar). Emergency
+  `_readSensors()` memakai `isValid()`, sehingga nilai Derived/Estimated
+  bisa menjadi input trip/ARM.
+- **Fix (API-level, arsitektural)**: `Measurement::isSafetyUsable()` —
+  `quality == Valid && source == Measured && isfinite(value)` — dengan
+  kontrak terdokumentasi eksplisit: `isValid()` = "usable untuk dashboard",
+  `isSafetyUsable()` = "boleh menjadi input interlock keselamatan".
+  `_readSensors()` memakai predikat strict untuk vbat/idc/iac; degradasi
+  kini menjadi NaN → SENSOR_LOSS fail-closed (sensorFailPolicy=1) dan ARM
+  ditolak sampai pengukuran nyata kembali. Kontrak dashboard TIDAK berubah.
+- **Laten bug tambahan (ditemukan saat remediasi)**: raise() pada entri
+  CLEARED tidak pernah mengembalikan lifecycle ke Active — alarm yang
+  pernah di-clear TIDAK PERNAH bisa aktif lagi sepanjang boot (kondisi
+  berulang, mis. overcurrent ke-2, tak terlihat di alarm center). Fixed
+  bersamaan karena menjadi prasyarat semantik p.460; `raisedAt` baru,
+  `clearedAt` reset, severity dimulai dari nilai raise baru.
+
+### 12.2 p.458 (P1/P2): quality gate per-kuantitas di AnomalyDetector
+
+- `AnomalyContext` kini membawa `temperatureQ`/`humidityQ`/`socQ`; call
+  site mengisinya dari kualitas pipeline + `getSocQuality()`.
+- Evaluasi T/H digerbangkan `envEligible()` (hanya Valid) — sensor yang
+  mati/stale tidak lagi dievaluasi sebagai pembacaan hidup.
+- SOC digerbangkan "known" (Estimated tetap eligible — jalur normal shunt
+  coulomb TIDAK dibungkam; NotAvailable/SensorError/Invalid/OutOfRange
+  menangguhkan evaluasi).
+
+### 12.3 p.459 (P1): baseline hanya dari sampel eligible
+
+- Baseline (`_last*`) hanya ditulis dari sampel yang eligible, masing-masing
+  dengan stempel waktu sendiri (`_last*Sec`) — rate detector membagi dengan
+  selisih waktu ANTARA DUA SAMPEL ELIGIBLE, bukan selisih tick terakhir.
+  Sekuens valid → SensorError → valid tidak lagi menghasilkan alarm
+  voltage-jump/current-spike palsu (bug lama: |Δ| dihitung terhadap sampel
+  rusak).
+- Stuck-window arus di-reset pada quality break — sampel dari era sensor
+  berbeda tidak pernah bercampur dalam satu verdict "stuck".
+
+### 12.4 p.460 (P2): semantik jujur saat sensor tidak dapat dinilai
+
+- Ketika kualitas tidak eligible: alarm numerik kuantity tersebut
+  di-clear (clear-if-active — persist NVS hanya sekali pada transisi),
+  alarm sensor-error milik producer tetap menjadi kebenaran yang hidup,
+  dan emergency layer tetap fail-closed independen (SENSOR_LOSS).
+  Operator melihat "OVERCURRENT tidak lagi diklaim" — bukan verdict zombie
+  dari data yang tidak ada. Log transisi tercatat di event log.
+
+### 12.5 p.461 (P2): TELEMETRY_STALE — gap + stall + clear
+
+- Gap sequence: tetap raise.
+- Aliran sehat (konsekutif +1): alarm di-clear jujur (sebelumnya zombie
+  permanen).
+- Stream yang berhenti total (seq beku): dideteksi di jalur queue-timeout
+  measurementTask (`MEAS_STALL_ALARM_MS` 15 s, selaras jendela §6.1) —
+  detektor internal tidak mungkin melihatnya karena tick() hanya berjalan
+  saat sampel TIBA. Pesan alarm membedakan STALL vs GAP.
+
+### 12.6 p.453 + p.455 (P2): persistensi alarm = SATU record NVS atomik
+
+- Layout v2 kunci "state": `magic + version + generation + count + crc32 +
+  alarms[]` — satu `putBytes` = satu transaksi NVS ter-journal (boot melihat
+  generasi lama utuh ATAU generasi baru utuh — tidak pernah campuran).
+- **p.453**: cek panjang STRICT (`w == blobLen`, bukan `w2 != 0`) +
+  read-back verification (`getBytes` + `memcmp`) — short write / media robek
+  dilaporkan gagal, tidak pernah dianggap tersimpan.
+- **p.455**: `generation` (u16, wrap) menjadi penanda transaksi; dikomit
+  HANYA setelah write terverifikasi, di-adopsi kembali saat load; diagnostik
+  boot mencantumkan generasi.
+- Migrasi legacy dua-record: dibaca SEKALI (validasi CRC sama seperti v1),
+  langsung ditulis ulang sebagai record tunggal; pasangan legacy dibiarkan
+  (stale, self-consistent) agar firmware rollback masih menemukan data.
+  Skenario mixed-generation legacy ditolak jujur (empty) oleh CRC.
+
+### 12.7 p.454 (P2): kontrak raise yang jujur
+
+- `RaiseResult` (Rejected / AcceptedRam / AcceptedPersisted /
+  AcceptedPersistFailed) via `raiseTracked()`; `bool raise()` tetap sebagai
+  wrapper TIDAK MENGUBAH caller lama dengan kontrak terdokumentasi: TRUE =
+  "diterima di RAM — BUKAN klaim durability".
+- Kegagalan persist immediate kini tercatat sebagai event StorageError
+  (terlihat di log), dihitung di `persistFailures()`, dan di-retry oleh
+  checkpoint periodik; persistenceTask tetap menaikkan STORAGE_ERROR.
+
+### 12.8 p.465 (P2): watchdog starvation mutex emergency
+
+- `tick()` menghitung starve beruntun; ≥ `EMG_LOCK_STARVE_LIMIT` (20 tick ≈
+  2 s @ 10 Hz) → **force physical fail-safe TANPA mutex** (driver relay =
+  tulisan GPIO murni), alarm EMERGENCY_TRIP Critical, log. State mutex-owned
+  sengaja tidak disentuh dari luar lock.
+- Siklus berikutnya yang berhasil mengunci me-reconcile menjadi trip
+  ter-latch: event type `TRIP` (whitelist GAS — type TIDAK ditambah;
+  reason `INTERNAL` string passthrough, wire-additive), reason vocabulary
+  dipatenkan sebagai pengecualian terdokumentasi di X7.
+- Kontensi transien (< limit) reset bersih — tidak ada alarm palsu.
+  Fault-injection terbukti di harness native (D/E).
+
+### 12.9 p.456: checklist acceptance E2E live (operator)
+
+Deployment READY membuktikan DNS→Vercel→HTML, bukan rantai fungsional.
+Acceptance penuh menunggu perangkat fisik; checklist berikut adalah gerbang
+T14 yang harus dieksekusi dengan device live (bukti per langkah masuk
+`docs/hardware-acceptance/`):
+
+1. **Browser → auth**: login PWA produksi, sesi JWT tersimpan, logout bersih.
+2. **PWA → GAS**: LATEST telemetry muncul < 10 s; envelope HMAC diverifikasi
+   GAS (cek row device di Sheets: kolom signature/nonce terisi).
+3. **GAS → device (jalur perintah)**: ARM/DISARM dari PWA → ACK APPLIED di
+   UI; status relay terkonfirmasi via telemetry `emergency.relayEnergized`.
+4. **Device → telemetry**: sequence monotonic, `soc.lastSync` tampil umur
+   masuk akal (p.445), kualitas sensor (VALID/STALE/...) sesuai kondisi.
+5. **Transaksi relay**: ON/OFF via PWA → `result: EXECUTED` + lifecycle
+   event utuh (pending→executed) + reconciliation status match.
+6. **Alarm end-to-end**: picu kondisi (mis. lepas SHT31) → alarm muncul di
+   alarm center PWA < 15 s + push notification; clear → status konsisten;
+   reboot device → alarm bertahan (blob v2; catat `generation` naik).
+7. **Persistence**: setelah OTA/rollback, alarm history selamat (migrasi v2)
+   dan `overflowCount` == 0 di /api/diagnostics.
+
+### 12.10 Verifikasi round 6
+
+- Native ASAN+UBSAN (struktur 1:1 dengan source): `verify_alarm_blob_atomicity`
+  (35 check), `verify_emg_safety_gate` (30 check), `verify_anomaly_quality_gates`
+  (19 check) — semua lulus, termasuk skenario short-write, CRC-corrupt,
+  mixed-generation legacy, reaktivasi, starvation 20-tick, dan phantom-jump.
+- Gate statis baru `scripts/test_audit_round6_2026_09.py`: 30/30.
+- Regresi: round5 74/74, round4 83/83, round3 42, remediation 65, relay
+  safety 39, transaction durability 30, emg modular 85, emg firmware 50,
+  emg GAS 57, wave12 26/26, phase13d1 9/9, soc 6/6, w7-10 24/24, parity
+  & ack-contract PASS.
+- `pio run -e development -e staging` SUCCESS.

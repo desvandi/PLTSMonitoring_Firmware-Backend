@@ -260,9 +260,14 @@ check("G1. Old drop-lowest-severity-active fallback is GONE",
 check("G2. Eviction candidates are CLEARED only (clearedAt + raisedAt tie-break)",
       "AlarmLifecycle::Cleared" in alarm_code.split("_count >= MAX_ALARMS")[1].split("} else {")[0])
 
-check("G3. Saturation rejects the new alarm and returns false",
+# [ROUND-6 UPDATE 2026-09-14] raise() became a thin wrapper over raiseTracked()
+# (p.454 honest-raise contract); the saturation path now returns
+# RaiseResult::Rejected, which the wrapper converts to the same `false` the
+# original gate pinned. Rejection is still explicit, counted, and logged.
+check("G3. Saturation rejects the new alarm and returns rejection (bool wrapper: false)",
       "REJECTED (not stored)" in alarm_c and
-      bool(re.search(r"_overflowCount\+\+;.*?return false;", alarm_c, re.S)))
+      bool(re.search(r"_overflowCount\+\+;.*?return RaiseResult::Rejected;", alarm_c, re.S)) and
+      "return raiseTracked(code, sev, message) != RaiseResult::Rejected;" in alarm_c)
 
 check("G4. Rejection counted (overflowCount) and rate-limited logged",
       "_overflowCount++" in alarm_code and "60000UL" in alarm_code)
@@ -270,13 +275,20 @@ check("G4. Rejection counted (overflowCount) and rate-limited logged",
 check("G5. raise() returns bool; overflowCount exposed on /api/alarms + /api/diagnostics",
       "bool raise(" in alarm_h and '"overflowCount"' in alarms_api_c and '"alarmRegistryOverflow"' in diags_c)
 
+# [ROUND-6 UPDATE 2026-09-14] The immediate save inside the meaningful branch
+# now captures its result (`bool persisted = saveToNVS();`) for the p.454
+# RaiseResult contract — the persist-immediately behavior is unchanged.
 check("G6. Severity-escalating refresh persists immediately (durability symmetry)",
       "meaningful" in alarm_c and
-      bool(re.search(r"// \[p\.450\] Severity escalation.*?if \(meaningful\) \{\s*_dirty = true;\s*saveToNVS\(\);", alarm_c, re.S)))
+      bool(re.search(r"if \(meaningful\) \{\s*_dirty = true;\s*bool persisted = saveToNVS\(\);", alarm_code)))
 
+# [ROUND-6 UPDATE 2026-09-14] Count bound 5 → 6: loadFromNVS() gained a
+# ONE-TIME legacy→v2 migration write (p.453/p.455 single-record atomicity).
+# The extra saveToNVS() call is boot-time migration, not a per-tick path —
+# the wear-bound intent of this gate is unchanged.
 check("G7. Pure refresh does NOT persist every tick (wear bound)",
       bool(re.search(r"if \(meaningful\) \{[^}]*saveToNVS\(\);[^}]*\}", alarm_code)) and
-      alarm_code.count("saveToNVS();") <= 5)
+      alarm_code.count("saveToNVS();") <= 6)
 
 # [FIX 2026-09-14 — found during post-merge re-verification of p.451]
 # LATENT P0 guarded here: the normal (not-full) append path in raise() never

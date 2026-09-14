@@ -123,6 +123,29 @@ struct Measurement {
             quality == MeasurementQuality::Derived ||
             quality == MeasurementQuality::Estimated) && !std::isnan(value);
   }
+  // [AUDIT 2026-09 ROUND 6 / p.457 + p.466] Safety-grade eligibility — the
+  // STRICTER twin of isValid(). The two predicates answer different
+  // questions and are NOT interchangeable:
+  //
+  //   isValid()        "usable for dashboards / data pipelines?"
+  //                    Valid | Derived | Estimated, non-NaN
+  //   isSafetyUsable() "may this number act as an input to a SAFETY
+  //                     INTERLOCK?" — ONLY a direct, current, valid
+  //                     measurement qualifies.
+  //
+  // A safety function that trips (or worse: declines to trip) on a DERIVED
+  // or ESTIMATED fallback number is acting on a value the hardware never
+  // measured. Derived/Estimated exist so the DASHBOARD stays informative
+  // during sensor degradation; the emergency layer must instead see the
+  // degradation itself (NaN -> sensorFailPolicy=1 -> SENSOR_LOSS, the
+  // fail-closed path). Any code feeding a trip decision, ARM gate, or
+  // interlock MUST use isSafetyUsable(); isValid() there is a defect even
+  // if today's producers happen to publish Measured values.
+  bool isSafetyUsable() const {
+    return quality == MeasurementQuality::Valid
+        && source  == MeasurementSource::Measured
+        && std::isfinite(value);   // finite, not merely non-NaN: ±inf is never a trip input
+  }
   bool isNull() const {
     return std::isnan(value) ||
            quality == MeasurementQuality::Invalid ||
