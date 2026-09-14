@@ -264,10 +264,15 @@ check("G2. Eviction candidates are CLEARED only (clearedAt + raisedAt tie-break)
 # (p.454 honest-raise contract); the saturation path now returns
 # RaiseResult::Rejected, which the wrapper converts to the same `false` the
 # original gate pinned. Rejection is still explicit, counted, and logged.
+# [ROUND-9 UPDATE 2026-09-15] raise() now enumerates the Accepted* outcomes
+# instead of negating Rejected: p.471 added RaiseResult::LockUnavailable
+# (submission REFUSED fail-closed when the mutex is unavailable), which MUST
+# also surface as `false` — a refused submission is never a success. The
+# honest-rejection semantics this gate pins are unchanged.
 check("G3. Saturation rejects the new alarm and returns rejection (bool wrapper: false)",
       "REJECTED (not stored)" in alarm_c and
       bool(re.search(r"_overflowCount\+\+;.*?return RaiseResult::Rejected;", alarm_c, re.S)) and
-      "return raiseTracked(code, sev, message) != RaiseResult::Rejected;" in alarm_c)
+      "return r == RaiseResult::AcceptedRam || r == RaiseResult::AcceptedPersisted ||" in alarm_c)
 
 check("G4. Rejection counted (overflowCount) and rate-limited logged",
       "_overflowCount++" in alarm_code and "60000UL" in alarm_code)

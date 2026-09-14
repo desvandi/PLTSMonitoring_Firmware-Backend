@@ -217,9 +217,15 @@ check("G1. RaiseResult enum with the four durability outcomes",
       "enum class RaiseResult" in alarm_h and
       all(v in alarm_h for v in ("Rejected", "AcceptedRam", "AcceptedPersisted", "AcceptedPersistFailed")))
 
+# [ROUND-9 UPDATE 2026-09-15 / p.471] raise() now enumerates the Accepted*
+# outcomes instead of negating Rejected: RaiseResult gained LockUnavailable
+# (submission REFUSED fail-closed when the mutex is unavailable), which must
+# also surface as `false`. The thin-wrapper + honest-contract semantics this
+# gate pins are unchanged; the wrapper shape is pinned precisely by
+# test_audit_round9_2026_09.py B4.
 check("G2. raiseTracked() implemented; bool raise() is a documented thin wrapper",
       "RaiseResult AlarmRegistry::raiseTracked(" in alarm_c and
-      "!= RaiseResult::Rejected;" in alarm_c and
+      "return r == RaiseResult::AcceptedRam || r == RaiseResult::AcceptedPersisted ||" in alarm_c and
       "NOT a durability" in alarm_h)
 
 check("G3. Immediate-persist failure logged as StorageError (never silent)",

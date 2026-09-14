@@ -13,6 +13,13 @@
 # which ThreadSanitizer MUST flag. A clean negative control would mean the
 # harness is blind and the treatment result is worthless.
 #
+# Round-9 (p.471) adds a SECOND negative control to the same harness:
+# -DLOCK_FAIL_OPEN compiles the ROUND-7 fail-open _lock() (mutex unavailable
+# → proceed WITHOUT synchronization and claim success). The p.471 phases
+# (boot guard, fail-closed storm, recovery) MUST trip their assertions in
+# that mode — a clean exit would mean the harness cannot detect the
+# fail-open class p.471 removes.
+#
 # Usage: bash scripts/native/run-native-tests.sh   (needs g++; exit 0 = PASS)
 set -u
 cd "$(dirname "$0")"
@@ -59,6 +66,29 @@ else
   fi
 fi
 
+echo "=== verify_alarm_concurrency (NEGATIVE CONTROL p.471, ROUND-7 FAIL-OPEN _lock under TSAN) ==="
+# [AUDIT 2026-09 ROUND 9 / p.471] The fail-open shape (mutex unavailable →
+# proceed WITHOUT the lock, claim success) is the bug class round-9 removes.
+# The p.471 phases (boot guard / fail-closed storm / recovery) MUST trip in
+# this mode — assertions, TSAN races, or both. A clean exit is a FAILURE
+# (blind harness); a nonzero exit with neither a TSAN report nor the p.471
+# sentinel is INCONCLUSIVE.
+if ! g++ -std=c++17 -g -fsanitize=thread -DLOCK_FAIL_OPEN -pthread -o vac_failopen verify_alarm_concurrency.cpp; then
+  echo "COMPILE FAIL: verify_alarm_concurrency (p.471 negative control)"; fails=$((fails+1))
+else
+  if ./vac_failopen > vac_failopen.log 2>&1; then
+    echo "NEGATIVE CONTROL FAILED (p.471): fail-open registry ran clean — the harness cannot detect the fail-open class"
+    fails=$((fails+1))
+  else
+    if grep -q "WARNING: ThreadSanitizer" vac_failopen.log || grep -q "P471 NEGATIVE CONTROL TRIPPED" vac_failopen.log; then
+      echo "NEGATIVE CONTROL OK (p.471): fail-open shape detected ($(grep -c 'WARNING: ThreadSanitizer' vac_failopen.log) TSAN report(s) + sentinel) — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE (p.471): nonzero exit but no TSAN report / no sentinel — investigate vac_failopen.log"
+      fails=$((fails+1))
+    fi
+  fi
+fi
+
 echo "=== verify_status_snapshot_detach (TREATMENT, ThreadSanitizer) ==="
 if ! g++ -std=c++17 -g -fsanitize=thread -pthread -o vsd_tsan verify_status_snapshot_detach.cpp; then
   echo "COMPILE FAIL: verify_status_snapshot_detach (tsan)"; fails=$((fails+1))
@@ -99,7 +129,7 @@ else
 fi
 
 rm -f verify_alarm_blob_atomicity verify_emg_safety_gate verify_anomaly_quality_gates \
-      vac_tsan vac_asan vac_unlocked vac_unlocked.log \
+      vac_tsan vac_asan vac_unlocked vac_unlocked.log vac_failopen vac_failopen.log \
       vsd_tsan vsd_asan vsd_unlocked vsd_unlocked.log
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL NATIVE HARNESS GREEN"; else echo "$fails harness(es) FAILED"; exit 1; fi

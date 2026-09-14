@@ -103,6 +103,50 @@
 //     a task/loop/web-handler context; the lock helper would be unusable
 //     from interrupt context.
 //
+// [AUDIT 2026-09 ROUND 9 / p.471 — FAIL-CLOSED MUTEX ACQUISITION] The
+//   round-7 _lock() was fail-OPEN: if xSemaphoreCreateMutex() returned
+//   nullptr (extreme boot-time OOM), the registry silently proceeded
+//   WITHOUT synchronization — every p.467/p.468/p.469 guarantee evaporated
+//   exactly when the system entered multi-task state. Remediation (hybrid):
+//
+//     begin()  — BOOT GUARD: mutex creation failure is FATAL. The device
+//                logs [FATAL], keeps the emergency relay isolated (it has
+//                been since the first lines of setup()), and halts WITHOUT
+//                feeding the task watchdog → deterministic TWDT panic reset
+//                (~10 s) → reset reason + EmergencySupervisor crash-chain
+//                account the failure. The system NEVER enters multi-task
+//                state without the serialization guarantee.
+//     _lock()  — RUNTIME DEFENSE-IN-DEPTH: returns bool. If the handle is
+//                unavailable it retries creation ONCE; still failing → the
+//                operation is REJECTED (fail-closed), a CRIT log fires
+//                (rate-limited) and _lockFailures++ makes the degraded mode
+//                observable. Post-boot-guard this path is unreachable except
+//                via catastrophic heap corruption — and exactly then,
+//                refusing to touch shared state unsynchronized is the only
+//                correct answer.
+//
+//   Fail-closed contract of every public entry (documented per-method):
+//     raiseTracked()      → RaiseResult::LockUnavailable (new enum value)
+//     raise()             → false
+//     clear()/acknowledge()/acknowledgeAll() → no-op (mutation refused)
+//     clearIfActive()     → false
+//     saveToNVS()         → false (persistenceTask surfaces STORAGE_ERROR)
+//     loadFromNVS()       → no-op
+//     snapshotInto()      → caller buffer ZERO-FILLED + lockFailures>0
+//                           (an empty view is honest about being unable to
+//                           see the registry; a stale view would lie twice)
+//     find()              → false
+//     countAll()/countActive()/copyActiveAlarms()/overflowCount()/
+//     persistFailures()/generation() → 0
+//     highestActiveSeverity() → Info (no claim — the degraded mode is
+//                           already flagged by lockFailures>0 + CRIT logs)
+//     isDirty()           → TRUE (conservative: the checkpoint keeps
+//                           attempting and keeps the STORAGE_ERROR signaling
+//                           path alive in the degraded mode)
+//     lockFailures()      → lock-free atomic read — by design the ONE
+//                           accessor that keeps working when the mutex is
+//                           unavailable (diagnostics observability).
+//
 // Codes per brief §35 (PLTS-specific):
 //   BATTERY_VOLTAGE_LOW, BATTERY_VOLTAGE_HIGH, BATTERY_VOLTAGE_INVALID,
 //   BATTERY_OVERCURRENT_CHARGE, BATTERY_OVERCURRENT_DISCHARGE,
@@ -120,6 +164,7 @@
 #define PLTS_SERVICES_ALARM_REGISTRY_H
 
 #include <Arduino.h>
+#include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -145,6 +190,8 @@ enum class RaiseResult : uint8_t {
   AcceptedRam = 1,           // in the RAM registry; no immediate NVS write needed (pure refresh)
   AcceptedPersisted = 2,     // in RAM AND the immediate NVS write verified OK
   AcceptedPersistFailed = 3,  // in RAM; the immediate NVS write FAILED (checkpoint retries)
+  LockUnavailable = 4,       // [p.471] registry mutex unavailable — submission REFUSED
+                             // (fail-closed: no unsynchronized mutation, ever)
 };
 
 class AlarmRegistry {
@@ -164,11 +211,16 @@ public:
     uint32_t persistFailures;
     uint16_t generation;
     bool     dirty;
+    uint32_t lockFailures;       // [p.471] lock-unavailable events — non-zero
+                                 // marks a degraded (fail-closed) registry
   };
 
   void begin();
   // [p.454] Durability-aware submission — same registry semantics as
   // raise() plus the persistence outcome. See RaiseResult.
+  // [p.471] Returns LockUnavailable when the registry mutex could not be
+  // acquired (creation retry failed) — the submission was REFUSED, nothing
+  // was mutated, and the failure is counted in lockFailures().
   RaiseResult raiseTracked(const char* code, Core::AlarmSeverity sev,
                            const char* message = "");
   // Idempotent raise — refreshes existing alarm instead of duplicating.
@@ -177,6 +229,8 @@ public:
   // [p.454] TRUE means "accepted in the RAM registry" — NOT a durability
   // claim. Durability outcomes: raiseTracked() / persistFailures() /
   // STORAGE_ERROR raised by the persistence task on continued failure.
+  // [p.471] Also FALSE when the submission was refused fail-closed
+  // (LockUnavailable) — never a silent success.
   bool raise(const char* code, Core::AlarmSeverity sev, const char* message = "");
   // Clear an alarm (active → cleared).
   void clear(const char* code);
@@ -193,6 +247,11 @@ public:
   // copies data out — none of them expose a pointer into the registry
   // (p.469). Each call is individually coherent; use snapshotInto() when
   // several fields must be mutually consistent.
+  // [p.471] Fail-closed contract: when the mutex is unavailable these
+  // accessors return the documented empty/zero values (see the round-9
+  // block in the file header) — they never read registry state without
+  // synchronization. snapshotInto() zero-fills the caller buffer and
+  // surfaces lockFailures so the degraded mode is observable.
   void snapshotInto(Snapshot& out) const;
   uint8_t countActive() const;
   uint8_t countAll() const;
@@ -221,6 +280,12 @@ public:
   // [p.451] Registry saturation observability.
   uint32_t overflowCount() const;
 
+  // [p.471] Lock-unavailable counter — LOCK-FREE atomic read, the ONE
+  // accessor deliberately working when the registry mutex is unavailable
+  // (that is its whole point: diagnostics in the degraded mode). Non-zero
+  // means at least one operation was refused fail-closed since boot.
+  uint32_t lockFailures() const;
+
   // [FW-23] Persistence — alarms survive reboot (versioned NVS blob + CRC).
   // raise()/clear()/acknowledge() set the dirty flag; persistenceTask
   // checkpoints dirty state; operator actions (clear/ack) save immediately.
@@ -246,11 +311,14 @@ public:
 private:
   // [p.467] ONE registry mutex. Created in begin() (setup(), before any
   // task exists — see firmware_v1.ino: alarms.begin() at setup time, task
-  // creation afterwards); the lazy-create fallback in _lock() only serves
-  // pre-scheduler single-threaded callers, same pattern as
-  // AuthManager/LogService/BatteryCommManager. NOT recursive by design: the
-  // Unlocked implementations must never be reachable while the lock is
-  // held, making nested acquisition structurally impossible.
+  // creation afterwards). NOT recursive by design: the Unlocked
+  // implementations must never be reachable while the lock is held, making
+  // nested acquisition structurally impossible.
+  // [p.471] Creation failure in begin() is FATAL (boot guard). The retry in
+  // _lock() only serves pre-scheduler single-threaded callers and the
+  // catastrophic post-boot case — and it REJECTS the operation instead of
+  // proceeding unsynchronized (fail-closed). The old fail-open
+  // "if (_mutex) take" shape is gone.
   mutable SemaphoreHandle_t _mutex = nullptr;
 
   Alarm  _alarms[MAX_ALARMS] = {};
@@ -260,10 +328,20 @@ private:
   uint32_t _persistFailures = 0; // [p.439-family] failed NVS writes (this boot)
   uint16_t _generation = 0;      // [p.455] persisted-snapshot generation
 
+  // [p.471] Fail-closed accounting — ATOMIC by necessity: these are the
+  // only registry members written on the mutex-UNAVAILABLE path, where no
+  // synchronization exists. Relaxed ordering (counters/flags, no publishes).
+  mutable std::atomic<uint32_t> _lockFailures{0};
+  mutable std::atomic<uint32_t> _lastLockFailLogMs{0};   // rate-limit bookkeeping
+
   // ---- [p.467] lock discipline: public API locks, private *Unlocked runs
   // under it. Nothing below may take the mutex (deadlock-free by
   // construction). _findIdx is Unlocked-context only.
-  void _lock() const;
+  // [p.471] _lock() is FAIL-CLOSED: it returns false when the mutex cannot
+  // be acquired (creation retry failed) — every public wrapper MUST refuse
+  // the operation in that case; nobody may reach an *Unlocked body without
+  // holding the lock. _unlock() is only ever called after a TRUE _lock().
+  bool _lock() const;
   void _unlock() const;
   uint8_t _findIdx(const char* code) const;
 

@@ -52,6 +52,11 @@ void handleGet() {
   doc["socPersistFailures"] = Services::socStateMachine.persistFailures();
   doc["alarmPersistFailures"] = Services::alarms.persistFailures();
   doc["alarmRegistryOverflow"] = Services::alarms.overflowCount();
+  // [AUDIT 2026-09 ROUND 9 / p.471] Lock-unavailable counter — lock-free read
+  // by design, so diagnostics can still SEE the degraded mode when the
+  // registry mutex is unavailable (every other accessor is fail-closed to
+  // empty/zero values then). Non-zero = at least one operation refused.
+  doc["alarmLockFailures"] = Services::alarms.lockFailures();
   // [AUDIT 2026-09 ROUND 6 / p.455] Persisted-snapshot generation — proves
   // which NVS transaction the current alarm state came from (boot log line
   // records the same number; a post-mortem can correlate the two).

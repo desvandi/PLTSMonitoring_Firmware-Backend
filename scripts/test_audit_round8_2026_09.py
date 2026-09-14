@@ -166,13 +166,18 @@ check("D4. Harness torn-entry detector is generation-consistency based (tagA==ta
 # ---------------------------------------------------------------------------
 print("\n[E] Round-7 registry invariants untouched by the round-8 fix")
 
-check("E1. AlarmRegistry source unchanged (locked wrappers + Unlocked discipline intact)",
-      "bool AlarmRegistry::saveToNVS() { _lock();" in alarm_code.replace("\n", " ") or
-      bool(re.search(r"bool AlarmRegistry::saveToNVS\(\) \{\s*_lock\(\);", alarm_code)))
+# [ROUND-9 UPDATE 2026-09-15 / p.471] The registry wrappers now GUARD the
+# lock result before delegating ("if (!_lock()) return <fail-closed>;") —
+# the locked-entry semantics this gate protects are unchanged (see
+# test_audit_round9_2026_09.py for the fail-closed contract itself).
+check("E1. AlarmRegistry source: locked wrappers + Unlocked discipline intact",
+      bool(re.search(r"bool AlarmRegistry::saveToNVS\(\) \{\s*if \(!_lock\(\)\) return false;\s*"
+                     r"bool ok = _saveToNVSUnlocked\(\);\s*_unlock\(\);", alarm_code)))
 
 check("E2. snapshotInto still one-lock whole-state copy",
-      bool(re.search(r"void AlarmRegistry::snapshotInto\(Snapshot& out\) const \{[^}]*_lock\(\);",
-                     alarm_code, re.S)))
+      bool(re.search(r"void AlarmRegistry::snapshotInto\(Snapshot& out\) const \{\s*"
+                     r"if \(!_lock\(\)\)", alarm_code)) and
+      "memcpy(out.alarms, _alarms, sizeof(_alarms));" in alarm_code)
 
 check("E3. No raw-pointer accessors resurrected",
       "getAlarm(" not in strip_comments(alarm_h) and
