@@ -1328,12 +1328,20 @@ void publishTelemetry() {
     // spool-overflow gap from a reboot gap from a device that stopped
     // sending — evidence for the cross-layer telemetry audit.
     latestStatus.health.spoolDrops = Services::telemetrySpool.dropCount();
-    latestStatus.health.highestAlarmSeverity = Services::alarms.highestActiveSeverity();
-    // [FW-23 REMEDIATION 2026-08] Alarms — ACTIVE ONLY (Active + Acknowledged,
-    // never Cleared). The old pointer + count pair exposed the full registry
-    // array INCLUDING cleared alarms in every telemetry envelope.
+    // [AUDIT 2026-09 ROUND 7 / p.469] ONE coherent snapshot for the whole
+    // envelope — the old pair (highestActiveSeverity() + copyActiveAlarms())
+    // was two separately-locked reads, so the severity line and the alarm
+    // list could describe two different instants when an alarm raised or
+    // cleared between them. The static Snapshot replaces the old static
+    // Alarm buffer (same 24-entry array inside, ~14 extra bytes of counters)
+    // — static storage, never the 4-6 KB telemetry task stack.
+    static Services::AlarmRegistry::Snapshot s_alarmSnap;
+    Services::alarms.snapshotInto(s_alarmSnap);
+    latestStatus.health.highestAlarmSeverity =
+        Services::AlarmRegistry::highestSeverityIn(s_alarmSnap.alarms, s_alarmSnap.count);
     static Services::Alarm s_activeAlarmsBuf[Services::AlarmRegistry::MAX_ALARMS];
-    latestStatus.activeAlarmCount = Services::alarms.copyActiveAlarms(
+    latestStatus.activeAlarmCount = Services::AlarmRegistry::copyActiveFrom(
+        s_alarmSnap.alarms, s_alarmSnap.count,
         s_activeAlarmsBuf, Services::AlarmRegistry::MAX_ALARMS);
     latestStatus.activeAlarms = s_activeAlarmsBuf;
     snapshot = latestStatus;

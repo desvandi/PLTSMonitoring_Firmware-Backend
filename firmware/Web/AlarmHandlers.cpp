@@ -68,8 +68,9 @@ static bool runAlarmAckPipeline(const String& action, const String& code,
   // Execute
   bool ok;
   if (action == "acknowledge") {
-    const Services::Alarm* a = Services::alarms.find(code.c_str());
-    if (!a) {
+    // [p.467] find() is copy-out: no interior pointer into the registry.
+    Services::Alarm a;
+    if (!Services::alarms.find(code.c_str(), a)) {
       // P1-3 canonical contract: 404 when alarm code not found (was: silently OK)
       httpStatusOut = 404;
       errMsgOut = "Alarm not found";
@@ -100,8 +101,18 @@ void handleGetAlarms() {
   StaticJsonDocument<4096> doc;
   JsonArray active = doc.createNestedArray("active");
   JsonArray history = doc.createNestedArray("history");
-  for (uint8_t i = 0; i < Services::alarms.countAll(); i++) {
-    const Services::Alarm* a = Services::alarms.getAlarm(i);
+  // [AUDIT 2026-09 ROUND 7 / p.469] ONE coherent snapshot — the old
+  // countAll()+getAlarm(i) loop re-entered the registry once per entry,
+  // and a concurrent raise/clear/eviction between iterations served a JSON
+  // body stitched from two different registry states (or nullptr holes when
+  // _count shrank mid-loop). Heap-allocated: a Snapshot is ~3.3 KB, too
+  // large for the async-web task stack.
+  Services::AlarmRegistry::Snapshot* snap =
+      (Services::AlarmRegistry::Snapshot*)malloc(sizeof(Services::AlarmRegistry::Snapshot));
+  if (!snap) { sendError(500, "Out of memory"); return; }
+  Services::alarms.snapshotInto(*snap);
+  for (uint8_t i = 0; i < snap->count; i++) {
+    const Services::Alarm* a = &snap->alarms[i];
     if (!a) continue;
     JsonArray& dst = (a->lifecycle == Core::AlarmLifecycle::Active) ? active : history;
     JsonObject o = dst.createNestedObject();
@@ -117,7 +128,10 @@ void handleGetAlarms() {
   // non-zero overflowCount means at least one alarm was REJECTED because all
   // MAX_ALARMS slots held non-cleared entries (no active safety alarm is ever
   // evicted to make room). Additive field; consumers treat absent as 0.
-  doc["overflowCount"] = Services::alarms.overflowCount();
+  // [p.469] Taken from the SAME snapshot — the counters and the list can
+  // no longer describe two different instants.
+  doc["overflowCount"] = snap->overflowCount;
+  free(snap);
   String out; serializeJson(doc, out);
   sendSuccess("OK", out);
 }

@@ -1,6 +1,18 @@
 // =============================================================================
 // Services/AlarmRegistry.cpp
 // =============================================================================
+// [AUDIT 2026-09 ROUND 7 / p.467 + p.468 + p.469] Lock discipline, top to
+// bottom: every PUBLIC entry point acquires the registry mutex and then runs
+// a private *Unlocked() implementation; no Unlocked implementation ever
+// takes the mutex (deadlock is structurally impossible — the mutex is
+// non-recursive and nested acquisition is not expressible). The immediate
+// NVS saves inside raise/clear/ack run while STILL holding the lock, so the
+// RAM mutation + blob build + write + read-back is ONE serialized
+// transaction — the p.468 mixed-generation interleaving (two saveToNVS()
+// callers building blobs from different RAM snapshots) cannot occur, and a
+// concurrent mutator can never slip between the RAM update and the write.
+// Readers copy data out under the lock; no public API exposes a pointer
+// into the registry.
 #include "AlarmRegistry.h"
 #include "LogService.h"
 #include "../Core/Types.h"
@@ -63,7 +75,28 @@ struct AlarmPersistHeaderV1 {
 };
 } // namespace
 
+// ---------------------------------------------------------------------------
+// [p.467] Mutex primitives. begin() runs in setup() BEFORE any task exists
+// (firmware_v1.ino: alarms.begin() precedes every xTaskCreatePinnedToCore),
+// so the primary creation is race-free; the lazy-create fallback below only
+// serves pre-scheduler single-threaded callers, the same pattern already
+// audited in AuthManager / LogService / BatteryCommManager. FreeRTOS
+// mutexes carry priority inheritance, so a high-priority emergency raise()
+// blocked behind a web-task saveToNVS() boosts the holder instead of
+// starving. NOT callable from ISR context (see header contract).
+// ---------------------------------------------------------------------------
+void AlarmRegistry::_lock() const {
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
+  if (_mutex) xSemaphoreTake(_mutex, portMAX_DELAY);
+}
+
+void AlarmRegistry::_unlock() const {
+  if (_mutex) xSemaphoreGive(_mutex);
+}
+
 void AlarmRegistry::begin() {
+  // Create the mutex FIRST — loadFromNVS() locks through the public entry.
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
   _count = 0;
   _dirty = false;
   _generation = 0;
@@ -77,6 +110,8 @@ void AlarmRegistry::begin() {
   loadFromNVS();
 }
 
+// Caller of _findIdx MUST hold the registry lock (p.467: every public path
+// acquires it before reaching here).
 uint8_t AlarmRegistry::_findIdx(const char* code) const {
   if (!code) return 0xFF;
   for (uint8_t i = 0; i < _count; i++) {
@@ -84,6 +119,10 @@ uint8_t AlarmRegistry::_findIdx(const char* code) const {
   }
   return 0xFF;
 }
+
+// ===========================================================================
+// Public mutation API — locked wrappers (p.467/p.468)
+// ===========================================================================
 
 bool AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char* message) {
   // [p.454] Thin wrapper: TRUE = accepted in the RAM registry (NOT a
@@ -93,6 +132,45 @@ bool AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char*
 
 RaiseResult AlarmRegistry::raiseTracked(const char* code, Core::AlarmSeverity sev,
                                         const char* message) {
+  _lock();
+  RaiseResult r = _raiseTrackedUnlocked(code, sev, message);
+  _unlock();
+  return r;
+}
+
+void AlarmRegistry::clear(const char* code) {
+  _lock();
+  _clearUnlocked(code);
+  _unlock();
+}
+
+bool AlarmRegistry::clearIfActive(const char* code) {
+  _lock();
+  bool cleared = _clearIfActiveUnlocked(code);
+  _unlock();
+  return cleared;
+}
+
+void AlarmRegistry::acknowledge(const char* code) {
+  _lock();
+  _acknowledgeUnlocked(code);
+  _unlock();
+}
+
+void AlarmRegistry::acknowledgeAll() {
+  _lock();
+  _acknowledgeAllUnlocked();
+  _unlock();
+}
+
+// ===========================================================================
+// Unlocked implementations — run ONLY while the registry lock is held.
+// The immediate saves below stay INSIDE the lock on purpose (p.468): the
+// RAM mutation and the NVS transaction must be one serialized unit.
+// ===========================================================================
+
+RaiseResult AlarmRegistry::_raiseTrackedUnlocked(const char* code, Core::AlarmSeverity sev,
+                                                const char* message) {
   if (!code) return RaiseResult::Rejected;
   uint8_t idx = _findIdx(code);
   if (idx == 0xFF) {
@@ -171,7 +249,9 @@ RaiseResult AlarmRegistry::raiseTracked(const char* code, Core::AlarmSeverity se
     // [p.450] A NEW alarm is a state transition — durable immediately (the
     // periodic checkpoint remains as backstop for multi-raise bursts).
     // [p.454] The persistence outcome is now part of the return contract.
-    bool persisted = saveToNVS();
+    // [p.468] _saveToNVSUnlocked: the save runs while we still hold the
+    // registry lock — RAM update + write + read-back is one transaction.
+    bool persisted = _saveToNVSUnlocked();
     if (!persisted) {
       Log.append(Core::LogType::StorageError,
                  String("[ALARM:") + code + "] accepted in RAM but the immediate " +
@@ -219,7 +299,7 @@ RaiseResult AlarmRegistry::raiseTracked(const char* code, Core::AlarmSeverity se
     // adding durability guarantees.
     if (meaningful) {
       _dirty = true;
-      bool persisted = saveToNVS();
+      bool persisted = _saveToNVSUnlocked();
       if (!persisted) {
         Log.append(Core::LogType::StorageError,
                    String("[ALARM:") + code + "] meaningful update accepted in RAM but the immediate NVS persistence FAILED (retry via checkpoint)", -1);
@@ -230,7 +310,7 @@ RaiseResult AlarmRegistry::raiseTracked(const char* code, Core::AlarmSeverity se
   }
 }
 
-void AlarmRegistry::clear(const char* code) {
+void AlarmRegistry::_clearUnlocked(const char* code) {
   uint8_t idx = _findIdx(code);
   if (idx == 0xFF) return;
   Alarm& a = _alarms[idx];
@@ -238,11 +318,28 @@ void AlarmRegistry::clear(const char* code) {
   a.clearedAt = Drivers::rtc.getUnixTime();
   a.lastUpdatedAt = a.clearedAt;
   _dirty = true;
-  saveToNVS();   // [FW-23] operator action — persist immediately
+  _saveToNVSUnlocked();   // [FW-23] operator action — persist immediately
   Log.append(Core::LogType::AlarmCleared, String("Alarm cleared: ") + code, -1);
 }
 
-void AlarmRegistry::acknowledge(const char* code) {
+bool AlarmRegistry::_clearIfActiveUnlocked(const char* code) {
+  uint8_t idx = _findIdx(code);
+  if (idx == 0xFF) return false;
+  Alarm& a = _alarms[idx];
+  // [p.467] Atomic test-and-clear: find()→check→clear() as two lock
+  // acquisitions had a window where a concurrent re-raise was silently
+  // cleared by this evaluator's stale "condition gone" decision.
+  if (a.lifecycle == Core::AlarmLifecycle::Cleared) return false;
+  a.lifecycle = Core::AlarmLifecycle::Cleared;
+  a.clearedAt = Drivers::rtc.getUnixTime();
+  a.lastUpdatedAt = a.clearedAt;
+  _dirty = true;
+  _saveToNVSUnlocked();
+  Log.append(Core::LogType::AlarmCleared, String("Alarm cleared: ") + code, -1);
+  return true;
+}
+
+void AlarmRegistry::_acknowledgeUnlocked(const char* code) {
   uint8_t idx = _findIdx(code);
   if (idx == 0xFF) return;
   Alarm& a = _alarms[idx];
@@ -250,11 +347,11 @@ void AlarmRegistry::acknowledge(const char* code) {
   a.acknowledgedAt = Drivers::rtc.getUnixTime();
   a.lastUpdatedAt = a.acknowledgedAt;
   _dirty = true;
-  saveToNVS();   // [FW-23] operator action — persist immediately
+  _saveToNVSUnlocked();   // [FW-23] operator action — persist immediately
   Log.append(Core::LogType::AlarmAcknowledged, String("Alarm acknowledged: ") + code, -1);
 }
 
-void AlarmRegistry::acknowledgeAll() {
+void AlarmRegistry::_acknowledgeAllUnlocked() {
   for (uint8_t i = 0; i < _count; i++) {
     if (_alarms[i].lifecycle == Core::AlarmLifecycle::Active) {
       _alarms[i].lifecycle = Core::AlarmLifecycle::Acknowledged;
@@ -262,30 +359,129 @@ void AlarmRegistry::acknowledgeAll() {
     }
   }
   _dirty = true;
-  saveToNVS();   // [FW-23] operator action — persist immediately
+  _saveToNVSUnlocked();   // [FW-23] operator action — persist immediately
+}
+
+// ===========================================================================
+// Reads — every accessor locks internally and copies data out (p.469).
+// ===========================================================================
+
+void AlarmRegistry::snapshotInto(Snapshot& out) const {
+  _lock();
+  memcpy(out.alarms, _alarms, sizeof(_alarms));
+  out.count = _count;
+  out.overflowCount = _overflowCount;
+  out.persistFailures = _persistFailures;
+  out.generation = _generation;
+  out.dirty = _dirty;
+  _unlock();
 }
 
 uint8_t AlarmRegistry::countActive() const {
   uint8_t n = 0;
+  _lock();
   for (uint8_t i = 0; i < _count; i++) {
     if (_alarms[i].lifecycle != Core::AlarmLifecycle::Cleared) n++;
   }
+  _unlock();
   return n;
 }
 
-uint8_t AlarmRegistry::countAll() const { return _count; }
+uint8_t AlarmRegistry::countAll() const {
+  _lock();
+  uint8_t c = _count;
+  _unlock();
+  return c;
+}
 
-uint8_t AlarmRegistry::copyActiveAlarms(Alarm* dst, uint8_t max) const {
+bool AlarmRegistry::find(const char* code, Alarm& out) const {
+  _lock();
+  uint8_t idx = _findIdx(code);
+  bool found = (idx != 0xFF);
+  if (found) out = _alarms[idx];   // copy under the lock — no interior pointer escapes
+  _unlock();
+  return found;
+}
+
+Core::AlarmSeverity AlarmRegistry::highestSeverityIn(const Alarm* list, uint8_t count) {
+  Core::AlarmSeverity h = Core::AlarmSeverity::Info;
+  for (uint8_t i = 0; i < count; i++) {
+    if (list[i].lifecycle != Core::AlarmLifecycle::Cleared &&
+        (uint8_t)list[i].severity > (uint8_t)h) {
+      h = list[i].severity;
+    }
+  }
+  return h;
+}
+
+Core::AlarmSeverity AlarmRegistry::highestActiveSeverity() const {
+  _lock();
+  Core::AlarmSeverity h = highestSeverityIn(_alarms, _count);
+  _unlock();
+  return h;
+}
+
+uint8_t AlarmRegistry::copyActiveFrom(const Alarm* list, uint8_t count, Alarm* dst, uint8_t max) {
   uint8_t n = 0;
-  for (uint8_t i = 0; i < _count && n < max; i++) {
-    if (_alarms[i].lifecycle != Core::AlarmLifecycle::Cleared) {
-      dst[n++] = _alarms[i];
+  for (uint8_t i = 0; i < count && n < max; i++) {
+    if (list[i].lifecycle != Core::AlarmLifecycle::Cleared) {
+      dst[n++] = list[i];
     }
   }
   return n;
 }
 
+uint8_t AlarmRegistry::copyActiveAlarms(Alarm* dst, uint8_t max) const {
+  _lock();
+  uint8_t n = copyActiveFrom(_alarms, _count, dst, max);
+  _unlock();
+  return n;
+}
+
+uint32_t AlarmRegistry::overflowCount() const {
+  _lock();
+  uint32_t v = _overflowCount;
+  _unlock();
+  return v;
+}
+
+bool AlarmRegistry::isDirty() const {
+  _lock();
+  bool d = _dirty;
+  _unlock();
+  return d;
+}
+
+uint32_t AlarmRegistry::persistFailures() const {
+  _lock();
+  uint32_t v = _persistFailures;
+  _unlock();
+  return v;
+}
+
+uint16_t AlarmRegistry::generation() const {
+  _lock();
+  uint16_t g = _generation;
+  _unlock();
+  return g;
+}
+
+// ===========================================================================
+// Persistence — public LOCKED entries (p.468: the persistence-task
+// checkpoint and the immediate saves above serialize through this mutex;
+// two concurrent saveToNVS() callers cannot build blobs from different RAM
+// snapshots). The full-length check, read-back verification and generation
+// commit all live inside _saveToNVSUnlocked, i.e. inside the lock.
+// ===========================================================================
+
 bool AlarmRegistry::saveToNVS() {
+  _lock();
+  bool ok = _saveToNVSUnlocked();
+  _unlock();
+  return ok;
+}
+
+bool AlarmRegistry::_saveToNVSUnlocked() {
   // [p.453] STRICT full-length check: the old code accepted the array write
   // with `w2 != 0`, so a partial write of the alarm array still reported
   // success while the CRC would only reject it at the NEXT boot — the save
@@ -354,6 +550,12 @@ bool AlarmRegistry::saveToNVS() {
 }
 
 void AlarmRegistry::loadFromNVS() {
+  _lock();
+  _loadFromNVSUnlocked();
+  _unlock();
+}
+
+void AlarmRegistry::_loadFromNVSUnlocked() {
   Preferences p;
   if (!p.begin("plts_alarm", true)) return;   // namespace absent — fresh, honest
 
@@ -437,32 +639,10 @@ void AlarmRegistry::loadFromNVS() {
                String("[ALARM] migrated ") + _count +
                " alarm(s) from the legacy two-record layout — rewriting as a single " +
                "atomic record", -1);
-    saveToNVS();   // one-time migration write (v2 becomes authoritative)
+    _saveToNVSUnlocked();   // one-time migration write (v2 becomes authoritative)
     // The legacy pair is deliberately left in place (NOT kept in sync): a
     // firmware rollback still finds a self-consistent, if stale, snapshot.
   }
-}
-
-const Alarm* AlarmRegistry::getAlarm(uint8_t idx) const {
-  if (idx >= _count) return nullptr;
-  return &_alarms[idx];
-}
-
-const Alarm* AlarmRegistry::find(const char* code) const {
-  uint8_t idx = _findIdx(code);
-  if (idx == 0xFF) return nullptr;
-  return &_alarms[idx];
-}
-
-Core::AlarmSeverity AlarmRegistry::highestActiveSeverity() const {
-  Core::AlarmSeverity h = Core::AlarmSeverity::Info;
-  for (uint8_t i = 0; i < _count; i++) {
-    if (_alarms[i].lifecycle != Core::AlarmLifecycle::Cleared &&
-        (uint8_t)_alarms[i].severity > (uint8_t)h) {
-      h = _alarms[i].severity;
-    }
-  }
-  return h;
 }
 
 } // namespace Services

@@ -278,17 +278,28 @@ check("G5. raise() returns bool; overflowCount exposed on /api/alarms + /api/dia
 # [ROUND-6 UPDATE 2026-09-14] The immediate save inside the meaningful branch
 # now captures its result (`bool persisted = saveToNVS();`) for the p.454
 # RaiseResult contract — the persist-immediately behavior is unchanged.
+# [ROUND-7 UPDATE 2026-09-14] The internal immediate-save call became
+# _saveToNVSUnlocked() — p.467/p.468: the mutation and its NVS transaction
+# now run INSIDE the registry lock (public saveToNVS() would double-lock a
+# non-recursive mutex). The persist-immediately behavior is unchanged.
 check("G6. Severity-escalating refresh persists immediately (durability symmetry)",
       "meaningful" in alarm_c and
-      bool(re.search(r"if \(meaningful\) \{\s*_dirty = true;\s*bool persisted = saveToNVS\(\);", alarm_code)))
+      bool(re.search(r"if \(meaningful\) \{\s*_dirty = true;\s*bool persisted = _saveToNVSUnlocked\(\);", alarm_code)))
 
 # [ROUND-6 UPDATE 2026-09-14] Count bound 5 → 6: loadFromNVS() gained a
 # ONE-TIME legacy→v2 migration write (p.453/p.455 single-record atomicity).
 # The extra saveToNVS() call is boot-time migration, not a per-tick path —
 # the wear-bound intent of this gate is unchanged.
+# [ROUND-7 UPDATE 2026-09-14] Same rename as G6: internal calls under the
+# lock are _saveToNVSUnlocked(); the only public saveToNVS() callers are
+# the persistence-task checkpoint and boot-time begin(). Wear bound intact.
 check("G7. Pure refresh does NOT persist every tick (wear bound)",
-      bool(re.search(r"if \(meaningful\) \{[^}]*saveToNVS\(\);[^}]*\}", alarm_code)) and
-      alarm_code.count("saveToNVS();") <= 6)
+      bool(re.search(r"if \(meaningful\) \{[^}]*_saveToNVSUnlocked\(\);[^}]*\}", alarm_code)) and
+      alarm_code.count("saveToNVS();") == 0 and
+      # 8 = 7 internal Unlocked call sites (new-alarm, meaningful refresh, clear,
+      # clearIfActive, acknowledge, acknowledgeAll, legacy migration) + the
+      # public locked wrapper itself. No unbounded per-tick save path.
+      alarm_code.count("_saveToNVSUnlocked();") == 8)
 
 # [FIX 2026-09-14 — found during post-merge re-verification of p.451]
 # LATENT P0 guarded here: the normal (not-full) append path in raise() never
