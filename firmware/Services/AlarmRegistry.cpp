@@ -92,11 +92,21 @@ bool AlarmRegistry::raise(const char* code, Core::AlarmSeverity sev, const char*
           Log.append(Core::LogType::StorageError,
                      String("[ALARM] registry saturated (") + _count +
                      " active/ack) — new alarm REJECTED (not stored): " + code +
-                     ". Clear or acknowledge alarms to free slots.", -1);
+                     ". Clear alarms to free slots (acknowledge keeps the slot "
+                     "occupied — only CLEARED entries are evictable).", -1);
         }
         return false;   // honest: the caller knows the alarm was not stored
       }
     }
+    // [FIX 2026-09-14 — found during post-merge re-verification of p.451]
+    // Normal (not-full) path: the append slot was NEVER assigned — idx stayed
+    // 0xFF (255) and `_alarms[idx]` wrote ~33 KB past the 24-entry array
+    // (out-of-bounds write into unrelated globals), `_count` never
+    // incremented, and find()/countActive() never saw the alarm — a silent
+    // loss reported as success. The eviction branch above was the ONLY path
+    // assigning idx. Assign the append slot explicitly; the 0xFF guard keeps
+    // the post-eviction slot (idx == _count) untouched.
+    if (idx == 0xFF) idx = _count;
     Alarm& a = _alarms[idx];
     strncpy(a.code, code, Alarm::CODE_LEN - 1);
     a.code[Alarm::CODE_LEN - 1] = '\0';

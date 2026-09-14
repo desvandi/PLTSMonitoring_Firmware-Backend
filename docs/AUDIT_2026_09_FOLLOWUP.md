@@ -739,3 +739,62 @@ diagnostics untuk fleet visibility.
    berikutnya persis seperti rencana auditor (p.430/431).
 3. Keputusan produk p.429 (retensi journal) — kini disertai bukti bahwa
    alarm/energy/SOC persistence sudah fail-closed di sisi device.
+
+## 11. Addendum post-merge (2026-09-14): verifikasi ulang p.451 + p.445
+
+Atas permintaan operator, kedua prioritas #1 dan #2 auditor diverifikasi ulang
+setelah merge PR #34. Hasil: kebijakan p.451 (eviksi CLEARED-only, reject
+jujur) dan p.445 (epoch tunggal di firmware) terkonfirmasi benar — namun
+verifikasi ulang menemukan **bug laten P0 yang telah ada sejak commit
+pertama** pada jalur yang TIDAK diaudit p.451 (auditor menganalisis jalur
+registry-penuh; jalur normal justru yang rusak):
+
+### 11.1 Bug P0: append out-of-bounds di `AlarmRegistry::raise()` (jalur normal)
+
+- **Akar masalah**: `idx` dari `_findIdx()` adalah `0xFF` (255) untuk alarm
+  baru, dan hanya cabang eviksi (`_count >= MAX_ALARMS`) yang meng-assign
+  slot. Di jalur normal (registry TIDAK penuh — jalur yang paling sering
+  dilalui), `idx` tetap 255 → `_alarms[255]` menulis ±33 KB melewati array
+  24 entri (korupsi globals yang tidak terduga), `_count` tidak pernah
+  bertambah, `find()`/`countActive()` tidak pernah melihat alarm tersebut,
+  dan `raise()` tetap return `true` — kehilangan senyap yang dilaporkan
+  sukses.
+- **Mengapa lolos**: mirror Python round-5 mengimplementasikan *intent*
+  (`registry.append`) bukan struktur slot nyata; seluruh test adalah
+  statis/mirror; firmware round-5 belum pernah dijalankan di perangkat
+  (T9–T13 masih menunggu fisik).
+- **Bukti**: harness C++ native + AddressSanitizer mereplikasi logika
+  persis — versi lama: `stored at idx=255 (count=0)`, alarm tidak
+  ditemukan kembali; versi fixed: `idx=0 (count=1)` ditemukan. Siklus
+  hidup penuh (24 raise → reject ke-25 → clear 3 → evict cleared terlama →
+  tidak ada alarm aktif yang hilang) lulus bersih ASAN.
+- **Fix**: `if (idx == 0xFF) idx = _count;` eksplisit sebelum akses array
+  + komentar penuh; pesan reject dikoreksi ("Clear alarms to free slots
+  (acknowledge keeps the slot occupied...)" — acknowledge TIDAK membebaskan
+  slot, hanya CLEARED yang bisa dievict).
+- **Regresi guard**: `test_audit_round5_2026_09.py` G8 (assignment append
+  wajib ada sebelum akses array) + G9 (pesan guidance akurat). Suite: 74/74.
+- **Konsekuensi retrospektif**: seluruh alarm runtime yang pernah diamati
+  di bench/mock berasal dari mock JS — alarm firmware asli tidak pernah
+  tersimpan sebelumnya; perbaikan ini adalah prasyarat T9–T13.
+
+### 11.2 p.445 celah lintas-layer (PWA): domain detik vs milidetik
+
+- Firmware (post-fix) mengirim `soc.lastSync` sebagai **epoch DETIK**
+  (`uint32_t`; ms tidak muat 32-bit) — sedangkan `types.ts` PWA
+  mendokumentasikan "ms epoch", `formatLastSync()` mengurangkan dari
+  `Date.now()` (ms), dan mock menghasilkan domain ms. Perangkat nyata akan
+  menampilkan label seperti "20274d ago"; mock menutupi bug.
+- **Fix (PWA PR)**: `normalizeLastSyncMs()` di `src/lib/soc.ts` —
+  normalisasi deterministik di batas tampilan (nilai < 1e11 = detik →
+  ×1000; lebih besar = ms; 0/negatif/null = unknown). Kontrak tipe
+  didokumentasikan ulang; 6 test baru (detik/ms/unknown/mock/firmware).
+- Kontrak domain tunggal lintas-producer (device REST/MQTT/GAS) tetap
+  milik audit round 6 (p.441) — normalisasi ini menjaga tampilan benar
+  sampai kontrak itu dipatenkan.
+
+### 11.3 Verifikasi addendum
+
+- `test_audit_round5_2026_09.py` 74/74; seluruh 30 skrip regresi hijau.
+- `pio run -e development -e staging` SUCCESS.
+- PWA: vitest 201/201, lint 0 error, typecheck bersih.
