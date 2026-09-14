@@ -278,6 +278,24 @@ check("G7. Pure refresh does NOT persist every tick (wear bound)",
       bool(re.search(r"if \(meaningful\) \{[^}]*saveToNVS\(\);[^}]*\}", alarm_code)) and
       alarm_code.count("saveToNVS();") <= 5)
 
+# [FIX 2026-09-14 — found during post-merge re-verification of p.451]
+# LATENT P0 guarded here: the normal (not-full) append path in raise() never
+# assigned the slot index — idx stayed 0xFF (255) and _alarms[255] wrote ~33 KB
+# past the 24-entry array while _count never incremented: the alarm was
+# silently lost, raise() reported success, and unrelated globals were
+# corrupted. The eviction branch was the ONLY path assigning idx. The guard
+# below pins the explicit append-slot assignment between the saturation block
+# and the first array access.
+check("G8. Normal-path append slot explicitly assigned before array access (0xFF never used as index)",
+      bool(re.search(r"if \(idx == 0xFF\) idx = _count;", alarm_code)) and
+      bool(re.search(r"if \(idx == 0xFF\) idx = _count;\s*Alarm& a = _alarms\[idx\];", alarm_code)) and
+      "if (idx == _count) _count++;" in alarm_code,
+      "raise() must assign idx=_count for the non-full path BEFORE _alarms[idx] — regression of the 2026-09-14 out-of-bounds append bug")
+
+check("G9. Saturation guidance is accurate (only CLEAR frees slots — acknowledge does not)",
+      "Clear alarms to free slots" in alarm_c and
+      "acknowledge keeps the slot" in alarm_c)
+
 # ---------------------------------------------------------------------------
 # H. p.443 + p.444 + p.442 — credential boundary + posture + envelope evidence
 # ---------------------------------------------------------------------------
