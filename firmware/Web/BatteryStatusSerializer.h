@@ -273,6 +273,46 @@ inline String serialize(const Core::SystemStatus& s) {
   return out;
 }
 
+// [AUDIT 2026-09 ROUND 8 / p.470] Stable, self-contained serialization of
+// latestStatus for NON-telemetry tasks. The struct copy alone is NOT safe
+// to serialize after releasing telemetryMutex: latestStatus.activeAlarms
+// is a POINTER into publishTelemetry()'s static s_activeAlarmsBuf, which
+// telemetryTask rewrites every cycle — a reader that copies the struct
+// under the mutex and then serializes outside it can observe a torn
+// rewrite (an entry mixing fields of the previous and current alarm list:
+// new code + old message, old severity + new raisedAt). This helper takes
+// telemetryMutex, copies the struct AND deep-copies the alarm list into
+// heap storage, releases the mutex, serializes the self-contained copy,
+// and frees the list. The only task exempt is telemetryTask itself
+// (publishTelemetry): it OWNS the static buffer, so its post-mutex
+// serialization is a single-writer self-read and stays as-is.
+// OOM behavior: the alarm list is omitted (count forced to 0) rather than
+// serializing a possibly-torn one — GET /api/alarms (registry snapshot)
+// remains the authoritative alarm view. Returns "" only on mutex timeout.
+inline String serializeLatestStatusLocked() {
+  Core::SystemStatus snap;
+  Services::Alarm* listCopy = nullptr;
+  if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return String();
+  }
+  snap = latestStatus;
+  if (snap.activeAlarmCount > 0 && snap.activeAlarms != nullptr) {
+    listCopy = (Services::Alarm*)malloc(snap.activeAlarmCount * sizeof(Services::Alarm));
+    if (listCopy != nullptr) {
+      memcpy(listCopy, snap.activeAlarms,
+             (size_t)snap.activeAlarmCount * sizeof(Services::Alarm));
+      snap.activeAlarms = listCopy;   // detach: serialize reads caller-owned storage
+    } else {
+      snap.activeAlarmCount = 0;
+      snap.activeAlarms = nullptr;
+    }
+  }
+  xSemaphoreGive(telemetryMutex);
+  String out = serialize(snap);
+  free(listCopy);
+  return out;
+}
+
 } // namespace Web
 
 #endif // PLTS_WEB_BATTERY_STATUS_SERIALIZER_H

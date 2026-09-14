@@ -59,7 +59,47 @@ else
   fi
 fi
 
+echo "=== verify_status_snapshot_detach (TREATMENT, ThreadSanitizer) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -pthread -o vsd_tsan verify_status_snapshot_detach.cpp; then
+  echo "COMPILE FAIL: verify_status_snapshot_detach (tsan)"; fails=$((fails+1))
+else
+  ./vsd_tsan || fails=$((fails+1))
+fi
+
+echo "=== verify_status_snapshot_detach (TREATMENT, ASAN+UBSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=address,undefined -pthread -o vsd_asan verify_status_snapshot_detach.cpp; then
+  echo "COMPILE FAIL: verify_status_snapshot_detach (asan)"; fails=$((fails+1))
+else
+  ./vsd_asan || fails=$((fails+1))
+fi
+
+echo "=== verify_status_snapshot_detach (NEGATIVE CONTROL, round-7 aliased-pointer read under TSAN) ==="
+# The OLD status-serialization shape (struct copy, then consume the ALIASED
+# pointer after the mutex is released) MUST produce races — this proves the
+# round-8 harness detects the p.470 race class. Exit 0 without a TSAN report
+# would be a FAILURE (blind test).
+if ! g++ -std=c++17 -g -fsanitize=thread -DNO_DETACH -pthread -o vsd_unlocked verify_status_snapshot_detach.cpp; then
+  echo "COMPILE FAIL: verify_status_snapshot_detach (negative control)"; fails=$((fails+1))
+else
+  if ./vsd_unlocked > vsd_unlocked.log 2>&1; then
+    if grep -q "WARNING: ThreadSanitizer" vsd_unlocked.log; then
+      echo "NEGATIVE CONTROL OK: $(grep -c 'WARNING: ThreadSanitizer' vsd_unlocked.log) race report(s) on the aliased-pointer read — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE: clean exit with no TSAN report — investigate vsd_unlocked.log"
+      fails=$((fails+1))
+    fi
+  else
+    if grep -q "WARNING: ThreadSanitizer" vsd_unlocked.log; then
+      echo "NEGATIVE CONTROL OK: $(grep -c 'WARNING: ThreadSanitizer' vsd_unlocked.log) race report(s) on the aliased-pointer read — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE: nonzero exit but no TSAN report — investigate vsd_unlocked.log"
+      fails=$((fails+1))
+    fi
+  fi
+fi
+
 rm -f verify_alarm_blob_atomicity verify_emg_safety_gate verify_anomaly_quality_gates \
-      vac_tsan vac_asan vac_unlocked vac_unlocked.log
+      vac_tsan vac_asan vac_unlocked vac_unlocked.log \
+      vsd_tsan vsd_asan vsd_unlocked vsd_unlocked.log
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL NATIVE HARNESS GREEN"; else echo "$fails harness(es) FAILED"; exit 1; fi

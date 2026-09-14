@@ -110,18 +110,12 @@ void GasAdvisor::tick() {
   if (_lastPostAt == 0 && Services::timeManager.getUptimeSec() < 60) return;
 
   // Build telemetry body
-  Core::SystemStatus snap;
-  if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    snap = latestStatus;
-    xSemaphoreGive(telemetryMutex);
-  } else {
-    return;  // try again next tick
-  }
-
-  // Build telemetry DATA PAYLOAD — the raw string that will be signed and
-  // transported verbatim as the envelope's `data` field (WAVE-1 contract).
-  // Snap must be NaN-safe (serializer handles null/NaN → null in JSON).
-  String dataJson = Web::serialize(snap);
+  // [AUDIT 2026-09 ROUND 8 / p.470] serializeLatestStatusLocked() deep-copies
+  // the active-alarm list under telemetryMutex before serializing — the old
+  // struct copy left snap.activeAlarms aliasing publishTelemetry()'s static
+  // buffer, and Web::serialize(snap) ran after the mutex was released (torn
+  // list possible while telemetryTask published concurrently).
+  String dataJson = Web::serializeLatestStatusLocked();
   if (dataJson.length() == 0 || dataJson.length() > Core::GAS_MAX_BODY_SIZE) {
     _lastError = "telemetry body empty or oversized";
     return;

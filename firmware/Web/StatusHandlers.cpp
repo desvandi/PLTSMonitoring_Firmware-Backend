@@ -14,18 +14,17 @@ namespace StatusHandlers {
 
 void handleStatus() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
-  // Take a snapshot under mutex
-  Core::SystemStatus snap;
-  if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    snap = latestStatus;
-    xSemaphoreGive(telemetryMutex);
-  } else {
+  // [AUDIT 2026-09 ROUND 8 / p.470] serializeLatestStatusLocked() deep-copies
+  // the active-alarm list under telemetryMutex BEFORE serializing — the old
+  // `snap = latestStatus` struct copy left snap.activeAlarms aliasing
+  // publishTelemetry()'s static buffer, and Web::serialize(snap) ran AFTER
+  // the mutex was released, so a concurrent telemetry publish could rewrite
+  // the list mid-serialization (torn entries: new code + old message).
+  String body = Web::serializeLatestStatusLocked();
+  if (body.length() == 0) {
     sendError(503, "Telemetry mutex timeout");
     return;
   }
-  
-  
-  String body = Web::serialize(snap);
   sendSecurityHeaders();
   http.send(200, "application/json; charset=utf-8", body);
 }
