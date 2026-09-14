@@ -222,6 +222,28 @@ check("G3. Immediate-persist failure logged as StorageError (never silent)",
       alarm_c.count("accepted in RAM but the immediate") == 2)
 
 # ---------------------------------------------------------------------------
+print("\n[I] Self-review hardening (post-merge verification 2026-09-14)")
+
+check("I1. Temp rate-detector uses the DEDICATED code (no raise+clear collision)",
+      "TEMPERATURE_RAPID_RISE" in types_h and
+      'alarms.raise(Core::AlarmCode::TEMPERATURE_RAPID_RISE' in anom_code and
+      'alarms.clear(Core::AlarmCode::TEMPERATURE_RAPID_RISE' not in anom_code,
+      "the old code raised TEMPERATURE_HIGH for a rapid rise and the level block "
+      "cleared it in the same tick below warn-hyst — the early warning was invisible")
+
+check("I2. Not-assessable path also clears the dedicated rate code (symmetry)",
+      "_clearIfActive(Core::AlarmCode::TEMPERATURE_RAPID_RISE)" in anom_code)
+
+check("I3. V/I baselines update inside the isfinite guard (NaN cannot poison)",
+      bool(re.search(r"isfinite\(ctx\.voltage\)\) \{[^}]*_lastVoltage = ctx\.voltage;",
+                     anom_code, re.S)) and
+      bool(re.search(r"isfinite\(ctx\.current\)\) \{[^}]*_lastCurrent = ctx\.current;",
+                     anom_code, re.S)))
+
+check("I4. Temperature priming stamps its baseline timestamp",
+      bool(re.search(r"_lastTemp = ctx\.temperatureC; _lastTempSec = nowSec;", anom_code)))
+
+# ---------------------------------------------------------------------------
 print("\n[H] Mutex-starvation watchdog (p.465)")
 
 tick_fn = emg_code.split("void EmergencySupervisor::tick()")[1].split("EmgSensors EmergencySupervisor::_readSensors")[0]

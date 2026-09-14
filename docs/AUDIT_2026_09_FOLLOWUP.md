@@ -940,3 +940,40 @@ T14 yang harus dieksekusi dengan device live (bukti per langkah masuk
   emg GAS 57, wave12 26/26, phase13d1 9/9, soc 6/6, w7-10 24/24, parity
   & ack-contract PASS.
 - `pio run -e development -e staging` SUCCESS.
+
+### 12.11 Addendum self-review (2026-09-14, pra audit ulang)
+
+Verifikasi ulang menyeluruh atas PR #36 menemukan **tiga cacat — dua di
+remediasi round-6 sendiri, satu bug laten lama** — semuanya diperbaiki
+sebelum diserahkan ke auditor:
+
+1. **Baseline V/I bisa diracuni NaN** (cacat remediasi p.459 saya sendiri):
+   update baseline berada di dalam guard `envEligible` tetapi DI LUAR
+   `isfinite` — producer yang melanggar kontrak (quality=Valid, value=NaN)
+   membuat `_lastVoltage`/`_lastCurrent` menjadi NaN. Arah kegagalannya
+   konservatif (`NaN > threshold` = false → tidak ada alarm palsu), tetapi
+   rate detector buta selama interval itu dan invariant p.459 rusak.
+   Fix: update baseline dipindah ke dalam guard `isfinite`; baseline finite
+   sebelumnya dipertahankan. Test regresi: lompatan nyata SETELAH sampel
+   Valid+NaN harus tetap terdeteksi.
+2. **Priming suhu tidak menstempel `_lastTempSec`** (cacat minor): deteksi
+   temp-rise skip tepat satu interval pertama setelah boot. Fix + test.
+3. **BUG LATEN (pre-existing): alarm rapid-rise tidak pernah terlihat** —
+   detektor laju suhu me-raise `TEMPERATURE_HIGH`, lalu blok threshold di
+   tick yang sama men-clear kode itu setiap kali T < warn−hyst. Akibatnya
+   early-warning thermal justru invisible persis di rentang di bawah
+   threshold statis (rentang di mana deteksi dini penting), plus churn NVS
+   2×/tick saat kondisi berlanjut. Fix: kode terpisah
+   `TEMPERATURE_RAPID_RISE` (pola yang sama dengan split
+   `BATTERY_SOC_DISCONTINUITY`, PARITY-4 — "dua kondisi, dua kode").
+   Wire-additive: PWA me-render `alarm.code` sebagai string mentah.
+
+Hardening observabilitas: `/api/diagnostics` kini mengekspos
+`alarmStateGeneration` (klaim "diagnostics" p.455 menjadi konkret), dan
+harness native ASAN/UBSAN masuk ke CI (job `test`, langkah baru) — pelajaran
+round-5: mirror intent saja melewatkan P0 OOB; struktur 1:1 di bawah
+sanitizer menangkapnya.
+
+Gate: `test_audit_round6_2026_09.py` kini 34/34 (4 pin self-review baru:
+I1–I4). Harness anomaly diperluas (5 ekspektasi baru). Seluruh regresi
+tetap hijau; `pio run -e development -e staging` SUCCESS.

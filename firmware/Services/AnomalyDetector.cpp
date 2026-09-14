@@ -72,7 +72,7 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
       _lastCurrent = ctx.current; _lastCurrentSec = nowSec; _haveCurrent = true;
     }
     if (envEligible(ctx.temperatureQ) && std::isfinite(ctx.temperatureC)) {
-      _lastTemp = ctx.temperatureC; _haveTemp = true;
+      _lastTemp = ctx.temperatureC; _lastTempSec = nowSec; _haveTemp = true;
     }
     if (envEligible(ctx.humidityQ) && std::isfinite(ctx.humidityPct)) {
       _lastHum = ctx.humidityPct; _haveHum = true;
@@ -141,11 +141,16 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
       } else if (ctx.voltage < Core::cfgAlarmVoltageHighWarnV - VOLTAGE_ALARM_HYST_V) {
         alarms.clear(Core::AlarmCode::BATTERY_VOLTAGE_HIGH);
       }
+      // [p.459] baseline: eligible AND finite samples only. The update
+      // deliberately lives INSIDE the isfinite guard — a contract-violating
+      // producer (quality=Valid, value=NaN) must not poison the baseline:
+      // fabs(valid - NaN) is NaN, which compares false against every
+      // threshold and would silently blind the jump detector for an
+      // interval. The previous finite baseline is retained instead.
+      _lastVoltage = ctx.voltage;
+      _lastVoltageSec = nowSec;
+      _haveVoltage = true;
     }
-    // [p.459] baseline: ELIGIBLE samples only
-    _lastVoltage = ctx.voltage;
-    _lastVoltageSec = nowSec;
-    _haveVoltage = true;
   } else {
     // [AUDIT 2026-09 ROUND 6 / p.460] Not assessable: the voltage number
     // is unknown/stale/estimated — a numerical low/high verdict would be a
@@ -232,11 +237,12 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
                        "Battery current reading stuck (no variation)");
         }
       }
+      // [p.459] baseline: eligible AND finite samples only — same NaN
+      // poisoning guard as the voltage family above.
+      _lastCurrent = ctx.current;
+      _lastCurrentSec = nowSec;
+      _haveCurrent = true;
     }
-    // [p.459] baseline: ELIGIBLE samples only
-    _lastCurrent = ctx.current;
-    _lastCurrentSec = nowSec;
-    _haveCurrent = true;
   } else {
     // [p.460] Not assessable — same honesty contract as the voltage family:
     // OVERCURRENT_xxx no longer claims a verdict it cannot compute, the
@@ -274,7 +280,12 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
           char buf[64];
           snprintf(buf, sizeof(buf), "Temp rapid rise: %.1f→%.1fC in %us",
                    (double)_lastTemp, (double)ctx.temperatureC, tElapsed);
-          alarms.raise("TEMPERATURE_HIGH", Core::AlarmSeverity::Warning, buf);
+          // [ROUND-6 self-review] Dedicated code — raising TEMPERATURE_HIGH
+          // here collided with the level-threshold block below, which cleared
+          // it in the SAME tick whenever T stayed below warn−hyst: the rate
+          // early-warning was invisible exactly where it matters (below the
+          // static threshold). Two conditions, two codes.
+          alarms.raise(Core::AlarmCode::TEMPERATURE_RAPID_RISE, Core::AlarmSeverity::Warning, buf);
         }
       }
     }
@@ -299,6 +310,7 @@ void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {
     // [p.460] not assessable
     _clearIfActive(Core::AlarmCode::TEMPERATURE_HIGH);
     _clearIfActive(Core::AlarmCode::TEMPERATURE_CRITICAL);
+    _clearIfActive(Core::AlarmCode::TEMPERATURE_RAPID_RISE);
   }
   if (envEligible(ctx.humidityQ) && std::isfinite(ctx.humidityPct)) {
     if (ctx.humidityPct > Core::cfgAlarmHumidityHighWarnPct) {

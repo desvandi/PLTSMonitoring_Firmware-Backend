@@ -52,6 +52,10 @@ void handleGet() {
   doc["socPersistFailures"] = Services::socStateMachine.persistFailures();
   doc["alarmPersistFailures"] = Services::alarms.persistFailures();
   doc["alarmRegistryOverflow"] = Services::alarms.overflowCount();
+  // [AUDIT 2026-09 ROUND 6 / p.455] Persisted-snapshot generation — proves
+  // which NVS transaction the current alarm state came from (boot log line
+  // records the same number; a post-mortem can correlate the two).
+  doc["alarmStateGeneration"] = Services::alarms.generation();
   doc["systemState"] = Core::systemStateToStr(h.systemState);
   doc["bootLoopDetected"] = h.bootLoopDetected;
   doc["bootsInLast60s"] = h.bootsInLast60s;
