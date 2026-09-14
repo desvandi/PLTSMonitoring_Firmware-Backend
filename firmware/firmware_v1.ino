@@ -1344,6 +1344,13 @@ void publishTelemetry() {
         s_alarmSnap.alarms, s_alarmSnap.count,
         s_activeAlarmsBuf, Services::AlarmRegistry::MAX_ALARMS);
     latestStatus.activeAlarms = s_activeAlarmsBuf;
+    // [AUDIT 2026-09 ROUND 8 / p.470] s_activeAlarmsBuf is owned by THIS task
+    // (telemetryTask). Serializing `snapshot` below AFTER releasing
+    // telemetryMutex is safe here because no OTHER task rewrites this
+    // buffer — a single-writer self-read. Every OTHER consumer of
+    // latestStatus MUST go through Web::serializeLatestStatusLocked()
+    // (deep-copies the list under the mutex) instead of serializing a
+    // struct copy that still aliases this buffer.
     snapshot = latestStatus;
     xSemaphoreGive(telemetryMutex);
   } else {

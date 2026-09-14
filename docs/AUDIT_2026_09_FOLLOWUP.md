@@ -1123,3 +1123,117 @@ identik; konsumen PWA tidak tersentuh.
 Rotasi token GitHub/Vercel yang pernah di-paste (hygiene, P0), Gate A/B
 provisioning fisik, acceptance T9–T14, INA-001..004, keputusan produk
 p.429, kontrak lintas-layer p.430/431/p.441.
+
+## 14. Round 8 (2026-09-14): audit independen PR #38 + temuan baru p.470 (pointer-escape status snapshot)
+
+Round ini dijalankan tanpa auditor eksternal (tidak tersedia): verifikasi
+independen atas remediasi round-7 DILAKUKAN SENDIRI atas baseline firmware
+`main` = `1b26847b` (PR #38), disusul perburuan defect baru dan remediasi.
+
+### 14.1 Verifikasi PR #38 (p.467/p.468/p.469) — seluruhnya TERVERIFIKASI
+
+- **Source**: disiplin kunci 1:1 terkonfirmasi — 7 mutator publik =
+  `_lock()` → `*Unlocked()` → `_unlock()`; tidak ada implementasi Unlocked
+  yang mengambil kunci; immediate-save memakai `_saveToNVSUnlocked()` di
+  dalam kunci (satu transaksi RAM+NVS); `snapshotInto()` menyalin seluruh
+  state dalam satu kunci; aksesor pointer mentah (`getAlarm`,
+  `getActiveAlarms`, `getActiveAlarmCount`) tidak tersisa; `clearIfActive()`
+  atomik; mutex dibuat di `begin()` (setup line 343, `xTaskCreatePinnedToCore`
+  pertama line 508); statik rate-limit log saturasi hanya disentuh di bawah
+  kunci.
+- **Analisis deadlock (baru, eksplisit)**: peta kunci diverifikasi TANPA
+  SIKLUS — registry→Wire-internal (rtc.getUnixTime() di dalam kunci),
+  registry→LogService, emergency→registry; tidak ada tepi balik: kode
+  aplikasi tidak pernah memanggil registry dari dalam critical section Wire
+  (diperiksa Wire.cpp core 2.0.16: lock internal per-transaksi, jendela
+  repeated-start di RtcDriver/Ina219Driver selalu selesai `requestFrom`
+  alamat sama); LogService tidak pernah memanggil balik registry; GasOta
+  spinlock tidak menyentuh registry; tidak ada ISR (tidak ada
+  attachInterrupt pada registry; kontrak task-context terpenuhi).
+- **Eksekusi independen**: 32/32 suite Python (r5 74/74, r6 34/34, r7
+  29/29); native harness — TSAN treatment 551.820 check/0 failure, ASAN
+  584.512/0, negative control 174 laporan race (semua di
+  `Services::alarms`); `pio run -e development -e staging` SUCCESS.
+- **CI diverifikasi dari log aktual** (menjawab keluhan r7 atas klaim tak
+  terverifikasi): run `34807668402` (push main @ `1b26847b`) — job "Python
+  unit + property tests" success, log memuat `AUDIT ROUND 7 GATE: ALL
+  CHECKS PASSED`, TSAN treatment `checks=573472 failures=0`, `NEGATIVE
+  CONTROL OK: 177 race report(s)`, `ALL NATIVE HARNESS GREEN`; job
+  reproducible-build, staging+development, production, release-gate semua
+  success.
+- **Kesimpulan: p.467, p.468, p.469 CLOSED terverifikasi independen.**
+
+### 14.2 Temuan baru — p.470 (P2, pre-existing; bukan regresi PR #38)
+
+**Pointer-escape pada serialisasi status**: `Core::SystemStatus.activeAlarms`
+adalah POINTER ke `s_activeAlarmsBuf` — buffer statis yang ditulis ulang
+`publishTelemetry()` (telemetryTask) setiap siklus 5 detik. Dua konsumen
+menyalin struct di bawah `telemetryMutex`, MELEPASKAN mutex, lalu
+menserialisasi MELALUI pointer tersebut:
+
+- `Web::handleStatus()` (GET /api/status, task web) — `snap = latestStatus`
+  → give → `Web::serialize(snap)`.
+- `AI::GasAdvisor` (gasEmergencyTask) — bentuk identik untuk payload GAS
+  yang ditandatangani.
+
+Jendela race: serialisasi JSON (orde ms) vs. penulisan ulang buffer
+(~3,3 KB) oleh telemetryTask. Hasil yang mungkin: entri alarm TORN di
+`/api/status` / payload GAS — kode dari daftar baru + message/severity dari
+daftar lama dalam satu entri (analisis byte-level: string tetap
+null-terminated di semua tahap; tidak ada memory-unsafety). Jalur MQTT
+`publishTelemetry()` sendiri TIDAK terdampak (penulis tunggal membaca buffer
+miliknya sendiri). Peluang rendah (poll web harus bertepatan dengan jendela
+publish ~ms per 5 s) tetapi nyata; kelasnya identik dengan p.469, satu
+lapis di atas registry. Pola ini ada SEBELUM PR #38 (buffer statis +
+pointer sama-sama ada di round-6); scope r7 (registry) tidak mencakupnya.
+
+**Bukti (harness native baru)** `verify_status_snapshot_detach.cpp`
+(std::thread, mirror bentuk firmware; entri punya `tagA`/`tagB` yang selalu
+ditulis bersama — pembacaan torn = tagA≠tagB dalam satu entri):
+
+| Build | Hasil |
+|---|---|
+| Treatment (deep-copy di bawah mutex) + TSAN | 0 race; 65.172 pembacaan, **0 entri torn** |
+| Treatment + ASAN/UBSAN | 0 error; 0 torn |
+| **Negative control** (`-DNO_DETACH`, bentuk lama: pointer ter-alias pasca-rilis mutex) + TSAN | **race report TSAN + 5 entri torn teramati secara logis** dalam 3 detik — bukti race nyata, bukan teoretis |
+
+### 14.3 Remediasi p.470
+
+`Web::serializeLatestStatusLocked()` di BatteryStatusSerializer.h (header
+bersama yang sudah di-include kedua konsumen): ambil `telemetryMutex` →
+salin struct → **deep-copy daftar alarm ke heap** → re-point pointer →
+rilis mutex → serialisasi salinan mandiri → free. OOM: daftar
+dihilangkan jujur (count=0) — pusat alarm `/api/alarms` (snapshot registry)
+tetap otoritatif. `publishTelemetry()` dipertahankan apa adanya dan
+didokumentasikan sebagai pengecualian penulis-tunggal. Dua konsumen
+(termasuk payload GAS yang ditandatangani) dimigrasikan; komentar kepemilikan
+buffer ditambahkan di `.ino`.
+
+Gate statis baru `test_audit_round8_2026_09.py` — **20/20 PASS**: (A) bentuk
+helper (kunci → salin → deep-copy → rilis → serialisasi → free; OOM jujur;
+copy terikat count yang disalin), (B) dua konsumen bermigrasi + 503 timeout
+tetap, (C) satu-satunya pemanggil `Web::serialize(` yang tersisa adalah
+`publishTelemetry` (pemilik buffer), (D) harness + negative control masuk
+runner CI dengan syarat sensitivitas, (E) invariant round-7 registry utuh.
+
+### 14.4 Observasi latency yang DITERIMA (P3, tanpa fix)
+
+Kunci registry dipegang selama: `rtc.getUnixTime()` (jalur DS3231 = 7
+transaksi I2C di bus bersama) + tulis NVS + `Log.append` (LittleFS +
+rtc lagi). Hold time tipikal belasan–puluhan ms; worst-case terbatas
+(~700 ms hanya bila bus I2C hang — setiap transaksi dibatasi timeout Wire
+50 ms). Tidak ada deadlock (peta kunci asiklik, lihat 14.1); priority
+inheritance mencegah starvation emergencyTask; aksi fisik relay darurat
+mendahului `alarms.raise` (verifikasi urutan di EmergencySupervisor) —
+keselamatan tidak pernah menunggu kunci registry. Diterima dengan
+dokumentasi ini; optimasi (stempel waktu di luar kunci) ditunda sampai ada
+bukti kebutuhan.
+
+### 14.5 Catatan kecil (P4, tidak ditindak)
+
+find()→acknowledge() dua kunci di pipeline ack (web/MQTT): TOCTOU benign —
+acknowledge idempotent terhadap kode yang hilang; kasus ekstremnya adalah
+"sukses" untuk alarm yang tereviksi di antara dua panggilan (sudah Cleared).
+Mutex-create-failure fallback (registry tanpa kunci) hanya terjadi pada OOM
+ekstrem saat boot — pola yang sama dengan AuthManager/LogService.
+`generation` uint16 bisa wrap setelah 65.535 transaksi — diagnostik saja.
