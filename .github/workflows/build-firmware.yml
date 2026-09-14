@@ -72,6 +72,14 @@ jobs:
           done
           exit $fail
 
+      # [AUDIT 2026-09 ROUND 6] Native ASAN+UBSAN harnesses — structural
+      # mirrors of the alarm persistence blob, the emergency safety gate +
+      # mutex-starvation watchdog, and the anomaly quality gates. The round-5
+      # lesson: a Python mirror of the INTENT alone missed the 0xFF append
+      # P0; these compile the actual decision structure under sanitizers.
+      - name: Run native ASAN/UBSAN harnesses (audit round 6)
+        run: bash scripts/native/run-native-tests.sh
+
   # --------------------------------------------------------------------------
   # Production build. Only on push-to-main or tag (not PR — production env
   # secrets are protected). On tag push, the firmware is signed with Ed25519.

@@ -324,6 +324,13 @@ namespace AlarmCode {
   // Environment
   constexpr const char* TEMPERATURE_HIGH        = "TEMPERATURE_HIGH";
   constexpr const char* TEMPERATURE_CRITICAL    = "TEMPERATURE_CRITICAL";
+  // [AUDIT 2026-09 ROUND 6 — self-review] Rate-based early warning, split
+  // from TEMPERATURE_HIGH: the detector used to raise TEMPERATURE_HIGH for a
+  // rapid rise and the level-threshold block in the SAME tick then cleared it
+  // (T below warn-hyst) — the early warning was never visible in exactly the
+  // range where early warning matters. Two conditions, two codes (same
+  // pattern as the BATTERY_SOC_DISCONTINUITY split, PARITY-4).
+  constexpr const char* TEMPERATURE_RAPID_RISE = "TEMPERATURE_RAPID_RISE";
   constexpr const char* HUMIDITY_HIGH           = "HUMIDITY_HIGH";
   constexpr const char* CONDENSATION_RISK       = "CONDENSATION_RISK";
   constexpr const char* SHT31_FAILURE            = "SHT31_FAILURE";

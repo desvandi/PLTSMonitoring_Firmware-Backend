@@ -110,7 +110,7 @@ public:
     if (_lastTickSec == 0) {
       if (envEligible(ctx.voltageQ) && std::isfinite(ctx.voltage)) { _lastVoltage = ctx.voltage; _lastVoltageSec = nowSec; _haveVoltage = true; }
       if (envEligible(ctx.currentQ) && std::isfinite(ctx.current)) { _lastCurrent = ctx.current; _lastCurrentSec = nowSec; _haveCurrent = true; }
-      if (envEligible(ctx.temperatureQ) && std::isfinite(ctx.temperatureC)) { _lastTemp = ctx.temperatureC; _haveTemp = true; }
+      if (envEligible(ctx.temperatureQ) && std::isfinite(ctx.temperatureC)) { _lastTemp = ctx.temperatureC; _lastTempSec = nowSec; _haveTemp = true; }
       if (envEligible(ctx.humidityQ) && std::isfinite(ctx.humidityPct)) { _lastHum = ctx.humidityPct; _haveHum = true; }
       if (socEligible(ctx.socQ) && std::isfinite(ctx.soc)) { _lastSoc = ctx.soc; _lastSocSec = nowSec; _haveSoc = true; }
       _lastTickSec = nowSec;
@@ -141,10 +141,11 @@ public:
         if (ctx.voltage > Core::cfgAlarmVoltageHighCriticalV) alarms.raise("BATTERY_VOLTAGE_HIGH");
         else if (ctx.voltage > Core::cfgAlarmVoltageHighWarnV) alarms.raise("BATTERY_VOLTAGE_HIGH");
         else if (ctx.voltage < Core::cfgAlarmVoltageHighWarnV - VOLTAGE_ALARM_HYST_V) alarms.clear("BATTERY_VOLTAGE_HIGH");
+        // [p.459 self-review fix] baseline: eligible AND finite only (inside isfinite)
+        _lastVoltage = ctx.voltage;
+        _lastVoltageSec = nowSec;
+        _haveVoltage = true;
       }
-      _lastVoltage = ctx.voltage;
-      _lastVoltageSec = nowSec;
-      _haveVoltage = true;
     } else {
       _clearIfActive("BATTERY_VOLTAGE_LOW");
       _clearIfActive("BATTERY_VOLTAGE_HIGH");
@@ -174,10 +175,11 @@ public:
           for (uint8_t i = 1; i < STUCK_WINDOW; i++) { mn = std::min(mn, _currentSamples[i]); mx = std::max(mx, _currentSamples[i]); }
           if ((mx - mn) < 0.05f && std::fabs(ctx.current) > 1.0f) alarms.raise("BATTERY_CURRENT_SUSPECT");
         }
+        // [p.459 self-review fix] baseline: eligible AND finite only (inside isfinite)
+        _lastCurrent = ctx.current;
+        _lastCurrentSec = nowSec;
+        _haveCurrent = true;
       }
-      _lastCurrent = ctx.current;
-      _lastCurrentSec = nowSec;
-      _haveCurrent = true;
     } else {
       _clearIfActive("BATTERY_OVERCURRENT_CHARGE");
       _clearIfActive("BATTERY_OVERCURRENT_DISCHARGE");
@@ -192,7 +194,7 @@ public:
         uint32_t tElapsed = nowSec - _lastTempSec;
         if (tElapsed > 0 && tElapsed <= 600) {
           float dT_per_min = (ctx.temperatureC - _lastTemp) / (float)tElapsed * 60.0f;
-          if (dT_per_min > TEMP_RISE_C_PER_MIN) alarms.raise("TEMPERATURE_HIGH");
+          if (dT_per_min > TEMP_RISE_C_PER_MIN) alarms.raise("TEMPERATURE_RAPID_RISE");
         }
       }
       if (ctx.temperatureC > Core::cfgAlarmTemperatureHighCriticalC) alarms.raise("TEMPERATURE_CRITICAL");
@@ -205,6 +207,7 @@ public:
     } else {
       _clearIfActive("TEMPERATURE_HIGH");
       _clearIfActive("TEMPERATURE_CRITICAL");
+      _clearIfActive("TEMPERATURE_RAPID_RISE");
     }
     if (envEligible(ctx.humidityQ) && std::isfinite(ctx.humidityPct)) {
       if (ctx.humidityPct > Core::cfgAlarmHumidityHighWarnPct) alarms.raise("HUMIDITY_HIGH");
@@ -390,6 +393,50 @@ int main() {
     expect(!alarms.active("BATTERY_CURRENT_SUSPECT") == false || true, "window state after reset (informational)");
     d.tick(c, T++);                        // 8th
     expect(alarms.active("BATTERY_CURRENT_SUSPECT"), "stuck re-detected only after a FULL fresh window");
+  }
+
+  printf("== p.459 self-review: Valid-quality NaN must not poison the baseline ==\n");
+  {
+    alarms = AlarmSpy();
+    AnomalyDetector d;
+    Services::AnomalyContext c = baseCtx();
+    d.tick(c, T++);                       // prime: 51.0 V
+    c.voltage = NAN;                      // contract-violating producer:
+    c.voltageQ = Core::MeasurementQuality::Valid;   // Valid quality + NaN value
+    d.tick(c, T++);                       // skipped, baseline RETAINED (not NaN)
+    c.voltage = 62.5f;                    // real jump 51.0 → 62.5 over 2 s = 5.75 V/s
+                                          // (the NaN tick consumed 1 s — spacing is 2 s)
+    c.voltageQ = Core::MeasurementQuality::Valid;
+    d.tick(c, T++);
+    expect(alarms.active("BATTERY_VOLTAGE_INVALID"),
+           "real jump still detected after a Valid+NaN sample (baseline not poisoned)");
+    // Same defect class for current
+    alarms = AlarmSpy();
+    AnomalyDetector d2;
+    Services::AnomalyContext c2 = baseCtx();
+    d2.tick(c2, T++);                     // prime: 5 A
+    c2.current = NAN;
+    c2.currentQ = Core::MeasurementQuality::Valid;
+    d2.tick(c2, T++);
+    c2.current = 110.0f;                  // |110 - 5|/2s = 52.5 > 50 (2 s spacing)
+    c2.currentQ = Core::MeasurementQuality::Valid;
+    d2.tick(c2, T++);
+    expect(alarms.active("BATTERY_CURRENT_SUSPECT"),
+           "real current spike still detected after a Valid+NaN sample");
+  }
+
+  printf("== p.459 self-review: priming sets the temperature baseline timestamp ==\n");
+  {
+    alarms = AlarmSpy();
+    AnomalyDetector d;
+    Services::AnomalyContext c = baseCtx();
+    d.tick(c, T++);                       // prime at 30.0 C (must set _lastTempSec)
+    c.temperatureC = 33.0f;                // 3 C/s → 180 C/min → way over threshold
+    d.tick(c, T++);                       // FIRST eligible pair must already evaluate
+    expect(alarms.active("TEMPERATURE_RAPID_RISE"),
+           "rate early-warning visible under the static threshold (dedicated code, was raise+clear same tick)");
+    expect(!alarms.active("TEMPERATURE_HIGH"),
+           "level alarm correctly NOT raised at 33 C (< warn 45)");
   }
 
   printf("\n== HASIL: %s (%d kegagalan) ==\n", fails == 0 ? "SEMUA LULUS" : "ADA KEGAGALAN", fails);
