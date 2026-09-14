@@ -23,8 +23,10 @@
 //
 // PORT DELTAS vs firmware-generic (documented, deliberate):
 //   * Sensor inputs come from the canonical measurement pipeline
-//     (latestStatus, quality-gated) instead of raw 10-sample moving averages
-//     — the modular firmware already runs plausibility/stale machinery.
+//     (latestStatus) gated by Measurement::isSafetyUsable() — the STRICT
+//     safety predicate (Valid + Measured + finite, audit round-6 p.457)
+//     instead of raw 10-sample moving averages. Derived/Estimated pipeline
+//     values are NOT safety inputs; they become NaN and trip SENSOR_LOSS.
 //   * The genset current channel (iGen / i_ac_gen) is RESERVED: the modular
 //     board has one ACS712. The channel never trips and is EXCLUDED from the
 //     sensor-loss policy until a second ACS712 lands (PLTS_ENABLE_AC_GEN).
@@ -64,6 +66,12 @@ constexpr const char* EMG_REASON_SENSOR_LOSS   = "SENSOR_LOSS";
 constexpr const char* EMG_REASON_ESTOP         = "ESTOP";
 constexpr const char* EMG_REASON_OPERATOR      = "OPERATOR";
 constexpr const char* EMG_REASON_CRASHLOOP     = "CRASHLOOP";
+// [AUDIT 2026-09 ROUND 6 / p.465] Internal-fault trip: the supervisor's own
+// evaluation loop was starved of its mutex long enough that its trip/ARM
+// decisions could not be trusted for that window — the watchdog forced the
+// relay ISOLATED and the next locked cycle converts that into an honest
+// latched trip. Wire-additive: the PWA passes the reason string through.
+constexpr const char* EMG_REASON_INTERNAL      = "INTERNAL";
 
 // Sensor snapshot consumed by triggers + the ARM gate. NaN = invalid/absent.
 struct EmgSensors {
@@ -120,6 +128,15 @@ public:
   static constexpr uint8_t  EMG_CRASH_CHAIN_LIMIT   = 3;      // >=3 unhealthy reboots -> hold
   static constexpr uint32_t EMG_HEALTHY_RUNTIME_MS  = 300000; // 5 stable minutes
   static constexpr uint8_t  EMG_DEBOUNCE_SLOTS      = 6;      // vbatLo,vbatHi,iDc,iAc,iAcGen,sensorLoss
+  // [AUDIT 2026-09 ROUND 6 / p.465] Mutex-starvation watchdog. tick() skips
+  // an evaluation cycle when the supervisor mutex is contended (50 ms). A
+  // single skipped cycle is harmless (trips are debounced, state is latched
+  // in hardware); UNBOUNDED starvation would delay safety decisions
+  // arbitrarily. After this many CONSECUTIVE starved ticks (~2 s @ 10 Hz)
+  // the watchdog forces the relay ISOLATED through the driver (GPIO write,
+  // no mutex needed) and the next locked cycle reconciles the state into
+  // an honest latched INTERNAL trip.
+  static constexpr uint8_t  EMG_LOCK_STARVE_LIMIT   = 20;
 
 private:
   void _trip(const char* reason, const char* eventType = "TRIP",
@@ -145,6 +162,10 @@ private:
   bool     _runOkMarked  = false;
   uint8_t  _debounce[EMG_DEBOUNCE_SLOTS] = {0, 0, 0, 0, 0, 0};
   uint32_t _clearAtMs    = 0;
+  // [p.465] Mutex-starvation watchdog state (emergency-task-owned writes).
+  uint8_t  _lockStarveCycles    = 0;    // consecutive starved ticks
+  bool     _lockStarveEscalated = false; // watchdog already forced isolation
+  uint32_t _lockStarveEvents    = 0;    // lifetime escalations (diagnostics)
   String   _pendingEventType;
   String   _pendingEventReason;
   bool     _hasPendingEvent = false;

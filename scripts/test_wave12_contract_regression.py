@@ -266,6 +266,11 @@ check_or_skip("X6", "GAS LATEST emergency keys are all parsed by the PWA "
       f"gasEnvelope reads: {sorted(pwa_env_reads)}")
 
 # --- X7: reason vocabulary parity -------------------------------------------
+# [ROUND-6 UPDATE 2026-09-14] VOCAB gains the documented modular-only
+# addition "INTERNAL" (audit round-6 p.465 mutex-starvation watchdog trip
+# reason). firmware-generic has no supervisor mutex and can never emit it;
+# reasons are free-form passthrough strings on the wire (GAS validates
+# event TYPES, not reasons), so the addition is backward-compatible.
 gen_reasons = set(re.findall(r'"(BOOT|VBAT_LOW|VBAT_HIGH|I_DC_OVER|'
     r'I_AC_LOAD_OVER|I_AC_GEN_OVER|SENSOR_LOSS|ESTOP|OPERATOR|CRASHLOOP)"',
     ino_src))
@@ -274,9 +279,11 @@ mod_reasons = set(re.findall(r'EMG_REASON_\w+\s*=\s*"(\w+)"', globals_src)) | \
 mod_reasons |= set(re.findall(r'EMG_REASON_\w+\s*=\s*"(\w+)"',
     (FWB / "firmware" / "Services" / "EmergencySupervisor.h").read_text()))
 VOCAB = {"BOOT", "VBAT_LOW", "VBAT_HIGH", "I_DC_OVER", "I_AC_LOAD_OVER",
-         "I_AC_GEN_OVER", "SENSOR_LOSS", "ESTOP", "OPERATOR", "CRASHLOOP"}
-check("X7", "Emergency reason vocabulary identical across generic + modular",
-      gen_reasons == mod_reasons == VOCAB,
+         "I_AC_GEN_OVER", "SENSOR_LOSS", "ESTOP", "OPERATOR", "CRASHLOOP",
+         "INTERNAL"}
+MOD_ONLY = {"INTERNAL"}   # documented additive (round-6 p.465 watchdog)
+check("X7", "Emergency reason vocabulary parity (modular adds only the documented INTERNAL watchdog reason)",
+      gen_reasons == (VOCAB - MOD_ONLY) and mod_reasons == VOCAB,
       f"generic={sorted(gen_reasons)} modular={sorted(mod_reasons)}")
 
 # --- X8: event type vocabulary ⊆ GAS whitelist ------------------------------

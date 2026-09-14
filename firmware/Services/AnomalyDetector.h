@@ -32,6 +32,11 @@
 
 namespace Services {
 
+// [AUDIT 2026-09 ROUND 6 / p.458] Every evaluated quantity now carries its
+// own QUALITY — the detector gates each evaluation family on the quality
+// of the measurement it consumes, instead of trusting isfinite(value).
+// A frozen/stale sensor whose producer still publishes a finite last value
+// must not be evaluated as a live reading.
 struct AnomalyContext {
   float voltage;             // current V reading
   float current;             // current I reading (signed, + = charging)
@@ -43,6 +48,10 @@ struct AnomalyContext {
   uint32_t telemetrySeq;
   Core::MeasurementQuality voltageQ;
   Core::MeasurementQuality currentQ;
+  Core::MeasurementQuality temperatureQ;   // [p.458] SHT31 quality gate
+  Core::MeasurementQuality humidityQ;      // [p.458]
+  Core::MeasurementQuality socQ;           // [p.458] SOC is Estimated by design —
+                                            // the gate is "known", not "Valid"
 };
 
 class AnomalyDetector {
@@ -50,16 +59,50 @@ public:
   void begin();
   void tick(const AnomalyContext& ctx, uint32_t nowSec);
 
+  // [AUDIT 2026-09 ROUND 6 / p.458] Per-family eligibility. Direct physical
+  // quantities (V/I/T/H) require a truly VALID measurement — a Derived/
+  // Estimated stand-in is not evidence about the physical world for alarm
+  // purposes. SOC is different BY DESIGN: the coulomb engine legitimately
+  // reports Estimated; "known" (not NotAvailable/SensorError/Invalid) is
+  // the honest gate for SOC alarms.
+  static bool envEligible(Core::MeasurementQuality q) {
+    return q == Core::MeasurementQuality::Valid;
+  }
+  static bool socEligible(Core::MeasurementQuality q) {
+    return q != Core::MeasurementQuality::NotAvailable &&
+           q != Core::MeasurementQuality::SensorError &&
+           q != Core::MeasurementQuality::Invalid &&
+           q != Core::MeasurementQuality::OutOfRange;
+  }
+
 private:
+  // [p.459] Baselines hold the LAST ELIGIBLE sample of each quantity. They
+  // are only written from quality-gated branches — a SensorError sample
+  // must never poison the rate/jump baselines (the valid → invalid → valid
+  // sequence used to compute |Δ| against the bad sample and raise phantom
+  // voltage-jump/current-spike alarms).
   float _lastVoltage = 0.0f;
   float _lastCurrent = 0.0f;
   float _lastTemp = 0.0f;
   float _lastHum = 0.0f;
   float _lastSoc = 0.0f;
+  // [p.459] Timestamp of each baseline sample — rate detectors divide by
+  // the time between ELIGIBLE samples, never by the last tick interval.
+  uint32_t _lastVoltageSec = 0;
+  uint32_t _lastCurrentSec = 0;
+  uint32_t _lastTempSec = 0;
+  uint32_t _lastSocSec = 0;
+  bool  _haveVoltage = false;   // [p.459] baseline primed by an eligible sample
+  bool  _haveCurrent = false;
+  bool  _haveTemp = false;
+  bool  _haveHum = false;
+  bool  _haveSoc = false;
   uint32_t _lastTickSec = 0;
   uint32_t _lastTelemetrySeq = 0;
 
-  // Current stuck detection: track samples over window
+  // Current stuck detection: track samples over window. Only eligible
+  // (Valid) samples enter the window; a quality break RESETS it so samples
+  // from different sensor eras never mix into one "stuck" verdict.
   static constexpr uint8_t STUCK_WINDOW = 8;
   float _currentSamples[STUCK_WINDOW] = {};
   uint8_t _stuckIdx = 0;
@@ -70,6 +113,11 @@ private:
   static constexpr float CURRENT_SPIKE_A_PER_SEC = 50.0f;
   static constexpr float TEMP_RISE_C_PER_MIN     = 5.0f;
   static constexpr float SOC_JUMP_PCT_PER_SEC    = 5.0f;
+
+  // [p.460] Clear a numerical alarm ONLY if it is present and not already
+  // cleared — clear() persists on every call, so an unconditional clear on
+  // every ineligible tick would burn NVS for nothing.
+  static bool _clearIfActive(const char* code);
 };
 
 extern AnomalyDetector anomalyDetector;

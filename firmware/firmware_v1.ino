@@ -655,10 +655,16 @@ void measurementTask(void* pv) {
   static uint8_t currentSuspectRecovery = 0;
   static Core::MeasurementQuality voltageQualityState = Core::MeasurementQuality::NotAvailable;
   static Core::MeasurementQuality currentQualityState = Core::MeasurementQuality::NotAvailable;
+  // [AUDIT 2026-09 ROUND 6 / p.461] Stalled-stream watch: monotonic time of
+  // the last PROCESSED sensor sample. The else branch raises TELEMETRY_STALE
+  // when no fresh sample arrives within the staleness window.
+  static constexpr uint32_t MEAS_STALL_ALARM_MS = 15000;   // directive §6.1 window
+  static uint32_t lastSampleMonotonicMs = 0;
 
   while (true) {
     esp_task_wdt_reset();
     if (xQueueReceive(sensorQueue, &sample, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      lastSampleMonotonicMs = sample.monotonicMs;   // [p.461] feed the stall watch
 
       // =====================================================================
       // Phase 13-D.1: QUALITY RUNTIME WIRING — Battery Voltage
@@ -937,7 +943,7 @@ void measurementTask(void* pv) {
 
       xQueueSendToBack(measurementQueue, &snap, 0);
     } else {
-      // No sample received within 1s timeout — check for Stale transition
+      // No sample received within timeout — check for Stale transition
       // Phase 13-D.1: Producer: Stale via timeout (monotonic time)
       uint32_t nowMs = millis();
       if (lastVoltageMonotonicMs > 0 && (nowMs - lastVoltageMonotonicMs) > STALE_THRESHOLD_MS) {
@@ -958,6 +964,21 @@ void measurementTask(void* pv) {
             xSemaphoreGive(telemetryMutex);
           }
         }
+      }
+      // [AUDIT 2026-09 ROUND 6 / p.461] STALLED-STREAM DETECTION. The gap
+      // detector inside AnomalyDetector only ticks when a sample ARRIVES,
+      // so it can see sequence discontinuity but never a fully stalled
+      // producer (same seq forever = no seq at all from its viewpoint).
+      // The stall is only observable HERE, on the queue-timeout path: no
+      // fresh sample for MEAS_STALL_ALARM_MS (aligned with the §6.1
+      // staleness window) raises TELEMETRY_STALE with a message that says
+      // STALL, not gap. The detector's +1-consecutive clear fires on the
+      // first resumed sample (a stalled producer drops nothing, so the
+      // sequence continues without a gap).
+      if (lastSampleMonotonicMs > 0 &&
+          (nowMs - lastSampleMonotonicMs) > MEAS_STALL_ALARM_MS) {
+        Services::alarms.raise("TELEMETRY_STALE", Core::AlarmSeverity::Warning,
+                     "No new measurement samples — sensor pipeline stalled");
       }
     }
   }
@@ -1234,6 +1255,12 @@ void energyTask(void* pv) {
         actx.telemetrySeq = snap.sequence;
         actx.voltageQ  = snap.batteryVoltage.quality;
         actx.currentQ  = snap.batteryCurrent.quality;
+        // [AUDIT 2026-09 ROUND 6 / p.458] Per-quantity quality for every
+        // evaluated family — the detector now gates T/H on Valid and SOC on
+        // "known" instead of trusting isfinite(value).
+        actx.temperatureQ = snap.temperature.quality;
+        actx.humidityQ    = snap.humidity.quality;
+        actx.socQ         = Services::socStateMachine.getSocQuality();
         Services::anomalyDetector.tick(actx, snap.timestamp);
       }
 

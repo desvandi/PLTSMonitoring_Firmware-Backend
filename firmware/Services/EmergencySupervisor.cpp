@@ -83,7 +83,55 @@ void EmergencySupervisor::begin() {
 // ---------------------------------------------------------------------------
 void EmergencySupervisor::tick() {
   if (_mutex == nullptr) return;
-  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;  // skip cycle — state is latched in hardware
+  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    // Skip cycle — state is latched in hardware, but the skip must stay
+    // BOUNDED. [AUDIT 2026-09 ROUND 6 / p.465] Mutex-starvation watchdog:
+    // after EMG_LOCK_STARVE_LIMIT consecutive starved ticks (~2 s @ 10 Hz),
+    // force the physical fail-safe WITHOUT the mutex — the relay driver is a
+    // plain GPIO write with a shadow flag, deliberately not serialized by
+    // _mutex. State (_state/_reason) is NOT touched here (mutex-owned);
+    // the next cycle that acquires the lock reconciles it into an honest
+    // latched INTERNAL trip. Re-arming is impossible in the meantime: _arm()
+    // only runs under the mutex, and the mutex-holder that starved us can
+    // never energize the relay itself.
+    _lockStarveCycles++;
+    if (_lockStarveCycles >= EMG_LOCK_STARVE_LIMIT && !_lockStarveEscalated) {
+      _lockStarveEscalated = true;
+      _lockStarveEvents++;
+      if (Drivers::emergencyRelay.isEnergized()) {
+        Drivers::emergencyRelay.setEnergized(false);   // ISOLATED — fail-safe NOW
+        Services::Log.append(Core::LogType::Info,
+            String("EMERGENCY watchdog: supervisor mutex starved for ") +
+            _lockStarveCycles + " consecutive ticks — relay FORCED ISOLATED " +
+            "(state reconcile pending)");
+      } else {
+        Services::Log.append(Core::LogType::Info,
+            String("EMERGENCY watchdog: supervisor mutex starved for ") +
+            _lockStarveCycles + " consecutive ticks — relay already isolated");
+      }
+      Services::alarms.raise(Core::AlarmCode::EMERGENCY_TRIP, Core::AlarmSeverity::Critical,
+           "Emergency supervisor mutex starvation — evaluation halted, fail-safe forced");
+    }
+    return;
+  }
+  // Lock acquired — reset the starvation window and reconcile a watchdog
+  // escalation into an honest, latched state transition.
+  _lockStarveCycles = 0;
+  if (_lockStarveEscalated) {
+    _lockStarveEscalated = false;
+    if (_state == EmgState::Run) {
+      // The watchdog had to force the relay off while we were locked out —
+      // convert the physical action into the full latched trip bookkeeping.
+      // [p.465] Event type stays "TRIP" (GAS-whitelisted); the reason carries
+      // the internal-fault vocabulary as a free-form passthrough string.
+      _trip(EMG_REASON_INTERNAL, "TRIP",
+            "supervisor lock starvation — relay forced ISOLATED by watchdog");
+    }
+    // Already-Emergency: the relay was already isolated, telemetry already
+    // shows EMERGENCY, and the watchdog already raised EMERGENCY_TRIP —
+    // nothing left to mutate, and the pending-event queue is mutex-owned
+    // state we do NOT touch after the fact. The log line below is the record.
+  }
 
   _pollEstop();
 
@@ -103,16 +151,24 @@ void EmergencySupervisor::tick() {
 
 // ---------------------------------------------------------------------------
 EmgSensors EmergencySupervisor::_readSensors() {
-  // Canonical pipeline snapshot (quality-gated): Valid/Derived/Estimated +
-  // non-NaN -> usable value; anything else -> NaN (fail-closed below).
+  // [AUDIT 2026-09 ROUND 6 / p.457] Safety inputs use isSafetyUsable() —
+  // the STRICT predicate (Valid quality + Measured source + finite value),
+  // NOT isValid(). isValid() deliberately accepts Derived/Estimated so the
+  // dashboard stays informative during sensor degradation, but a safety
+  // interlock must never act on a number the hardware did not directly
+  // measure: e.g. an INA219 dropout that leaves battery.current holding a
+  // pipeline-derived 0 A would look "valid" to isValid() and silently
+  // disable the I_DC_OVER protection. With the strict gate the degraded
+  // input becomes NaN -> SENSOR_LOSS debounce -> fail-closed trip, and the
+  // ARM gate below rejects re-arm until a real measurement returns.
   EmgSensors s{};
   s.vbat = NAN; s.idc = NAN; s.iac = NAN;
   s.igen = NAN;                      // RESERVED channel (no 2nd ACS712 on this board)
   s.ina219Present = Drivers::ina219Battery.isAvailable();
   if (xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-    if (latestStatus.battery.voltage.isValid()) s.vbat = latestStatus.battery.voltage.value;
-    if (latestStatus.battery.current.isValid()) s.idc  = latestStatus.battery.current.value;
-    if (latestStatus.ac.rmsCurrent.isValid())   s.iac  = latestStatus.ac.rmsCurrent.value;
+    if (latestStatus.battery.voltage.isSafetyUsable()) s.vbat = latestStatus.battery.voltage.value;
+    if (latestStatus.battery.current.isSafetyUsable()) s.idc  = latestStatus.battery.current.value;
+    if (latestStatus.ac.rmsCurrent.isSafetyUsable())   s.iac  = latestStatus.ac.rmsCurrent.value;
     xSemaphoreGive(telemetryMutex);
   }
   return s;
