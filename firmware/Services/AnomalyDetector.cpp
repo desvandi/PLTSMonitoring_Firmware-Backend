@@ -51,13 +51,12 @@ static constexpr float SOC_ALARM_HYST_PCT    = 2.0f;
 // no-op; this guard makes the persistence write happen exactly once, on
 // the Active → not-assessable transition. Returns true when a live alarm
 // was actually cleared (callers aggregate this for a single log line).
+// [AUDIT 2026-09 ROUND 7 / p.467] Atomic test-and-clear — the old
+// find()→check→clear() sequence was two separate lock acquisitions, and a
+// concurrent re-raise between them was silently cleared by this
+// evaluator's stale "condition gone" decision.
 bool AnomalyDetector::_clearIfActive(const char* code) {
-  const Alarm* a = alarms.find(code);
-  if (a && a->lifecycle != Core::AlarmLifecycle::Cleared) {
-    alarms.clear(code);
-    return true;
-  }
-  return false;
+  return alarms.clearIfActive(code);
 }
 
 void AnomalyDetector::tick(const AnomalyContext& ctx, uint32_t nowSec) {

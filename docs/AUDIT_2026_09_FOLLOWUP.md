@@ -977,3 +977,149 @@ sanitizer menangkapnya.
 Gate: `test_audit_round6_2026_09.py` kini 34/34 (4 pin self-review baru:
 I1–I4). Harness anomaly diperluas (5 ekspektasi baru). Seluruh regresi
 tetap hijau; `pio run -e development -e staging` SUCCESS.
+
+## 13. Round 7 (2026-09-14): serialisasi AlarmRegistry lintas task (p.467, p.468, p.469)
+
+Auditor round-7 menutup p.453–p.466 (verifikasi independen atas PR #36/#37)
+namun menemukan satu kelas masalah baru yang tidak tersentuh remediasi
+sebelumnya: **AlarmRegistry adalah singleton global yang dimutasi dari
+banyak execution context tanpa serialisasi internal apa pun**. Temuan:
+
+- **p.467 (P1)** — data race lintas task pada state registry. `raiseTracked()`
+  menjalankan `_findIdx() → modifikasi _alarms[] → _count → saveToNVS()`
+  tanpa lock, sementara caller tersebar di measurementTask, anomaly/health,
+  energyTask, networkTask, task web async, relayTask, emergencyTask, dan
+  persistenceTask. Dua raise bersamaan yang sama-sama melihat
+  `_findIdx()==0xFF` dapat menulis slot append yang sama (alarm hilang /
+  duplikat); clear yang interleaved dengan eviksi menggeser array di bawah
+  indeks writer.
+- **p.468 (P1)** — race persistensi. `saveToNVS()` dipicu dari semua jalur
+  immediate-save raise/clear/ack DAN checkpoint persistenceTask; dua save
+  paralel dapat membangun blob dari snapshot RAM berbeda dan saling
+  menimpa dengan generation yang tidak konsisten. Atomicity record
+  (round-6) menyelesaikan tulisan tunggal, bukan serialisasi produser.
+- **p.469 (P2)** — pembacaan tidak koheren. `countAll()+getAlarm(i)` di
+  GET /api/alarms dan pasangan `highestActiveSeverity()` +
+  `copyActiveAlarms()` di envelope telemetry adalah multi-call reads yang
+  bisa menyandingkan dua state berbeda; `find()`/`getAlarm()` mengembalikan
+  pointer interior yang bisa divalidasi oleh eviksi bersamaan.
+
+### 13.1 Arsitektur fix — serialisasi DI DALAM registry
+
+Alternatif mutex per-caller ditolak (auditor: call site terlalu tersebar
+untuk dijaga benar). Yang diimplementasikan persis sesuai rekomendasi:
+
+```
+public API  →  lock  →  private *Unlocked() implementation
+  raise()           → _raiseTrackedUnlocked()   → _saveToNVSUnlocked()
+  clear()           → _clearUnlocked()          → _saveToNVSUnlocked()
+  clearIfActive()   → _clearIfActiveUnlocked()  → _saveToNVSUnlocked()
+  acknowledge()     → _acknowledgeUnlocked()    → _saveToNVSUnlocked()
+  acknowledgeAll()  → _acknowledgeAllUnlocked() → _saveToNVSUnlocked()
+  snapshotInto()    → (salinan utuh state dalam satu lock)
+```
+
+- **Satu mutex FreeRTOS non-rekursif**, dibuat di `begin()` (setup(),
+  sebelum task apa pun lahir — terverifikasi `alarms.begin()` line 343,
+  `xTaskCreatePinnedToCore` pertama line 508); fallback lazy-create di
+  `_lock()` mengikuti pola `AuthManager`/`LogService`/`BatteryCommManager`
+  yang sudah diaudit. Lock diambil HANYA di entry publik — tidak ada
+  implementasi Unlocked yang bisa mengambil lock (deadlock mustahil secara
+  konstruksi; mutex non-rekursif membuat nested acquisition tidak
+  berekspresi).
+- **Transaksi persistensi = bagian dari critical section (p.468)**: mutasi
+  RAM + build blob + write + read-back + commit generation berjalan dalam
+  satu sesi lock. Interleaving "Save A build gen N+1 / Save B build gen
+  N+1 / A write / B write / A read-back / B read-back" yang dicontohkan
+  auditor tidak lagi mungkin.
+- **Priority inheritance** bawaan mutex FreeRTOS menaikkan prioritas holder
+  saat emergencyTask (prio 3) menunggu di belakang saveToNVS di task web —
+  tidak ada starvation tanpa batas.
+- Kontrak ISR: registry hanya boleh disentuh dari task context (mutex
+  FreeRTOS); audit call-site mengonfirmasi seluruh pemanggil saat ini
+  adalah loop task / handler web / callback MQTT (bukan ISR).
+
+### 13.2 Fix sisi pembaca (p.469)
+
+- **`Snapshot` + `snapshotInto()`** — satu akuisisi lock menyalin seluruh
+  state (24 alarm + seluruh counter diagnostik). GET `/api/alarms` kini
+  membangun JSON dari SATU snapshot ter-heap (3,3 KB — terlalu besar untuk
+  stack task async-web); `overflowCount` diambil dari snapshot yang sama.
+- **Envelope telemetry dari satu snapshot** — `highestSeverityIn()` +
+  `copyActiveFrom()` (helper murni atas snapshot) menggantikan pasangan
+  `highestActiveSeverity()` + `copyActiveAlarms()` dua-lock; baris severity
+  dan daftar alarm kini menarasikan instan yang sama. Buffer statis
+  lama digantikan Snapshot statis (delta RAM ≈ +14 byte).
+- **`find()` copy-out** — `bool find(code, Alarm& out)` menggantikan
+  `const Alarm*`; `getAlarm()` / `getActiveAlarms()` /
+  `getActiveAlarmCount()` (aksesor pointer mentah) DIHAPUS total.
+- **`clearIfActive()` atomik** — test-and-clear satu lock untuk loop
+  evaluator; window TOCTOU find→check→clear (re-raise yang ketinggalan
+  dibersihkan oleh keputusan basi "kondisi sudah reda") ditutup;
+  `AnomalyDetector::_clearIfActive` kini mendelegasikannya.
+
+### 13.3 Bukti — concurrency test NYATA (bukan mirror statis)
+
+Auditor menolak mirror struktural sebagai bukti thread-safety. Harness baru
+`scripts/native/verify_alarm_concurrency.cpp` menjalankan interleaving
+sungguhan dengan `std::thread`: **2 writer** (30 kode sendiri + 4 shared,
+melebihi 24 slot → saturasi + eviksi CLEARED + reject jujur; ~1.600
+rejection per run), **1 operator** (acknowledgeAll + injeksi 1 kegagalan
+NVS transien), **1 persistence task** (loop checkpoint `isDirty →
+saveToNVS()` verbatim dari firmware), **2 reader** (validasi ~5.500
+snapshot), **watchdog deadlock**. Mirror struktural 1:1 registry round-7;
+shim (Log/NVS/RTC) disinkronkan internal seperti padanan firmware-nya
+agar laporan TSAN selalu menunjuk registry, bukan artefak harness.
+
+Hasil (reproduksibel via `bash scripts/native/run-native-tests.sh`):
+
+| Build | Hasil |
+|---|---|
+| Treatment + **ThreadSanitizer** | **0 laporan race**, ~558.000 check invariant PASS |
+| Treatment + ASAN/UBSAN | 0 error, ~580.000 check PASS |
+| **Negative control** (round-6 unlocked, `-DREGISTRY_NO_LOCK`) + TSAN | **177–290 laporan race**, semuanya di `Services::alarms` — bukti harness TIDAK buta terhadap kelas race p.467/p.468/p.469 |
+
+Invariant yang divalidasi reader per snapshot: count ≤ 24; kode
+null-terminated & non-kosong; severity/lifecycle enum valid; TIDAK ADA
+kode duplikat (manifestasi langsung race double-append p.467);
+overflowCount/persistFailures/generation monoton per pembaca. Fase
+deterministik tambahan: injeksi kegagalan NVS saat quiescent →
+`AcceptedPersistFailed` jujur → `_dirty` bertahan → HANYA checkpoint
+persistence task yang me-retry (kontrak recovery p.454/p.468).
+
+Runner CI membangun ketiganya + **mensyaratkan negative control GAGAL**:
+exit 0 pada mode unlocked = kegagalan suite ("harness blind") — bukti
+sensitivitas jadi bagian dari gate permanen.
+
+### 13.4 Gate statis round-7
+
+`scripts/test_audit_round7_2026_09.py` — **29/29 PASS**: (A) mutex internal
+dibuat pra-scheduler; (B) seluruh 7 mutator publik = wrapper locked →
+Unlocked, dan TIDAK ada implementasi Unlocked yang mengambil lock
+(deadlock-free by construction), immediate-save memakai bentuk Unlocked,
+checkpoint persistenceTask lewat entry publik; (C) snapshot tunggal di
+GET /api/alarms + envelope telemetry, aksesor pointer mentah hilang,
+find copy-out; (D) clearIfActive atomik dipakai AnomalyDetector; (E)
+harness konkurensi + negative control + syarat sensitivitas ada di CI;
+(F) invariant round-6 (satu record NVS, eviksi CLEARED-only, reject jujur,
+reaktivasi) utuh menembus refactor.
+
+Dua asersi gate lama di-update dengan justifikasi terdokumentasi:
+r5-G6/G7 dan r6-F5 mem-panggil `saveToNVS()` internal → kini
+`_saveToNVSUnlocked()` (panggilan publik dari dalam lock akan double-lock
+mutex non-rekursif). Rangkaian semantik yang di-pin tidak berubah.
+
+### 13.5 Regresi
+
+31/31 suite Python PASS (r5 74/74, r6 34/34, r7 29/29 baru, relay 39,
+tx-durability 30, emg-modular 85, dsb.); seluruh harness native GREEN
+(termasuk 3 harness round-6); `pio run -e development -e staging` SUCCESS
+(RAM 37,8%, flash 93,0%/93,2% — kenaikan flash +2,3 KB dari kode lock +
+snapshot). Tidak ada perubahan wire/API: field JSON dan envelope
+identik; konsumen PWA tidak tersentuh.
+
+### 13.6 Yang tetap menunggu operator (tidak berubah)
+
+Rotasi token GitHub/Vercel yang pernah di-paste (hygiene, P0), Gate A/B
+provisioning fisik, acceptance T9–T14, INA-001..004, keputusan produk
+p.429, kontrak lintas-layer p.430/431/p.441.

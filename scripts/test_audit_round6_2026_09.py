@@ -202,9 +202,13 @@ check("F4. Generation committed only after a verified write; load adopts it",
       "_generation = (uint16_t)(_generation + 1);" in save_fn.split("memcmp")[1] and
       "_generation = h.generation;" in alarm_code)
 
+# [ROUND-7 UPDATE 2026-09-14] The migration write runs as _saveToNVSUnlocked()
+# — loadFromNVS() already holds the registry lock (p.467/p.468); calling the
+# public saveToNVS() there would double-lock the non-recursive mutex. The
+# one-time-migration behavior is unchanged.
 check("F5. Legacy two-record layout is READ-ONLY (migration) and triggers a one-time v2 save",
       'getBytes("hdr"' in alarm_code and 'getBytes("arr"' in alarm_code and
-      bool(re.search(r"saveToNVS\(\);.*?one-time migration", alarm_c, re.S)))
+      bool(re.search(r"_saveToNVSUnlocked\(\);.*?one-time migration", alarm_c, re.S)))
 
 # ---------------------------------------------------------------------------
 print("\n[G] Honest raise contract (p.454)")

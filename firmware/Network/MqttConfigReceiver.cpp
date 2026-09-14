@@ -402,8 +402,9 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     if (strlen(code) == 0) return { false, "REJECTED", "missing code" };
     // [FW-22 CLOSED 2026-08] Real execution via the canonical AlarmRegistry
     // API — previously a log-only stub that ACKed without acknowledging.
-    const Services::Alarm* a = Services::alarms.find(code);
-    if (!a) return { false, "REJECTED", "alarm not found" };
+    // [p.467] find() is copy-out: no interior pointer into the registry.
+    Services::Alarm a;
+    if (!Services::alarms.find(code, a)) return { false, "REJECTED", "alarm not found" };
     Services::alarms.acknowledge(code);   // persists immediately (FW-23)
     Services::Log.append(Core::LogType::AlarmAcknowledged,
                           String("MQTT: ack alarm ") + code, -1);
