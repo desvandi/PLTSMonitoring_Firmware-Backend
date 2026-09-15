@@ -152,14 +152,20 @@ echo "=== verify_service_lock_concurrency (TREATMENT, ThreadSanitizer) ==="
 if ! g++ -std=c++17 -g -fsanitize=thread -pthread -o vsc_tsan verify_service_lock_concurrency.cpp; then
   echo "COMPILE FAIL: verify_service_lock_concurrency (tsan)"; fails=$((fails+1))
 else
-  ./vsc_tsan > vsc_tsan.log 2>&1 || fails=$((fails+1))
+  # [CI lesson] On failure the log is EVIDENCE — print it (the redirect
+  # would otherwise hide the failing phase from the CI console).
+  if ! ./vsc_tsan > vsc_tsan.log 2>&1; then
+    fails=$((fails+1)); echo "TREATMENT FAILED — tail of vsc_tsan.log:"; tail -60 vsc_tsan.log
+  fi
 fi
 
 echo "=== verify_service_lock_concurrency (TREATMENT, ASAN+UBSAN) ==="
 if ! g++ -std=c++17 -g -fsanitize=address,undefined -pthread -o vsc_asan verify_service_lock_concurrency.cpp; then
   echo "COMPILE FAIL: verify_service_lock_concurrency (asan)"; fails=$((fails+1))
 else
-  ./vsc_asan > vsc_asan.log 2>&1 || fails=$((fails+1))
+  if ! ./vsc_asan > vsc_asan.log 2>&1; then
+    fails=$((fails+1)); echo "TREATMENT FAILED — tail of vsc_asan.log:"; tail -60 vsc_asan.log
+  fi
 fi
 
 echo "=== verify_service_lock_concurrency (NEGATIVE CONTROL, UNLOCKED services under TSAN) ==="

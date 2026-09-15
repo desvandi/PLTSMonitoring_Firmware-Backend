@@ -1144,6 +1144,20 @@ static bool phaseS() {
   }
   for (auto& th : threads) th.join();
 
+  // [CI lesson] DETERMINISTIC TERMINAL PASS. The storm races store vs
+  // updateAck freely (that is the p.473 subject), but "final ack == TERM"
+  // is only guaranteed per-id when the LAST writer is updateAck — a store
+  // delayed past the relay's final round would legitimately leave a QUEUED
+  // ack as the outcome. One sequential updateAck pass AFTER all stores
+  // have landed pins the invariant without weakening the storm above.
+  for (int i = 0; i < IDS; i++) {
+    char id[16], hash[16], ack[24];
+    snprintf(id, sizeof(id), "tx-%03d", i);
+    snprintf(hash, sizeof(hash), "h-%03d", i);
+    snprintf(ack, sizeof(ack), "TERM:%03d", i);
+    (void)j.updateAck(id, hash, ack);
+  }
+
   // Post-storm invariants (single-threaded).
   REQUIRE(storedOk.load() > 0, "p.473 some storeTransaction must succeed");
   REQUIRE(ackOk.load() > 0, "p.473 some updateAck must succeed");
@@ -1231,20 +1245,20 @@ static bool phaseT() {
       }
     });
   }
-  // energyTask — crossCheckShunt: first 40% disagreeing with the BMS
-  // (mismatch must activate + suspend authority), then invalid (NAN →
-  // arbitration resets, interlock clears, authority returns). The loop is
-  // bounded by ITERATIONS ONLY (not `stop`): the NAN phase must ALWAYS run
-  // to completion, or the interlock is left active and the post-storm
-  // invariants fail spuriously when the tick writer finishes early. The
-  // sleeps keep this thread ALIVE alongside the tick writer — without them
-  // an unlocked crossCheckShunt (negative controls) completes before the
-  // first tick write lands and the race window never opens.
+  // energyTask — crossCheckShunt, EVENT-DRIVEN (CI lesson: an iteration
+  // BUDGET is scheduling-sensitive — on an oversubscribed 2-core runner the
+  // budget can run out before the tick writer reaches gen>10, so the
+  // interlock never activates and the assertion fails spuriously): phase 1
+  // disagrees until the interlock has REALLY activated, phase 2 feeds NAN
+  // until it has REALLY cleared. Caps only guard against a broken build.
   threads.emplace_back([&] {
     std::mt19937 rng(0x1F00);
-    for (int i = 0; i < 20000; i++) {
-      float shunt = (i < 8000) ? 0.0f : NAN;   // disagree, then go invalid
-      (void)bms.crossCheckShunt(shunt);
+    for (int i = 0; i < 200000 && bms.mismatchActivations() < 1; i++) {
+      (void)bms.crossCheckShunt(0.0f);   // disagree with the BMS
+      microSleep(rng, 40);
+    }
+    for (int i = 0; i < 200000 && bms.isMismatchActive(); i++) {
+      (void)bms.crossCheckShunt(NAN);    // invalid shunt → arbitration resets
       microSleep(rng, 40);
     }
   });
