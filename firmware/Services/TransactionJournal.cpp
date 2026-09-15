@@ -5,6 +5,7 @@
 #include "TransactionJournal.h"
 #include "../Core/Common.h"
 #include "../Utils/Crc.h"
+#include "LogService.h"   // [p.473] rate-limited CRIT log on the fail-closed path
 #include <Preferences.h>
 #include <cstring>
 #include <cstdio>
@@ -21,11 +22,35 @@ TransactionJournal journal;
 // eviction (storeTransaction wrapping _writeIdx) and a terminal update
 // (updateAck re-committing the same slot) could interleave and leave the NVS
 // blob and the RAM mirror disagreeing about which transaction owns the slot.
-void TransactionJournal::_lock() {
-  if (_mutex) xSemaphoreTake((SemaphoreHandle_t)_mutex, portMAX_DELAY);
+//
+// [AUDIT 2026-09 ROUND 10 / p.473] FAIL-CLOSED acquisition — same shape as
+// AlarmRegistry::_lock() (round-9 p.471): retry-create ONCE; still null →
+// count (atomic) + rate-limited CRIT log via LogService (different mutex,
+// no cycle) + return false. The caller REFUSES the operation — the journal
+// never mutates RAM or NVS unsynchronized.
+bool TransactionJournal::_lock() {
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();   // retry-create ONCE
+  if (_mutex != nullptr) {
+    xSemaphoreTake((SemaphoreHandle_t)_mutex, portMAX_DELAY);
+    return true;
+  }
+  _lockFailures.fetch_add(1, std::memory_order_relaxed);
+  uint32_t last = _lastLockFailLogMs.load(std::memory_order_relaxed);
+  uint32_t now = millis();
+  if (now - last > 60000UL &&
+      _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    Log.append(Core::LogType::StorageError,
+               String("[TXN] journal mutex UNAVAILABLE — operation REJECTED "
+                      "(fail-closed, p.473); lockFailures=") +
+                   _lockFailures.load(std::memory_order_relaxed),
+               -1);
+  }
+  return false;
 }
 void TransactionJournal::_unlock() {
-  if (_mutex) xSemaphoreGive((SemaphoreHandle_t)_mutex);
+  // Only ever called after _lock() returned TRUE — the handle is non-null
+  // and HELD here by construction.
+  xSemaphoreGive((SemaphoreHandle_t)_mutex);
 }
 
 
@@ -167,8 +192,30 @@ void TransactionJournal::begin() {
   // [audit p.413-415] Mutations now arrive from two execution contexts —
   // create the cross-task lock BEFORE any concurrent access can happen
   // (begin() runs in single-tasked setup context).
+  //
+  // [p.473] BOOT GUARD — fail-closed. The journal is the idempotency/
+  // durability backbone of the relay executor: without serialization,
+  // storeTransaction (networkTask) and updateAck (relayTask) interleave over
+  // the RAM mirror and the NVS slots — dedup and terminal-state consistency
+  // break exactly as the auditor described. Refuse to bring the journal (and
+  // the command paths behind it) up: log FATAL and halt WITHOUT feeding the
+  // task watchdog → deterministic TWDT panic reset, honest crash-chain
+  // (BOOT/CRASHLOOP), never an unsynchronized zombie.
   if (_mutex == nullptr) {
     _mutex = xSemaphoreCreateMutex();
+  }
+  if (_mutex == nullptr) {
+    Serial.println(F("[FATAL] TransactionJournal mutex creation failed (heap exhausted at boot) "
+                    "— refusing to enter multi-task state (p.473 fail-closed)"));
+    Serial.flush();
+    Log.append(Core::LogType::StorageError,
+               String("[FATAL] TransactionJournal mutex creation failed — boot REFUSED "
+                      "(p.473): journal serialization guards dedup + terminal-state "
+                      "consistency; halting for TWDT panic reset"),
+               -1);
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
   }
 
   _loadFromNVS();
@@ -177,20 +224,27 @@ void TransactionJournal::begin() {
 }
 
 bool TransactionJournal::isProcessed(const String& requestId) {
-  _lock();
+  // [p.473] Fail-closed: TRUE = "treat as processed" = refuse to re-execute.
+  // For a dedup oracle, "cannot check" must err on the safe side (a command
+  // re-run without dedup could double-apply a relay mutation).
+  if (!_lock()) return true;
   bool r = _findInJournal(requestId) >= 0;
   _unlock();
   return r;
 }
 String TransactionJournal::getCommandHash(const String& requestId) {
-  _lock();
+  // [p.473] Fail-closed: empty String = honest unknown (RelayHandlers'
+  // reconciliation already falls through to UNKNOWN on empty).
+  if (!_lock()) return String();
   int idx = _findInJournal(requestId);
   String r = idx >= 0 ? _hashes[idx] : String();
   _unlock();
   return r;
 }
 String TransactionJournal::getAckJson(const String& requestId) {
-  _lock();
+  // [p.473] Fail-closed: empty String = honest unknown (GET transactions
+  // falls through the journal to the honest UNKNOWN verdict).
+  if (!_lock()) return String();
   int idx = _findInJournal(requestId);
   String r = idx >= 0 ? _acks[idx] : String();
   _unlock();
@@ -202,7 +256,10 @@ bool TransactionJournal::storeTransaction(const String& requestId,
                                           const String& ackJson) {
   // [audit p.413-415] networkTask ingress path — serialized against the
   // relayTask terminal-update path (updateAck).
-  _lock();
+  // [p.473] Fail-closed: false = "not durable" (the REST/MQTT ingresses
+  // already surface this as HTTP 503 / honest degradation — never a silent
+  // DUPLICATE claim for a transaction that was never stored).
+  if (!_lock()) return false;
   // Find existing slot or new
   int idx = _findInJournal(requestId);
   if (idx >= 0) {
@@ -272,7 +329,10 @@ bool TransactionJournal::_storeNewEntryLocked(const String& requestId,
 bool TransactionJournal::updateAck(const String& requestId,
                                    const String& commandHash,
                                    const String& ackJson) {
-  _lock();
+  // [p.473] Fail-closed: false = terminal verdict NOT durably recorded —
+  // observable degradation (the verdict stays in the RAM ring), never a
+  // wrong durable answer.
+  if (!_lock()) return false;
   int idx = _findInJournal(requestId);
   if (idx >= 0) {
     if (_hashes[idx] != commandHash) {
@@ -310,7 +370,13 @@ bool TransactionJournal::updateAck(const String& requestId,
 TransactionDecision TransactionJournal::decide(const String& requestId,
                                                 const String& commandHash,
                                                 String& outPreviousAck) {
-  _lock();
+  // [p.473] Fail-closed: Unavailable — the ingress REJECTS (REST 503 /
+  // MQTT JOURNAL_UNAVAILABLE). Deliberately NOT Conflict/Duplicate (those
+  // claim knowledge) and NOT New (that would execute without dedup).
+  if (!_lock()) {
+    outPreviousAck = String();
+    return TransactionDecision::Unavailable;
+  }
   int idx = _findInJournal(requestId);
   if (idx < 0) {
     _unlock();

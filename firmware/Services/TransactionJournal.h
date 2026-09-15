@@ -57,6 +57,7 @@
 #define PLTS_SERVICES_TRANSACTION_JOURNAL_H
 
 #include <Arduino.h>
+#include <atomic>
 #include "../Core/Config.h"   // [audit-2 K-2] Core::JOURNAL_SIZE
 
 namespace Services {
@@ -65,6 +66,13 @@ enum class TransactionDecision : uint8_t {
   New       = 0,
   Duplicate = 1,
   Conflict   = 2,
+  // [AUDIT 2026-09 ROUND 10 / p.473] The journal lock could not be acquired
+  // (mutex creation retry failed). The dedup oracle has NO honest answer in
+  // that state — executing the command without a dedup check could
+  // double-apply on retry, so every ingress treats this as REJECT (REST: 503,
+  // MQTT: JOURNAL_UNAVAILABLE ack). It is deliberately NOT mapped onto
+  // Conflict/Duplicate: those claim knowledge this state does not have.
+  Unavailable = 3,
 };
 
 class TransactionJournal {
@@ -136,10 +144,45 @@ private:
   // [audit p.413-415] Cross-task serialization — storeTransaction runs in
   // networkTask (ingress), updateAck runs in relayTask (executor terminal
   // verdict). Both mutate the shared RAM mirror and the NVS slot contents.
+  //
+  // [AUDIT 2026-09 ROUND 10 / p.473] ACQUISITION IS FAIL-CLOSED (same
+  // pattern as AlarmRegistry round-9 p.471): begin() treats mutex-creation
+  // failure as FATAL (boot guard — Serial + Log FATAL, halt WITHOUT feeding
+  // the task watchdog → TWDT panic reset, honest crash-chain); at runtime
+  // _lock() retries creation ONCE and returns false when unavailable — every
+  // public entry then refuses the operation (contract below). Accounting is
+  // ATOMIC (no synchronization exists on that path); the CRIT log is
+  // rate-limited via LogService (a DIFFERENT service's mutex — no cycle:
+  // LogService never calls into the journal).
+  //
+  // Degraded-mode (mutex unavailable) per-entry contract:
+  //   isProcessed()      → TRUE  (dedup oracle fails toward "already
+  //                        processed" = refuse to re-execute — the safe side)
+  //   getCommandHash()/getAckJson() → "" (honest unknown)
+  //   storeTransaction()/updateAck() → false (callers already surface this
+  //                        as HTTP 503 / honest MQTT degradation)
+  //   decide()           → TransactionDecision::Unavailable (ingresses
+  //                        REJECT; never a silent New)
+  //   bootCount()        → NVS-persisted, written once in begin() before any
+  //                        task exists — lock-free read stays valid
+  //   getJournalSize()   → advisory uint8_t read (no callers in tree)
+  //   lockFailures()     → lock-free atomic read — the ONE accessor that
+  //                        works in the degraded mode (diagnostics path)
   void* _mutex = nullptr;  // SemaphoreHandle_t (kept opaque in header)
-  void _lock();
+  bool _lock();
   void _unlock();
+  std::atomic<uint32_t> _lockFailures{0};
+  std::atomic<uint32_t> _lastLockFailLogMs{0};   // rate-limit bookkeeping
   uint32_t _bootCount = 0;
+
+public:
+  // [p.473] Lock-free atomic read — deliberately the ONE accessor working
+  // when the mutex is unavailable, so /api/diagnostics can still SEE the
+  // degraded mode. Non-zero = at least one operation was refused fail-closed
+  // since boot.
+  uint32_t lockFailures() const {
+    return _lockFailures.load(std::memory_order_relaxed);
+  }
 };
 
 extern TransactionJournal journal;

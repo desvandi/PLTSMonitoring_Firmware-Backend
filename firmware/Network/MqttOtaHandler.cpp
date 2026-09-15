@@ -130,6 +130,15 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
   Services::TransactionDecision decision =
     Services::journal.decide(canon.transactionId, canon.commandHash, previousAck);
 
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing an
+  // OTA without a dedup check could re-flash on retry. Honest degradation
+  // ack, never a silent NEW.
+  if (decision == Services::TransactionDecision::Unavailable) {
+    _rejected++;
+    _publishAck(canon.transactionId.c_str(), false, "JOURNAL_UNAVAILABLE",
+                "transaction journal lock unavailable — OTA NOT executed (fail-closed), retry");
+    return;
+  }
   if (decision == Services::TransactionDecision::Duplicate) {
     _duplicates++;
     if (previousAck.length() > 0) {

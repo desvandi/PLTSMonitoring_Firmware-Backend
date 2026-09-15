@@ -221,6 +221,12 @@ void handleDevicePost() {
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =
     Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing
+  // without a dedup check could double-apply the mutation on retry.
+  if (d.decision == Services::TransactionDecision::Unavailable) {
+    sendError(503, "transaction journal lock unavailable — command NOT executed (fail-closed), retry");
+    return;
+  }
   if (d.decision == Services::TransactionDecision::Conflict) {
     sendError(409, "requestId reuse with different command"); return;
   }
@@ -283,6 +289,12 @@ void handlePasswordPost() {
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =
     Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing
+  // without a dedup check could double-apply the mutation on retry.
+  if (d.decision == Services::TransactionDecision::Unavailable) {
+    sendError(503, "transaction journal lock unavailable — command NOT executed (fail-closed), retry");
+    return;
+  }
   if (d.decision == Services::TransactionDecision::Conflict) {
     sendError(409, "requestId reuse with different command"); return;
   }
@@ -378,6 +390,12 @@ void handleImport() {
     String bodyHash = Utils::sha256Hex(raw);
     String prevAck;
     Services::TransactionDecision d = Services::journal.decide(reqId, bodyHash, prevAck);
+    // [p.473] Journal lock unavailable — REJECT (fail-closed): importing
+    // without a dedup check could re-apply the same large mutation on retry.
+    if (d == Services::TransactionDecision::Unavailable) {
+      sendError(503, "transaction journal lock unavailable — import NOT executed (fail-closed), retry");
+      return;
+    }
     if (d == Services::TransactionDecision::Conflict) {
       sendError(409, "requestId reuse with different import payload"); return;
     }

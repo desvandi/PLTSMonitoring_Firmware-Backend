@@ -1420,3 +1420,129 @@ additif: field JSON baru (`lockFailures` di /api/alarms,
 ("consumers treat absent as 0") — konsumen PWA tidak tersentuh. Konsumen
 `raise()` yang mengabaikan nilai balik tetap aman (perilaku normal tidak
 berubah; jalur baru hanya aktif saat mutex unavailable).
+
+## 16. Round 10 (2026-09-15): remediasi keluarga fail-open p.472–p.475
+
+Auditor menutup round-9 dengan Production-Ready / Conditional Final
+Approval, lalu membuka ronde baru atas HEAD `f724e9c`: empat temuan
+keluarga fail-open di luar AlarmRegistry — p.472 (LogService: reader tanpa
+mutex + writer fail-open), p.473 (TransactionJournal: `_lock()` no-op saat
+handle null), p.474 (BatteryCommManager: `crossCheckShunt()` membaca
+`_data.current` sebelum pengecekan mutex dan tidak pernah mengambilnya),
+p.475 (AuthManager: `_lockAuth()` fail-open menghidupkan kembali race
+replay refresh-token). Semua diperbaiki dengan pola hybrid round-9 yang
+telah disetujui auditor: boot guard FATAL + runtime retry-sekali-lalu-tolak.
+
+### 16.1 Implementasi per temuan
+
+**p.472 — LogService.** (1) Keempat getter kini terkunci:
+`getActivityJson()` menjawab `{"logs":[],"lockUnavailable":true}` saat
+mutex unavailable, `getAuditText()` → `""`, `getActivityCount()`/
+`getAuditBytes()` → 0 (konservatif). (2) `append()`/`audit()`/
+`flushToDisk()` fail-closed — entri di-drop (perpanjangan semantik FW-24
+"drop rather than block"), `_auditDirty` dibaca di dalam kunci. (3) Boot
+guard FATAL di `begin()`; jalur kegagalan `_lock()` mencatat via **Serial
+saja** — LogService adalah sink log, memanggil `Log.append()` dari jalur
+itu adalah rekursi-dir atas mutex yang hilang. Timeout 500 ms tetap TIDAK
+dihitung sebagai lockFailure (semantik drop-on-contention yang sudah ada).
+
+**p.473 — TransactionJournal.** `_lock()` kini bool fail-closed (retry-create
+sekali → tolak + akuntansi atomic). Kontrak per-entry saat unavailable:
+`isProcessed()` → **true** (orakel dedup gagal ke arah "sudah diproses" =
+menolak eksekusi ulang — sisi aman), `getCommandHash()`/`getAckJson()` →
+`""` (unknown jujur; jalur rekonsiliasi sudah jatuh ke UNKNOWN),
+`storeTransaction()`/`updateAck()` → false (ingress REST/MQTT sudah
+memetakan ke 503/degradasi jujur), dan `decide()` → nilai enum baru
+**`TransactionDecision::Unavailable`** — sengaja TIDAK dipetakan ke
+Conflict/Duplicate (keduanya mengklaim pengetahuan yang tidak dimiliki
+state ini) maupun New (itu berarti mengeksekusi tanpa dedup). Sebanyak 11
+call-site konsumen `decide()` mendapat cabang reject: REST → 503
+"command NOT executed (fail-closed), retry"; MQTT → ack
+`JOURNAL_UNAVAILABLE`.
+
+**p.474 — BatteryCommManager.** `crossCheckShunt()` kini mengambil mutex
+**SEBELUM** membaca `_data` (membalik urutan lama yang membaca
+`_data.current` lebih dulu); seluruh arbitrase (baca snapshot BMS + mutasi
+streak/interlock) di bawah kunci; saat unavailable → NAN dengan state
+cross-check tak tersentuh. `getData()` fail-closed ke snapshot
+`reset()` (NAN + tidak fresh — konsumen sudah memperlakukannya sebagai
+"tidak ada data BMS", fallback IDLE_NO_BMS terdokumentasi).
+`socAuthoritative()`/`isMismatchActive()`/`getLastMismatchA()` kini membaca
+snapshot di bawah kunci (dipanggil dari task web DAN energy — komentar
+"benign single-writer" lama tidak lagi dipakai sebagai pembenaran untuk
+reader multi-task). `_lock(timeoutMs)` membedakan **timeout** (skip-cycle,
+TIDAK dihitung — semantik bounded-wait yang sudah ada) dari
+**unavailability** (dihitung). Saat unavailable: `socAuthoritative()` →
+false (BMS kehilangan otoritas SOC, shunt menjadi kebenaran — persis
+fallback terdokumentasi).
+
+**p.475 — AuthManager.** `_lockAuth()` bool fail-closed + boot guard FATAL.
+Saat unavailable: `consumeRefreshToken()` → false (TIDAK ada rotasi tanpa
+serialisasi — memulihkan jaminan AUTH-GATE-05), `issueRefreshToken()` →
+`""` (handler login menjawab 500 jujur "Session persistence unavailable" —
+tidak pernah cookie sesi dengan token kosoh/fabrikasi), `verifyRefreshToken()`
+→ false, `revokeAllRefreshTokens()` → ditolak + dilog (logout yang tak bisa
+membuktikan revokasi tidak boleh mengklaimnya). Dua penguatan tambahan
+dalam lingkup critical section yang sama: `issueRefreshToken()` kini masuk
+kunci (memutasi slot + blob NVS yang sama dengan consume; sebelumnya
+sama-sekali tidak terkunci), dan — **ditemukan harness sendiri sebelum
+auditor** — `_persistRefreshTokens()` dipindah KE DALAM kunci pada jalur
+issue: persist setelah `_unlockAuth()` membaca slot tanpa kunci saat rotasi
+konkuren memutasi slot di bawah kunci (blob robek; TSAN menandainya di
+Fase U). consume/revoke sudah mempertahankan persist di dalam kunci.
+
+### 16.2 Bukti — harness native round-10 (verify_service_lock_concurrency)
+
+Mirror struktural keempat service (std::timed_mutex menggantikan mutex
+FreeRTOS; bounded/unbounded wait dipertahankan per-service seperti di
+firmware), 3 mode build, 7 fase:
+
+| Fase | Isi | Hasil treatment |
+|---|---|---|
+| V | Boot guard: injeksi kegagalan create di begin() | keempat begin() menolak + tercatat |
+| R | LogService: 4 penulis + 4 pembaca storm | 0 entri robek, id monoton, 1600 baris audit utuh, lockFailures=0 |
+| S | Journal: 4 network store vs 4 relay updateAck (24 id, 1 wrap eviksi) | 0 id ganda, ack terminal tak pernah regres ke QUEUED, RAM==NVS per slot |
+| T | BMS: 1 tick-writer vs 2 pembaca + energy crossCheck | 0 snapshot robek (koherensi generasi), interlock aktif-klaim-klaim-balik utuh |
+| U | Auth: 8 konsumen simultan (start-barrier) × 3 ronde + storm issue-vs-replay | tepat 1 rotasi per ronde, 0 replay, revoke bersih |
+| X | Storm lock-unavailable (8 thread × 150 iter × 4 service) | SEMUA ditolak: 0 tulis NVS, 0 rotasi, 0 entri log, keempat counter > 0 |
+| W | Pemulihan deterministik pasca-injection-off | tepat +1 entri log (1200 penolakan tanpa residu), journal BMS auth resume, akuntansi outage utuh |
+
+Hasil matriks (runner `scripts/native/run-native-tests.sh`, dieksekusi CI):
+- Treatment TSAN: **0 race**, exit 0. Treatment ASAN/UBSAN: **0 error**, exit 0.
+- Negative control `-DSVC_NO_LOCK`: **76 laporan TSAN** + sentinel + 1554
+  snapshot robek terdeteksi — harness peka.
+- Negative control `-DLOCK_FAIL_OPEN` (bentuk pra-round-10): **37 laporan
+  TSAN** + sentinel; laporan mencakup keempat service termasuk
+  `crossCheckShunt` vs `tickWrite`/`writeBody` (race p.474) dan
+  `issueRefreshToken` (race p.475).
+
+### 16.3 Gate statis round-10 + update gate lama
+
+`scripts/test_audit_round10_2026_09.py` — **48/48 PASS** (blok A–G:
+fail-closed per service, urutan kunci-vs-baca di crossCheckShunt, enum
+Unavailable + 11 cabang konsumen, persist-di-dalam-kunci, observabilitas,
+harness, fingerprint lama hilang; pemeriksaan struktural memakai source
+tanpa komentar agar dokumentasi yang mengutip bentuk lama tidak
+menyesatkan). Update gate lama dengan justifikasi tertulis:
+`test_transaction_durability_2026_09.py` p.415.4 (aserti `_lock();` void
+lama → `if (!_lock()) return false;` — serialisasi kini LEBIH KUAT:
+mutator menolak berjalan saat kunci tak tersedia). Seluruh 35 tes Python
+hijau; runner native penuh HIJAU (termasuk harness r6/r7/r8/r9 — tidak
+ada regresi invarian round sebelumnya).
+
+### 16.4 Deviasi & catatan lingkup
+
+- `pio` lokal tetap tidak tersedia; verifikasi kompilasi via syntax-check
+  gnu++17 (-Wall -Wextra, 0 warning pada keempat .cpp yang diubah, header
+  repo riil + stub ESP32) + build CI penuh pada commit hasil.
+- Konsumsi API bersifat additif: 4 field JSON baru di /api/diagnostics
+  (`logLockFailures`, `journalLockFailures`, `battCommLockFailures`,
+  `authLockFailures`) mengikuti preseden `alarmLockFailures`; PWA tidak
+  tersentuh. Respons 503 baru hanya muncul pada mode terdegradasi
+  (mutex unavailable) yang sebelumnya berarti eksekusi tanpa serialisasi.
+- Yang sengaja TIDAK diubah round ini: `prepareFactoryReset()`/
+  `confirmFactoryReset()` (token reset pabrik lintas task web/MQTT — pola
+  berbeda dari keluarga fail-open, dicatat sebagai observasi untuk sweep
+  auditor berikutnya), `getJournalSize()` (advisory, tanpa pemanggil),
+  `flushToDisk()` (tanpa pemanggil — API publik dipertahankan), serta
+  lock-hold-time (P3 diterima auditor — tidak disentuh, persis round-9).

@@ -180,6 +180,15 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   Services::TransactionDecision decision =
     Services::journal.decide(canon.transactionId, canon.commandHash, previousAck);
 
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing a
+  // config mutation without a dedup check could double-apply it on retry.
+  // Honest degradation ack, never a silent NEW.
+  if (decision == Services::TransactionDecision::Unavailable) {
+    _rejected++;
+    _publishAck(canon.transactionId.c_str(), false, "JOURNAL_UNAVAILABLE",
+                "transaction journal lock unavailable — command NOT executed (fail-closed), retry");
+    return;
+  }
   if (decision == Services::TransactionDecision::Duplicate) {
     // Idempotent replay — re-publish the previous ACK verbatim.
     // This is the contract guarantee: clients may retry safely.

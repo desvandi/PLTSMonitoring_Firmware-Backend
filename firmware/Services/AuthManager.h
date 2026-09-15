@@ -29,6 +29,7 @@
 
 #include <Arduino.h>
 #include <WebServer.h>
+#include <atomic>
 #include "../Core/Config.h"
 #include "../Core/Types.h"
 
@@ -73,7 +74,17 @@ public:
   // [AUTH-GATE-07] Revoke every refresh session server-side. Called on
   // logout — a stolen refresh token dies with the user's logout, not with
   // its 7-day TTL.
+  // [p.475] Fail-closed: when the auth mutex is unavailable the revocation
+  // is REFUSED (a logout that cannot prove revocation must not claim it);
+  // the failure is logged + counted, never silently skipped.
   void revokeAllRefreshTokens();
+
+  // [p.475] Lock-free atomic read — the ONE accessor working when the auth
+  // mutex is unavailable (diagnostics path). Non-zero = at least one
+  // refresh-critical-section operation was refused fail-closed since boot.
+  uint32_t lockFailures() const {
+    return _lockFailures.load(std::memory_order_relaxed);
+  }
 
   // CSRF
   String getCsrfToken() const { return String(_csrfToken); }
@@ -92,7 +103,33 @@ private:
   char _factoryResetToken[33] = {0};
   unsigned long _factoryResetTokenTime = 0;
   bool _authReady = false;          // [P0-003] fail-closed readiness
+
+  // [AUDIT 2026-09 ROUND 10 / p.475] FAIL-CLOSED AUTH MUTEX. The old
+  // _lockAuth() created the mutex lazily and then only took it
+  // `if (_authMutex)` — a failed creation let consumeRefreshToken() run its
+  // whole find→validate→mark-used→rotate→persist critical section WITHOUT
+  // serialization, reviving exactly the A→B AND A→C refresh replay race
+  // AUTH-GATE-05 was built to close. Now:
+  //   - begin() treats creation failure as FATAL (boot guard — Serial + Log
+  //     FATAL, halt WITHOUT feeding the task watchdog → TWDT panic reset,
+  //     honest crash-chain); auth never runs unsynchronized.
+  //   - _lockAuth() retries creation ONCE; still null → atomic count +
+  //     rate-limited CRIT log via LogService (different mutex, no cycle) +
+  //     return false — every caller REFUSES the operation:
+  //       consumeRefreshToken() → false (no rotation without serialization)
+  //       issueRefreshToken()  → "" (login degrades honestly — handler 500s)
+  //       verifyRefreshToken() → false (read-only check refuses)
+  //       revokeAllRefreshTokens() → refused + logged (no false "revoked")
+  //   - issueRefreshToken() NOW ALSO TAKES THE LOCK: it mutates the same
+  //     _refreshTokens[] slots + persists the same NVS blob that
+  //     consumeRefreshToken() rotates — leaving it unlocked would make the
+  //     "atomic critical section" claim only partial (login vs refresh
+  //     could interleave slot allocation with rotation).
   void* _authMutex = nullptr;       // SemaphoreHandle_t (AUTH-GATE-05)
+  bool _lockAuth();
+  void _unlockAuth();
+  std::atomic<uint32_t> _lockFailures{0};
+  std::atomic<uint32_t> _lastLockFailLogMs{0};   // rate-limit bookkeeping
 
   int _findIpSlot(uint32_t ip);      // [P0-004]
   int _allocIpSlot(uint32_t ip);     // [P0-004] LRU eviction, memory-bounded
@@ -107,9 +144,8 @@ private:
   // slots + a magic/version header; load rejects a CRC mismatch.
   void _persistRefreshTokens();
   void _loadRefreshTokens();
-
-  void _lockAuth();
-  void _unlockAuth();
+  // [p.475] _lockAuth()/_unlockAuth() are declared with the fail-closed
+  // block above (bool _lockAuth() — the old void pair was replaced).
 };
 
 extern AuthManager auth;

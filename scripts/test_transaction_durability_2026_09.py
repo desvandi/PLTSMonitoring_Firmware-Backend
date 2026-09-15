@@ -178,9 +178,16 @@ def test_415_authoritative():
           "duplicate path must return without ack mutation")
 
     # Cross-task serialization
+    # [ROUND-10 UPDATE 2026-09-15, p.473] The assertion previously required
+    # the void-call `_lock();` statement in both mutators. Round-10 made the
+    # acquisition FAIL-CLOSED (bool _lock(); refusal + atomic accounting on
+    # unavailability — see test_audit_round10_2026_09.py B1/B5), so the
+    # statement became `if (!_lock()) return false;`. Serialization is now
+    # STRICTLY STRONGER: the mutator not only locks, it REFUSES to run when
+    # the lock cannot be acquired (the old shape silently proceeded).
     check("p.415.4 mutations serialized (mutex in storeTransaction + updateAck)",
-          st.count("_lock();") >= 1 and
-          TJ_CPP_NC.split("TransactionJournal::updateAck")[-1].count("_lock();") >= 1 and
+          "if (!_lock()) return false;" in st and
+          TJ_CPP_NC.split("TransactionJournal::updateAck")[-1].count("if (!_lock()) return false;") >= 1 and
           "xSemaphoreCreateMutex" in TJ_CPP_NC)
 
     # Journal header documents the authoritative resolution chain

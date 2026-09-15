@@ -45,12 +45,40 @@ static const uint8_t RT_BLOB_MAGIC[4] = {'R','T','O','K'};
 static const uint8_t RT_BLOB_VERSION = 1;
 
 // [AUTH-GATE-05] Mutex guards the WHOLE refresh-rotation critical section.
-void AuthManager::_lockAuth() {
-  if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();
-  if (_authMutex) xSemaphoreTake((SemaphoreHandle_t)_authMutex, portMAX_DELAY);
+//
+// [AUDIT 2026-09 ROUND 10 / p.475] FAIL-CLOSED ACQUISITION — same shape as
+// AlarmRegistry::_lock() (round-9 p.471). The old shape:
+//     if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();
+//     if (_authMutex) xSemaphoreTake(...);      // ← creation failure = no-op
+// let the ENTIRE find→validate→mark-used→rotate→persist section run
+// unsynchronized whenever the creation failed — reviving the A→B AND A→C
+// refresh replay race AUTH-GATE-05 exists to close. Now: retry-create ONCE;
+// still null → atomic count + rate-limited CRIT log (via LogService — a
+// DIFFERENT service's mutex, no cycle) + return false. Every caller refuses
+// the operation (see the header contract).
+bool AuthManager::_lockAuth() {
+  if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();   // retry-create ONCE
+  if (_authMutex != nullptr) {
+    xSemaphoreTake((SemaphoreHandle_t)_authMutex, portMAX_DELAY);
+    return true;
+  }
+  _lockFailures.fetch_add(1, std::memory_order_relaxed);
+  uint32_t last = _lastLockFailLogMs.load(std::memory_order_relaxed);
+  uint32_t now = millis();
+  if (now - last > 60000UL &&
+      _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    Log.append(Core::LogType::AuthFail,
+               String("[AUTH] auth mutex UNAVAILABLE — refresh operation REJECTED "
+                      "(fail-closed, p.475); lockFailures=") +
+                   _lockFailures.load(std::memory_order_relaxed),
+               0);
+  }
+  return false;
 }
 void AuthManager::_unlockAuth() {
-  if (_authMutex) xSemaphoreGive((SemaphoreHandle_t)_authMutex);
+  // Only ever called after _lockAuth() returned TRUE — the handle is
+  // non-null and HELD here by construction.
+  xSemaphoreGive((SemaphoreHandle_t)_authMutex);
 }
 
 void AuthManager::begin() {
@@ -59,7 +87,27 @@ void AuthManager::begin() {
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) _refreshTokens[i] = {};
 
   // [AUTH-GATE-05] Create the rotation mutex up front.
+  //
+  // [p.475] BOOT GUARD — fail-closed. Without this mutex the refresh
+  // rotation critical section (find→validate→mark-used→rotate→persist) runs
+  // unsynchronized — the exact replay race AUTH-GATE-05 closed. Auth is a
+  // security boundary: refuse to bring it up rather than run it unlocked.
+  // Log FATAL and halt WITHOUT feeding the task watchdog → deterministic
+  // TWDT panic reset, honest crash-chain (BOOT/CRASHLOOP).
   if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();
+  if (_authMutex == nullptr) {
+    Serial.println(F("[FATAL] AuthManager auth mutex creation failed (heap exhausted at boot) "
+                    "— refusing to enter multi-task state (p.475 fail-closed)"));
+    Serial.flush();
+    Log.append(Core::LogType::AuthFail,
+               String("[FATAL] AuthManager auth mutex creation failed — boot REFUSED "
+                      "(p.475): refresh rotation critical section requires the mutex; "
+                      "halting for TWDT panic reset"),
+               0);
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
+  }
 
   // [audit-2 K-4] Restore refresh tokens from NVS so sessions survive reboot.
   _loadRefreshTokens();
@@ -301,6 +349,13 @@ int AuthManager::_findRefreshSlot() {
 
 String AuthManager::issueRefreshToken(WebServer& server, const String& username) {
   (void)username;
+  // [p.475] Now INSIDE the auth mutex: this mutates the same
+  // _refreshTokens[] slots + persists the same NVS blob that
+  // consumeRefreshToken() rotates — an unlocked login could interleave slot
+  // allocation with a concurrent refresh rotation. Fail-closed: no mutex →
+  // no token (the login handler surfaces the empty string as an honest 500,
+  // never a session cookie with a fabricated token).
+  if (!_lockAuth()) return String();
   int slot = _findRefreshSlot();
   RefreshToken& rt = _refreshTokens[slot];
   String t = Utils::generateToken(32);
@@ -314,7 +369,14 @@ String AuthManager::issueRefreshToken(WebServer& server, const String& username)
   // [audit-2 K-4 FIX] Persist refresh tokens to NVS so they survive reboot.
   // Previously the header claimed "NVS LRU 4" but no persistence existed —
   // every reboot forced logout. Persist is best-effort (NVS full = warn).
+  // [p.475 — harness-caught] Persist INSIDE the lock: _persistRefreshTokens()
+  // serializes the very slot array this critical section protects; persisting
+  // after _unlockAuth() raced concurrent consumeRefreshToken() mutations
+  // (torn blob). consume/revoke already persisted under the lock — issue now
+  // matches. The native harness (verify_service_lock_concurrency Phase U)
+  // caught this under TSAN before the auditor could.
   _persistRefreshTokens();
+  _unlockAuth();
   return t;
 }
 
@@ -324,19 +386,27 @@ bool AuthManager::verifyRefreshToken(const String& token, String& outUsername) {
   // NOTE (AUTH-GATE-05): read-only verification. Rotation MUST use
   // consumeRefreshToken() — verify+rotate as two calls is the race the
   // audit found (two concurrent refreshes could both pass verify).
+  // [p.475] Fail-closed: the slots are read under the auth mutex (a slot can
+  // be rotated/revoked concurrently); no mutex → refuse the check.
   if (token.length() != 32) return false;
-  for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS; i++) {
+  if (!_lockAuth()) return false;
+  bool found = false;
+  for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS && !found; i++) {
     if (_refreshTokens[i].token[0] == '\0') continue;
     if (Utils::constantTimeMemEquals((const volatile uint8_t*)_refreshTokens[i].token,
                                       (const volatile uint8_t*)token.c_str(), 32)) {
-      if (_refreshTokens[i].used) return false;
-      uint32_t now = Drivers::rtc.getUnixTime();
-      if (now > _refreshTokens[i].expiresAt) return false;
-      outUsername = Core::wwwUser;  // single-user system
-      return true;
+      if (!_refreshTokens[i].used) {
+        uint32_t now = Drivers::rtc.getUnixTime();
+        if (now <= _refreshTokens[i].expiresAt) {
+          outUsername = Core::wwwUser;  // single-user system
+          found = true;
+        }
+      }
+      break;
     }
   }
-  return false;
+  _unlockAuth();
+  return found;
 }
 
 // [AUTH-GATE-05 / audit p.166-167] ONE ATOMIC consume operation:
@@ -346,7 +416,11 @@ bool AuthManager::verifyRefreshToken(const String& token, String& outUsername) {
 bool AuthManager::consumeRefreshToken(const String& oldToken, String& outNewToken,
                                       String& outUsername) {
   if (oldToken.length() != 32) return false;
-  _lockAuth();
+  // [p.475] Fail-closed: no mutex → NO rotation. Returning false here is
+  // conservative (the client's refresh fails; authLockFailures makes the
+  // degradation operator-visible) — the alternative, running the critical
+  // section unsynchronized, is exactly the A→B AND A→C replay race.
+  if (!_lockAuth()) return false;
   bool ok = false;
   for (int i = 0; i < (int)Core::MAX_REFRESH_TOKENS && !ok; i++) {
     if (_refreshTokens[i].token[0] == '\0') continue;
@@ -381,8 +455,15 @@ bool AuthManager::consumeRefreshToken(const String& oldToken, String& outNewToke
 // [AUTH-GATE-07 / audit p.171-172] Logout server-side revocation: zero every
 // slot and persist. A stolen refresh token dies with the user's logout,
 // not with its 7-day TTL.
+// [p.475] Fail-closed: no mutex → revocation REFUSED (a logout that cannot
+// prove revocation must not claim it) — logged + counted, never skipped.
 void AuthManager::revokeAllRefreshTokens() {
-  _lockAuth();
+  if (!_lockAuth()) {
+    Log.append(Core::LogType::AuthFail,
+               "Logout revocation REFUSED — auth mutex unavailable (fail-closed, "
+               "p.475); tokens NOT provably revoked", 0);
+    return;
+  }
   for (uint8_t i = 0; i < Core::MAX_REFRESH_TOKENS; i++) {
     memset(_refreshTokens[i].token, 0, sizeof(_refreshTokens[i].token));
     _refreshTokens[i].used = true;   // belt-and-braces: any residual value is dead
