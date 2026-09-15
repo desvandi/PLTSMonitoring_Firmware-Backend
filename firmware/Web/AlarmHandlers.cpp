@@ -55,6 +55,12 @@ static bool runAlarmAckPipeline(const String& action, const String& code,
   if (!canon.ok) { errMsgOut = canon.errorMessage; return false; }
   Services::DecisionResult d =
     Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing
+  // without a dedup check could double-apply the mutation on retry.
+  if (d.decision == Services::TransactionDecision::Unavailable) {
+    errMsgOut = "transaction journal lock unavailable — command NOT executed (fail-closed), retry";
+    return false;
+  }
   if (d.decision == Services::TransactionDecision::Conflict) {
     errMsgOut = "requestId reuse with different command";
     return false;

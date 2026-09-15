@@ -67,6 +67,14 @@ void handleLogin() {
   Services::auth.recordAuthSuccess(ip);
   String accessToken = Services::auth.issueAccessToken(user);
   String refreshToken = Services::auth.issueRefreshToken(http, user);
+  // [p.475] Fail-closed issue: the auth mutex was unavailable, so no refresh
+  // token exists — NEVER emit a session cookie with an empty/fabricated
+  // token. Honest 500: the login itself validated, but session persistence
+  // is degraded (authLockFailures in /api/diagnostics shows why).
+  if (refreshToken.length() != 32) {
+    sendError(500, "Session persistence unavailable (auth lock) — login not completed, retry");
+    return;
+  }
   // Rotate CSRF token after successful login
   Services::auth.rotateCsrfToken();
   // [audit-2 S-8 FIX] Cookies now carry Secure + SameSite=Strict.

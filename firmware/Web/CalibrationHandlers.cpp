@@ -167,6 +167,12 @@ static void handlePointImpl(const String& which) {
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =
     Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing
+  // without a dedup check could double-apply the mutation on retry.
+  if (d.decision == Services::TransactionDecision::Unavailable) {
+    sendError(503, "transaction journal lock unavailable — command NOT executed (fail-closed), retry");
+    return;
+  }
   if (d.decision == Services::TransactionDecision::Conflict) {
     sendError(409, "requestId reuse with different command");
     return;
@@ -231,6 +237,12 @@ static void handleAcs712ZeroImpl() {
   if (!canon.ok) { sendError(400, canon.errorMessage); return; }
   Services::DecisionResult d =
     Services::CommandCanonicalizer::decideTransaction(canon.transactionId, canon.commandHash);
+  // [p.473] Journal lock unavailable — REJECT (fail-closed): executing
+  // without a dedup check could double-apply the mutation on retry.
+  if (d.decision == Services::TransactionDecision::Unavailable) {
+    sendError(503, "transaction journal lock unavailable — command NOT executed (fail-closed), retry");
+    return;
+  }
   if (d.decision == Services::TransactionDecision::Conflict) {
     sendError(409, "requestId reuse with different command");
     return;

@@ -10,6 +10,9 @@
 #include "../Services/EnergyCounters.h"
 #include "../Services/SocStateMachine.h"
 #include "../Services/AlarmRegistry.h"
+#include "../Services/LogService.h"          // [p.472] logLockFailures
+#include "../Services/TransactionJournal.h"  // [p.473] journalLockFailures
+#include "../Services/AuthManager.h"         // [p.475] authLockFailures
 #include "../Drivers/Ina219Driver.h"
 #include "../Comm/BatteryCommManager.h"
 #include <ArduinoJson.h>
@@ -57,6 +60,16 @@ void handleGet() {
   // registry mutex is unavailable (every other accessor is fail-closed to
   // empty/zero values then). Non-zero = at least one operation refused.
   doc["alarmLockFailures"] = Services::alarms.lockFailures();
+  // [AUDIT 2026-09 ROUND 10 / p.472-p.475] Lock-unavailable counters for the
+  // four services remediated this round (LogService readers, TransactionJournal,
+  // BatteryCommManager, AuthManager). Same design as alarmLockFailures:
+  // lock-free atomic reads, so diagnostics can still SEE each degraded mode
+  // when that service's mutex is unavailable. Non-zero = at least one
+  // operation was refused fail-closed since boot.
+  doc["logLockFailures"] = Services::Log.lockFailures();
+  doc["journalLockFailures"] = Services::journal.lockFailures();
+  doc["battCommLockFailures"] = Comm::batteryComm.lockFailures();
+  doc["authLockFailures"] = Services::auth.lockFailures();
   // [AUDIT 2026-09 ROUND 6 / p.455] Persisted-snapshot generation — proves
   // which NVS transaction the current alarm state came from (boot log line
   // records the same number; a post-mortem can correlate the two).

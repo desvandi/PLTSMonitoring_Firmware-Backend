@@ -20,6 +20,16 @@
 # that mode — a clean exit would mean the harness cannot detect the
 # fail-open class p.471 removes.
 #
+# Round-10 (p.472-p.475) adds verify_service_lock_concurrency: the fail-open
+# FAMILY in LogService (unlocked readers + fail-open writers),
+# TransactionJournal (no-op _lock), BatteryCommManager (crossCheckShunt
+# reading _data before the mutex check, never acquiring it) and AuthManager
+# (fail-open _lockAuth reviving the refresh replay race). Same discipline:
+# treatment under TSAN + ASAN/UBSAN, plus TWO negative controls
+# (-DSVC_NO_LOCK = fully unlocked, -DLOCK_FAIL_OPEN = pre-round-10 shapes)
+# which MUST trip (sentinels and/or TSAN reports) — a clean negative control
+# would mean the harness is blind.
+#
 # Usage: bash scripts/native/run-native-tests.sh   (needs g++; exit 0 = PASS)
 set -u
 cd "$(dirname "$0")"
@@ -131,5 +141,61 @@ fi
 rm -f verify_alarm_blob_atomicity verify_emg_safety_gate verify_anomaly_quality_gates \
       vac_tsan vac_asan vac_unlocked vac_unlocked.log vac_failopen vac_failopen.log \
       vsd_tsan vsd_asan vsd_unlocked vsd_unlocked.log
+
+# ============================================================================
+# [AUDIT 2026-09 ROUND 10 / p.472-p.475] verify_service_lock_concurrency —
+# the fail-open family in LogService / TransactionJournal /
+# BatteryCommManager / AuthManager. Treatment (TSAN + ASAN/UBSAN) must be
+# clean; BOTH negative controls must trip (sentinels and/or TSAN reports).
+# ============================================================================
+echo "=== verify_service_lock_concurrency (TREATMENT, ThreadSanitizer) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -pthread -o vsc_tsan verify_service_lock_concurrency.cpp; then
+  echo "COMPILE FAIL: verify_service_lock_concurrency (tsan)"; fails=$((fails+1))
+else
+  ./vsc_tsan > vsc_tsan.log 2>&1 || fails=$((fails+1))
+fi
+
+echo "=== verify_service_lock_concurrency (TREATMENT, ASAN+UBSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=address,undefined -pthread -o vsc_asan verify_service_lock_concurrency.cpp; then
+  echo "COMPILE FAIL: verify_service_lock_concurrency (asan)"; fails=$((fails+1))
+else
+  ./vsc_asan > vsc_asan.log 2>&1 || fails=$((fails+1))
+fi
+
+echo "=== verify_service_lock_concurrency (NEGATIVE CONTROL, UNLOCKED services under TSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -DSVC_NO_LOCK -pthread -o vsc_unlocked verify_service_lock_concurrency.cpp; then
+  echo "COMPILE FAIL: verify_service_lock_concurrency (unlocked nc)"; fails=$((fails+1))
+else
+  if ./vsc_unlocked > vsc_unlocked.log 2>&1; then
+    echo "NEGATIVE CONTROL FAILED: unlocked services ran clean — the harness cannot detect the race class"
+    fails=$((fails+1))
+  else
+    if grep -q "WARNING: ThreadSanitizer" vsc_unlocked.log || grep -q "NEGATIVE CONTROL TRIPPED" vsc_unlocked.log; then
+      echo "NEGATIVE CONTROL OK: $(grep -c 'WARNING: ThreadSanitizer' vsc_unlocked.log) TSAN report(s) + sentinels on the unlocked services — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE: nonzero exit but no TSAN report / no sentinel — investigate vsc_unlocked.log"
+      fails=$((fails+1))
+    fi
+  fi
+fi
+
+echo "=== verify_service_lock_concurrency (NEGATIVE CONTROL p.472-p.475, PRE-ROUND-10 FAIL-OPEN shapes under TSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -DLOCK_FAIL_OPEN -pthread -o vsc_failopen verify_service_lock_concurrency.cpp; then
+  echo "COMPILE FAIL: verify_service_lock_concurrency (fail-open nc)"; fails=$((fails+1))
+else
+  if ./vsc_failopen > vsc_failopen.log 2>&1; then
+    echo "NEGATIVE CONTROL FAILED (p.472-p.475): fail-open services ran clean — the harness cannot detect the fail-open family"
+    fails=$((fails+1))
+  else
+    if grep -q "WARNING: ThreadSanitizer" vsc_failopen.log || grep -q "NEGATIVE CONTROL TRIPPED" vsc_failopen.log; then
+      echo "NEGATIVE CONTROL OK (p.472-p.475): $(grep -c 'WARNING: ThreadSanitizer' vsc_failopen.log) TSAN report(s) + sentinels on the pre-round-10 shapes — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE (p.472-p.475): investigate vsc_failopen.log"
+      fails=$((fails+1))
+    fi
+  fi
+fi
+
+rm -f vsc_tsan vsc_asan vsc_unlocked vsc_unlocked.log vsc_failopen vsc_failopen.log vsc_tsan.log vsc_asan.log
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL NATIVE HARNESS GREEN"; else echo "$fails harness(es) FAILED"; exit 1; fi

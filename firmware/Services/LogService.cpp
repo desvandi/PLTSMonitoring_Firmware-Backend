@@ -43,18 +43,72 @@ static const char* logTypeStr(Core::LogType t) {
 }
 
 void LogService::begin() {
+  // [p.472] BOOT GUARD — fail-closed. LogService is the system-wide log
+  // sink: without its mutex, append()/audit() from up to seven tasks mutate
+  // the ring AND the LittleFS mirror concurrently (LittleFS has no internal
+  // locking — a corrupt log is the good outcome; FS-layer crashes are the
+  // bad one). begin() runs first in setup() (firmware_v1.ino:307) while the
+  // task watchdog is already subscribed — so on failure we log to Serial
+  // (this service cannot log into itself) and halt WITHOUT feeding the
+  // watchdog: the ~10 s TWDT panic reset records an honest reset reason in
+  // the crash chain (BOOT/CRASHLOOP), and the device never enters the
+  // multi-task state with an unlocked log service.
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();
+  if (_mutex == nullptr) {
+    Serial.println(F("[FATAL] LogService mutex creation failed (heap exhausted at boot) "
+                    "— refusing to enter multi-task state (p.472 fail-closed)"));
+    Serial.flush();
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
+  }
   _head = 0; _count = 0; _nextId = 1;
   _auditBuf = "";
   _auditDirty = false;
-  // [FW-24] Cross-task serialization for RAM ring + LittleFS mirror writes.
-  if (!_mutex) _mutex = xSemaphoreCreateMutex();
+}
+
+// [p.472] Fail-closed acquisition, same shape as AlarmRegistry::_lock()
+// (round-9 p.471) with ONE deliberate difference: the failure log is
+// Serial-only. LogService is the log sink — calling Log.append() here would
+// recurse into the very service whose mutex is unavailable.
+bool LogService::_lock() const {
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();   // retry-create ONCE
+  if (_mutex != nullptr) {
+    // [FW-24] Bounded wait preserved: log contention is tolerable — drop
+    // rather than block a task. A timeout returns false WITHOUT counting a
+    // lockFailure (the mutex exists; this is the designed drop-on-contention
+    // semantics, not the p.472 unavailable-mutex class).
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) == pdTRUE) return true;
+    return false;
+  }
+  // FAIL-CLOSED: no mutex → no log access. Count + rate-limited Serial CRIT
+  // (atomic accounting — no synchronization exists on this path).
+  _lockFailures.fetch_add(1, std::memory_order_relaxed);
+  uint32_t last = _lastLockFailLogMs.load(std::memory_order_relaxed);
+  uint32_t now = millis();
+  if (now - last > 60000UL &&
+      _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    Serial.printf("[LOG][CRIT] LogService mutex UNAVAILABLE — operation REJECTED "
+                  "(fail-closed, p.472); lockFailures=%lu\n",
+                  (unsigned long)_lockFailures.load(std::memory_order_relaxed));
+  }
+  return false;
+}
+
+void LogService::_unlock() const {
+  // Only ever called after _lock() returned TRUE — the handle is non-null
+  // and HELD here by construction.
+  xSemaphoreGive(_mutex);
 }
 
 void LogService::append(Core::LogType type, const String& message, int8_t channel) {
   // [FW-24] Lock across the ring mutation AND the filesystem mirror —
   // LittleFS has no internal locking; concurrent open/append from multiple
   // tasks corrupts the log or crashes the FS layer.
-  if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+  // [p.472] Fail-closed: mutex unavailable → the entry is DROPPED (same
+  // degradation as the FW-24 contention drop, now also covering the
+  // no-lock case) and counted in lockFailures().
+  if (!_lock()) {
     return;   // log contention is tolerable — drop rather than block a task
   }
   Entry& e = _entries[_head];
@@ -68,7 +122,7 @@ void LogService::append(Core::LogType type, const String& message, int8_t channe
   if (_count < MAX_ENTRIES) _count++;
 
   _writeActivityToFs(e);
-  if (_mutex) xSemaphoreGive(_mutex);
+  _unlock();
 }
 
 void LogService::_writeActivityToFs(const Entry& e) {
@@ -96,7 +150,8 @@ void LogService::_writeActivityToFs(const Entry& e) {
 void LogService::audit(const char* action, const char* parameter,
                        const char* oldValue, const char* newValue,
                        const char* source, uint32_t revision) {
-  if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
+  // [p.472] Fail-closed: no mutex → no audit line (counted, visible).
+  if (!_lock()) return;
   uint32_t ts = Drivers::rtc.getUnixTime();
   char line[256];
   snprintf(line, sizeof(line), "[%u] action=%s param=%s old=%s new=%s src=%s rev=%u\n",
@@ -104,7 +159,7 @@ void LogService::audit(const char* action, const char* parameter,
   _auditBuf += line;
   _auditDirty = true;
   _rotateAuditIfNeeded();
-  if (_mutex) xSemaphoreGive(_mutex);
+  _unlock();
 }
 
 void LogService::_rotateAuditIfNeeded() {
@@ -122,18 +177,30 @@ void LogService::_rotateAuditIfNeeded() {
 }
 
 void LogService::flushToDisk() {
-  if (!_auditDirty) return;
-  if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
+  // [p.472] Fail-closed: _auditDirty is read under the lock (an unlocked
+  // read is exactly the reader race this round removes). No mutex → no
+  // flush (the buffer stays RAM-only until the lock returns; counted).
+  if (!_lock()) return;
+  if (!_auditDirty) { _unlock(); return; }
   File f = Storage::fs.raw().open(Core::PATH_AUDIT_LOG, "a");
-  if (!f) { if (_mutex) xSemaphoreGive(_mutex); return; }
+  if (!f) { _unlock(); return; }
   f.print(_auditBuf);
   f.close();
   _auditBuf = "";
   _auditDirty = false;
-  if (_mutex) xSemaphoreGive(_mutex);
+  _unlock();
 }
 
 String LogService::getActivityJson(uint16_t limit, int8_t filterType) const {
+  // [p.472] READER-SIDE SERIALIZATION. This getter runs in the web-server
+  // task while append() mutates _head/_count/_entries[] from up to seven
+  // writer tasks — the old unlocked read could interleave with a writer
+  // mid-entry (torn message) or with a _head advance between the start-index
+  // computation and the entry reads (incoherent snapshot). Fail-closed to an
+  // honest empty list flagged with lockUnavailable.
+  if (!_lock()) {
+    return String("{\"logs\":[],\"lockUnavailable\":true}");
+  }
   StaticJsonDocument<8192> doc;
   JsonArray arr = doc.createNestedArray("logs");
   uint16_t start = (_count < MAX_ENTRIES) ? 0 : _head;
@@ -150,11 +217,18 @@ String LogService::getActivityJson(uint16_t limit, int8_t filterType) const {
     o["message"] = e.message;
     emitted++;
   }
+  _unlock();
   String out; serializeJson(doc, out);
   return out;
 }
 
 String LogService::getAuditText(uint16_t maxBytes) const {
+  // [p.472] Reader-side serialization: _auditBuf is a String mutated by
+  // audit()/_rotateAuditIfNeeded()/flushToDisk() from writer tasks; copying
+  // it unlocked could observe a moved/rotated buffer mid-operation.
+  if (!_lock()) {
+    return String();   // honest empty — the degraded mode is flagged by lockFailures()
+  }
   String s = _auditBuf;
   // Append FS-stored audit log too
   File f = Storage::fs.raw().open(Core::PATH_AUDIT_LOG, "r");
@@ -164,12 +238,25 @@ String LogService::getAuditText(uint16_t maxBytes) const {
     }
     f.close();
   }
+  _unlock();
   if (s.length() > maxBytes) s = s.substring(s.length() - maxBytes);
   return s;
 }
 
-uint16_t LogService::getActivityCount() const { return _count; }
-uint16_t LogService::getAuditBytes() const { return _auditBuf.length(); }
+// [p.472] Reader-side serialization for the advisory counters; fail-closed
+// to 0 (conservative) when the mutex is unavailable.
+uint16_t LogService::getActivityCount() const {
+  if (!_lock()) return 0;
+  uint16_t c = _count;
+  _unlock();
+  return c;
+}
+uint16_t LogService::getAuditBytes() const {
+  if (!_lock()) return 0;
+  uint16_t b = (uint16_t)_auditBuf.length();
+  _unlock();
+  return b;
+}
 
 // [audit-2 S-17] Preserve audit log across factory reset. Save the current
 // LittleFS PATH_AUDIT_LOG into NVS namespace "plts_audit" before format,

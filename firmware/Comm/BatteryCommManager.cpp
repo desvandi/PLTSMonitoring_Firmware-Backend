@@ -33,7 +33,29 @@ static const ProtocolId PROBE_ORDER[] = {
 static constexpr uint8_t PROBE_ORDER_LEN = sizeof(PROBE_ORDER) / sizeof(PROBE_ORDER[0]);
 
 void BatteryCommManager::begin() {
+  // [p.474] BOOT GUARD — fail-closed. tick() (bmsTask) writes _data under
+  // this mutex while energyTask + web handlers read it through
+  // getData()/crossCheckShunt()/socAuthoritative(); without the mutex every
+  // consumer sees torn BmsData structs and the round-5 mismatch interlock
+  // arbitrates on torn current values. Refuse to bring the manager up: log
+  // FATAL and halt WITHOUT feeding the task watchdog → deterministic TWDT
+  // panic reset, honest crash-chain (BOOT/CRASHLOOP). The shunt path
+  // (INA219/ACS712) is independent of this manager — a reset here is the
+  // safe state, an unsynchronized zombie is not.
   if (!_mutex) _mutex = xSemaphoreCreateMutex();
+  if (_mutex == nullptr) {
+    Serial.println(F("[FATAL] BatteryCommManager mutex creation failed (heap exhausted at boot) "
+                    "— refusing to enter multi-task state (p.474 fail-closed)"));
+    Serial.flush();
+    Services::Log.append(Core::LogType::StorageError,
+               String("[FATAL] BatteryCommManager mutex creation failed — boot REFUSED "
+                      "(p.474): BMS snapshot contract requires the mutex; halting for "
+                      "TWDT panic reset"),
+               -1);
+    while (true) {
+      delay(10000);   // no esp_task_wdt_reset() on purpose → panic reset
+    }
+  }
   _rebuildClients();
   const char* mode = Core::cfgBmsProtocol;
   if (strcmp(mode, "none") == 0) {
@@ -145,18 +167,54 @@ uint32_t BatteryCommManager::getLockMs() const { return _lockMs; }
 uint32_t BatteryCommManager::getProbeCycleCount() const { return _probeCycle; }
 
 BmsData BatteryCommManager::getData() const {
+  // [p.474] Fail-closed snapshot: lock unavailable → zero-value BmsData
+  // (NAN fields, lastUpdateMs=0 → isFresh()=false — consumers already treat
+  // that exactly like "no BMS data", the documented IDLE_NO_BMS fallback).
   BmsData copy;
-  if (_mutex && xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+  copy.reset();
+  if (_lock(50)) {
     copy = _data;
-    xSemaphoreGive(_mutex);
+    _unlock();
   }
   return copy;
 }
 
+// [p.474] Fail-closed acquisition. Retry-create ONCE; still null → count
+// (atomic) + rate-limited CRIT log + false. A take TIMEOUT also returns
+// false but does NOT count — the bounded waits (tick 100 ms, getters 50 ms)
+// are pre-existing skip-cycle design, not the unavailable-mutex class this
+// round removes.
+bool BatteryCommManager::_lock(uint32_t timeoutMs) const {
+  if (_mutex == nullptr) _mutex = xSemaphoreCreateMutex();   // retry-create ONCE
+  if (_mutex != nullptr) {
+    return xSemaphoreTake(_mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+  }
+  _lockFailures.fetch_add(1, std::memory_order_relaxed);
+  uint32_t last = _lastLockFailLogMs.load(std::memory_order_relaxed);
+  uint32_t now = millis();
+  if (now - last > 60000UL &&
+      _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    Services::Log.append(Core::LogType::StorageError,
+               String("[BMS] comm manager mutex UNAVAILABLE — operation REJECTED "
+                      "(fail-closed, p.474); lockFailures=") +
+                   _lockFailures.load(std::memory_order_relaxed),
+               -1);
+  }
+  return false;
+}
+
+void BatteryCommManager::_unlock() const {
+  // Only ever called after _lock() returned TRUE — the handle is non-null
+  // and HELD here by construction.
+  xSemaphoreGive(_mutex);
+}
+
 bool BatteryCommManager::socAuthoritative() const {
-  // Reads _state/_data without mutex: single-writer semantics make this
-  // benign (worst case one poll-cycle lag). The canonical data path for
-  // consumers is getData() (mutex-copied).
+  // [p.474] The authority gate now reads its _state/_data/_mismatchActive
+  // snapshot UNDER the mutex (called from web handlers AND energyTask —
+  // the old unlocked multi-field read could tear mid-poll). Fail-closed →
+  // false: the BMS loses SOC authority and the shunt path becomes the
+  // truth, exactly the documented fallback.
   //
   // [AUDIT 2026-09 ROUND 5 / p.448] The authority gate is no longer just
   // "locked + plausible + fresh". A BMS that reports LOCKED, a plausible SOC
@@ -173,16 +231,38 @@ bool BatteryCommManager::socAuthoritative() const {
   // until agreement returns. This turns the cross-check from a detector
   // into an interlock: wrong-sign/wrong-scale current can no longer flow
   // into the SOC path while the two instruments disagree.
-  return _state == State::Locked &&
-         bmsSocPlausible(_data.soc) &&
-         _data.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000) &&
-         _data.faultFlags == 0 &&
-         !_mismatchActive;
+  if (!_lock(50)) return false;
+  bool authoritative =
+      _state == State::Locked &&
+      bmsSocPlausible(_data.soc) &&
+      _data.isFresh(millis(), Core::cfgBmsPollIntervalMs * 2 + 2000) &&
+      _data.faultFlags == 0 &&
+      !_mismatchActive;
+  _unlock();
+  return authoritative;
+}
+
+// [p.474] Reader-side serialization for the mismatch interlock state
+// (written by energyTask's crossCheckShunt under the mutex, read from web +
+// energy tasks). Fail-closed per the header contract.
+bool BatteryCommManager::isMismatchActive() const {
+  if (!_lock(50)) return false;
+  bool a = _mismatchActive;
+  _unlock();
+  return a;
+}
+float BatteryCommManager::getLastMismatchA() const {
+  if (!_lock(50)) return NAN;
+  float v = _lastMismatchA;
+  _unlock();
+  return v;
 }
 
 void BatteryCommManager::tick(uint32_t nowMs) {
-  if (!_mutex) return;
-  if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  // [p.474] Fail-closed: mutex unavailable → skip this cycle (counted);
+  // bounded wait preserved — a busy consumer delays one poll, it never
+  // deadlocks bmsTask.
+  if (!_lock(100)) return;
 
   switch (_state) {
     case State::Disabled:
@@ -308,13 +388,22 @@ void BatteryCommManager::tick(uint32_t nowMs) {
     }
   }
 
-  xSemaphoreGive(_mutex);
+  _unlock();
 }
 
 float BatteryCommManager::crossCheckShunt(float shuntCurrentA, uint32_t nowMs) {
   (void)nowMs;
+  // [AUDIT 2026-09 ROUND 10 / p.474] THE MUTEX IS TAKEN BEFORE _data IS
+  // READ. The old shape:
+  //     float bmsI = _data.current;   // ← read BEFORE the mutex check
+  //     if (!_mutex) return NAN;      // ← and NEVER acquired it at all
+  // raced tick()'s mutex-guarded `_data = c->lastData()` write from bmsTask
+  // — a torn struct read feeding the round-5 mismatch interlock. The whole
+  // arbitration (BMS snapshot read + streak state mutation) now happens
+  // under the lock. Lock unavailable → NAN with the streak state untouched
+  // (no arbitration on unreadable state) + counted.
+  if (!_lock(50)) return NAN;
   float bmsI = _data.current;
-  if (!_mutex) return NAN;
   // [AUDIT 2026-09 ROUND 5 / p.449 — freshness guard] Only arbitrate while the
   // BMS data is FRESH. A stale last-reading is not a second opinion: after a
   // BMS dropout (State::Lost keeps _data for observability) comparing the
@@ -326,12 +415,14 @@ float BatteryCommManager::crossCheckShunt(float shuntCurrentA, uint32_t nowMs) {
     _mismatchStreak = 0;
     _lastMismatchA = NAN;
     _mismatchActive = false;
+    _unlock();
     return NAN;
   }
   if (!Core::isValidFloat(shuntCurrentA) || !bmsCurrentPlausible(bmsI)) {
     _mismatchStreak = 0;
     _lastMismatchA = NAN;
     _mismatchActive = false;
+    _unlock();
     return NAN;
   }
   float delta = fabsf(bmsI - shuntCurrentA);
@@ -348,6 +439,7 @@ float BatteryCommManager::crossCheckShunt(float shuntCurrentA, uint32_t nowMs) {
     _mismatchActive = false;
   }
   _lastMismatchA = delta;
+  _unlock();
   return delta;
 }
 
@@ -373,6 +465,10 @@ uint32_t BatteryCommManager::getLockMs() const { return 0; }
 uint32_t BatteryCommManager::getProbeCycleCount() const { return 0; }
 float BatteryCommManager::crossCheckShunt(float, uint32_t) { return NAN; }
 bool BatteryCommManager::socAuthoritative() const { return false; }
+// [p.474] Out-of-line since round-10 (reader-side serialization in the
+// enabled build) — stubs keep the disabled build link-complete.
+bool BatteryCommManager::isMismatchActive() const { return false; }
+float BatteryCommManager::getLastMismatchA() const { return NAN; }
 void BatteryCommManager::reconfigure() {}
 void BatteryCommManager::_rebuildClients() {}
 BatteryProtocolClient* BatteryCommManager::_clientFor(ProtocolId) { return nullptr; }
