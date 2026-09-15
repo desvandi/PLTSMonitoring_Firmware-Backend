@@ -153,41 +153,70 @@ struct Preferences {
 };
 
 // ============================================================================
-// MutexCell — the "SemaphoreHandle_t" mirror: nullable handle + placement-
-// new'd std::timed_mutex. created==false mirrors _mutex == nullptr.
-// [CI lesson, 2nd iteration] `created` is ATOMIC and the placement-new is
-// gated by a process-wide std::mutex: two threads racing the lazy
-// (re-)create could otherwise each construct their OWN timed_mutex over
-// the storage — both would then "hold a lock" on different objects and
-// race the protected state (exactly the CI TSAN signature on _head). The
-// firmware's post-boot-guard retry-create has the same theoretical window;
-// there it is unreachable-in-practice (the handle is never null after
-// begin()) — the gate here is mirror-only defense.
+// MutexCell — the "SemaphoreHandle_t" mirror. A heap-allocated
+// std::timed_mutex behind an atomically-published pointer — THIS IS THE
+// FAITHFUL FreeRTOS SHAPE: xSemaphoreCreateMutex() returns a NEW heap
+// object and a dropped handle is never reconstructed over the old memory.
+// [CI lesson, 3rd iteration] The first mirror used placement-new over
+// fixed storage; re-creating over the old object's address (destructor
+// never run — UB by the letter) corrupted ThreadSanitizer's per-address
+// mutex bookkeeping across the drop/re-create boundary and produced
+// phantom "both threads hold the lock" reports on the 2-core CI runner.
+// A fresh heap object per creation gives every incarnation its own
+// address and its own sanitizer metadata — no reuse, no UB, no phantom.
+// Creation is serialized by a process-wide gate: two threads racing the
+// lazy (re-)create can never observe half-constructed state. Ownership
+// sits in a process-wide registry freed by an atexit handler, so the
+// intentional drop-and-replace cycle never trips LeakSanitizer.
 // ============================================================================
 struct MutexCell {
-  mutable std::atomic<bool> created{false};
-  union { unsigned char storage[sizeof(std::timed_mutex)]; long long align; };
+  mutable std::atomic<std::timed_mutex*> ptr{nullptr};
 
   static std::mutex& createGate() {
     static std::mutex gate;
     return gate;
   }
-
-  std::timed_mutex& ref() const {
-    return *const_cast<std::timed_mutex*>(
-        reinterpret_cast<const std::timed_mutex*>(storage));
+  // [atexit-order lesson] The registry is a LEAKY static pointer (never
+  // destroyed): a function-local static VECTOR would be destroyed by an
+  // atexit-registered destructor, and LIFO ordering can run our cleanup
+  // handler AFTER that destruction (use-after-free at exit — exactly what
+  // ASAN reported). A heap vector behind an immortal pointer is
+  // "still reachable", which LeakSanitizer does not report.
+  static std::vector<std::timed_mutex*>& registry() {
+    static std::vector<std::timed_mutex*>* reg = new std::vector<std::timed_mutex*>();
+    return *reg;
   }
-  // Mirrors xSemaphoreCreateMutex() — fails under injection. Creation is
-  // serialized process-wide; double-construct is impossible by construction.
+  static void registerCleanup() {
+    static bool done = false;
+    if (!done) {
+      done = true;
+      std::atexit([] {
+        std::lock_guard<std::mutex> g(createGate());
+        for (auto* m : registry()) delete m;
+        registry().clear();
+      });
+    }
+  }
+
+  // Mirrors xSemaphoreCreateMutex() — fails under injection.
   bool create() const {
-    if (created.load(std::memory_order_acquire)) return true;
+    if (ptr.load(std::memory_order_acquire) != nullptr) return true;
     std::lock_guard<std::mutex> g(createGate());
-    if (created.load(std::memory_order_relaxed)) return true;
+    if (ptr.load(std::memory_order_relaxed) != nullptr) return true;
     if (g_injectMutexCreateFail.load(std::memory_order_relaxed)) return false;
-    ::new (static_cast<void*>(const_cast<unsigned char*>(storage))) std::timed_mutex();
-    created.store(true, std::memory_order_release);
+    registerCleanup();
+    std::timed_mutex* m = new std::timed_mutex();
+    registry().push_back(m);
+    ptr.store(m, std::memory_order_release);
     return true;
   }
+  bool created() const { return ptr.load(std::memory_order_acquire) != nullptr; }
+  std::timed_mutex& ref() const { return *ptr.load(std::memory_order_acquire); }
+
+  // MIRROR-ONLY (single-threaded, between phases): models losing the handle.
+  // The old object stays registry-owned until process exit — its sanitizer
+  // metadata is never reused, and nothing references it once dropped.
+  void drop() const { ptr.store(nullptr, std::memory_order_release); }
 };
 
 // ============================================================================
@@ -230,9 +259,9 @@ public:
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape (p.472): `if (_mutex && take != ok) return; ... if (_mutex) give;`
     // handle null → PROCEED WITHOUT THE LOCK.
-    if (_cell.created && !tryLockBody(500)) return;
+    if (_cell.created() && !tryLockBody(500)) return;
     appendBody(msg);
-    if (_cell.created) _cell.ref().unlock();
+    if (_cell.created()) _cell.ref().unlock();
 #else
     if (!_lock()) return;   // [p.472] fail-closed drop, counted
     appendBody(msg);
@@ -244,9 +273,9 @@ public:
 #if defined(SVC_NO_LOCK)
     auditBody(line);
 #elif defined(LOCK_FAIL_OPEN)
-    if (_cell.created && !tryLockBody(500)) return;
+    if (_cell.created() && !tryLockBody(500)) return;
     auditBody(line);
-    if (_cell.created) _cell.ref().unlock();
+    if (_cell.created()) _cell.ref().unlock();
 #else
     if (!_lock()) return;   // [p.472] fail-closed, counted
     auditBody(line);
@@ -297,7 +326,7 @@ public:
 
   // MIRROR-ONLY test hook (file header): models catastrophic post-boot
   // corruption nulling the handle. MUST be called single-threaded.
-  void dropMutexForTest() { _cell.created = false; }
+  void dropMutexForTest() { _cell.drop(); }
 
 private:
   // ---- treatment lock helpers (fail-closed; Serial-only fail path —
@@ -313,7 +342,7 @@ private:
   }
   void _unlock() const { _cell.ref().unlock(); }
   bool tryLockBody(unsigned ms) const {
-    return const_cast<MutexCell&>(_cell).ref().try_lock_for(std::chrono::milliseconds(ms));
+    return _cell.ref().try_lock_for(std::chrono::milliseconds(ms));
   }
 
   void appendBody(const char* msg) {
@@ -465,7 +494,7 @@ public:
   }
 
   // MIRROR-ONLY test hook (file header).
-  void dropMutexForTest() { _cell.created = false; }
+  void dropMutexForTest() { _cell.drop(); }
 
   // ---- storm verification helpers (test-side reads; NOT firmware API) ----
   uint8_t size() const { return _size; }
@@ -484,8 +513,8 @@ private:
     return true;
   }
   void _unlock() { _cell.ref().unlock(); }
-  void lockOld() { if (_cell.created) _cell.ref().lock(); }   // OLD p.473 shape
-  void unlockOld() { if (_cell.created) _cell.ref().unlock(); }
+  void lockOld() { if (_cell.created()) _cell.ref().lock(); }   // OLD p.473 shape
+  void unlockOld() { if (_cell.created()) _cell.ref().unlock(); }
 
   int findSlot(const std::string& id) {
     for (uint8_t i = 0; i < _size; i++) {
@@ -600,7 +629,7 @@ public:
     writeBody(gen);
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape: `if (!_mutex) return; if (take != ok) return; ...`
-    if (!_cell.created) return;
+    if (!_cell.created()) return;
     if (!_cell.ref().try_lock_for(std::chrono::milliseconds(100))) return;
     writeBody(gen);
     _cell.ref().unlock();
@@ -617,7 +646,7 @@ public:
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape: `if (_mutex && take==ok) { copy; give; } return copy;`
     BmsSnap copy;   // default: NAN fields, lastUpdateMs=0
-    if (_cell.created && _cell.ref().try_lock_for(std::chrono::milliseconds(50))) {
+    if (_cell.created() && _cell.ref().try_lock_for(std::chrono::milliseconds(50))) {
       copy = _data;
       _cell.ref().unlock();
     }
@@ -637,7 +666,7 @@ public:
     // OLD shape (the p.474 ordering bug): read _data.current BEFORE the
     // mutex check — and never acquire it at all.
     float bmsI = _data.current;
-    if (!_cell.created) return NAN;
+    if (!_cell.created()) return NAN;
     return crossFrom(bmsI, shuntCurrentA);
 #else
     // [p.474] THE MUTEX IS TAKEN BEFORE _data IS READ. Lock unavailable →
@@ -684,7 +713,7 @@ public:
   uint32_t mismatchActivations() const { return _mismatchActivations; }
 
   // MIRROR-ONLY test hook (file header).
-  void dropMutexForTest() const { _cell.created = false; }
+  void dropMutexForTest() const { _cell.drop(); }
 
 private:
   enum class State : uint8_t { Disabled, Locked, Lost };
@@ -696,8 +725,7 @@ private:
     }
     // Timeout → false WITHOUT counting (bounded-wait skip-cycle semantics
     // are pre-existing design, not the unavailable-mutex class).
-    return const_cast<MutexCell&>(_cell).ref().try_lock_for(
-        std::chrono::milliseconds(timeoutMs));
+    return _cell.ref().try_lock_for(std::chrono::milliseconds(timeoutMs));
   }
   void _unlock() const { _cell.ref().unlock(); }
 
@@ -799,10 +827,10 @@ public:
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape (p.475): `if (null) create; if (handle) take;` — creation
     // failure → the WHOLE critical section runs unsynchronized.
-    if (!_cell.created) (void)_cell.create();
-    if (_cell.created) _cell.ref().lock();
+    if (!_cell.created()) (void)_cell.create();
+    if (_cell.created()) _cell.ref().lock();
     bool ok = consumeBody(oldToken, outNew);
-    if (_cell.created) _cell.ref().unlock();
+    if (_cell.created()) _cell.ref().unlock();
     return ok;
 #else
     if (!_lockAuth()) return false;   // [p.475] no rotation without serialization
@@ -816,10 +844,10 @@ public:
 #if defined(SVC_NO_LOCK)
     revokeBody();
 #elif defined(LOCK_FAIL_OPEN)
-    if (!_cell.created) (void)_cell.create();
-    if (_cell.created) _cell.ref().lock();
+    if (!_cell.created()) (void)_cell.create();
+    if (_cell.created()) _cell.ref().lock();
     revokeBody();
-    if (_cell.created) _cell.ref().unlock();
+    if (_cell.created()) _cell.ref().unlock();
 #else
     if (!_lockAuth()) return;   // [p.475] refused — never a false "revoked"
     revokeBody();
@@ -833,7 +861,7 @@ public:
   }
 
   // MIRROR-ONLY test hook (file header).
-  void dropMutexForTest() const { _cell.created = false; }
+  void dropMutexForTest() const { _cell.drop(); }
 
   // ---- storm verification helpers (test-side reads) ----
   int liveTokenCount() const {
