@@ -1,5 +1,6 @@
 // verify_service_lock_concurrency.cpp — native harness for the ROUND-10
-// fail-open/fail-closed family remediation (p.472 + p.473 + p.474 + p.475).
+// fail-open/fail-closed family remediation (p.472 + p.473 + p.474 + p.475),
+// EXTENDED IN ROUND 11 with the factory-reset one-time-token phase (p.476).
 //
 // WHY THIS HARNESS EXISTS (auditor round-10 verdict): p.471 closed the
 // AlarmRegistry fail-open hole, but the same family survived in four other
@@ -46,6 +47,10 @@
 //                        sentinels in this mode (and TSAN reports races) —
 //                        a clean exit would mean the harness cannot detect
 //                        the fail-open class round-10 removes.
+//                        [ROUND 11 / p.476] The pre-round-11 factory-reset
+//                        shape had NO lock AT ALL (worse than fail-open), so
+//                        BOTH negative controls run the unlocked
+//                        prepare/confirm bodies — Phase F/X MUST trip there.
 //
 // Build (treatment):
 //   g++ -std=c++17 -g -fsanitize=thread                  -pthread -o s10t verify_service_lock_concurrency.cpp
@@ -801,6 +806,12 @@ namespace Services {
 class AuthMgr {
 public:
   static constexpr int MAX_REFRESH_TOKENS = 4;
+  // [p.476] Factory-reset token mirror: 'F' + 12 digits + NUL, 60 s TTL —
+  // same shape as the firmware's 32-hex-char token modulo the mirror's
+  // shorter token alphabet (the serialization discipline is the subject,
+  // not the entropy).
+  static constexpr size_t FR_TOKEN_LEN = 13;
+  static constexpr uint32_t FR_TTL_MS = 60000;
 
   bool begin() {
     for (int i = 0; i < MAX_REFRESH_TOKENS; i++) _slots[i] = Slot{};
@@ -874,6 +885,52 @@ public:
     return _lockFailures.load(std::memory_order_relaxed);
   }
 
+  // [p.476] Factory-reset two-step — mirror of the round-11 remediation.
+  // TREATMENT: whole generate+store / check→TTL→compare→consume chains each
+  // inside ONE _lockAuth() critical section, fail-closed ("" / false).
+  // NEGATIVE CONTROLS: the pre-round-11 shape — NO lock at all.
+  std::string prepareFactoryReset() {
+#if defined(SVC_NO_LOCK) || defined(LOCK_FAIL_OPEN)
+    return prepareFactoryResetBody();
+#else
+    if (!_lockAuth()) return "";   // fail-closed — no token without serialization
+    std::string t = prepareFactoryResetBody();
+    _unlockAuth();
+    return t;
+#endif
+  }
+  bool confirmFactoryReset(const std::string& token) {
+    // Pure input validation — reads no shared state, safe outside the lock
+    // (same placement as the firmware's length guard).
+    if (token.size() != FR_TOKEN_LEN) return false;
+#if defined(SVC_NO_LOCK) || defined(LOCK_FAIL_OPEN)
+    return confirmFactoryResetBody(token);
+#else
+    if (!_lockAuth()) return false;   // fail-closed — token NOT consumed
+    bool ok = confirmFactoryResetBody(token);
+    _unlockAuth();
+    return ok;
+#endif
+  }
+
+  // ---- storm verification helpers (test-side reads) ----
+  // [p.476] Single-threaded, between phases (post-join) — mirrors the
+  // slotTokenWellFormed pattern above.
+  bool factoryTokenEmpty() const { return _frToken[0] == '\0'; }
+  bool factoryTokenWellFormed() const {
+    if (_frToken[0] == '\0') return true;   // empty is well-formed
+    if (_frToken[0] != 'F') return false;
+    for (int k = 1; k <= 12; k++) {
+      if (_frToken[k] < '0' || _frToken[k] > '9') return false;
+    }
+    return _frToken[13] == '\0';
+  }
+  // MIRROR-ONLY: backdate the pending token's timestamp to probe the TTL
+  // discard path (fake_millis is frozen — see the Arduino shims block).
+  void backdateFactoryTokenForTest(uint32_t ageMs) {
+    _frTokenTime = millis() - ageMs;   // unsigned wrap keeps the delta correct
+  }
+
   // MIRROR-ONLY test hook (file header).
   void dropMutexForTest() const { _cell.drop(); }
 
@@ -918,6 +975,39 @@ private:
     char buf[16];
     snprintf(buf, sizeof(buf), "T%012u", n);
     return std::string(buf);
+  }
+  // [p.476] Factory-reset bodies — the firmware logic modulo the constant-
+  // time compare (serialization, not timing, is this phase's subject).
+  std::string nextFrToken() {
+    uint32_t n = _frTokenCounter.fetch_add(1, std::memory_order_relaxed);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "F%012u", n);
+    return std::string(buf);
+  }
+  std::string prepareFactoryResetBody() {
+    std::string t = nextFrToken();
+    snprintf(_frToken, sizeof(_frToken), "%s", t.c_str());
+    _frTokenTime = millis();
+    return t;
+  }
+  bool confirmFactoryResetBody(const std::string& token) {
+    if (_frToken[0] == '\0') return false;
+    if (millis() - _frTokenTime > FR_TTL_MS) {
+      _frToken[0] = '\0';               // expired — discard
+      return false;
+    }
+    if (token != _frToken) return false;
+#if defined(SVC_NO_LOCK) || defined(LOCK_FAIL_OPEN)
+    // [mirror-only] Widen the compare→clear window so the UNLOCKED negative
+    // controls deterministically produce the "one-time token confirmed by
+    // N concurrent callers" race. The treatment holds the lock across this
+    // window, so the delay is compiled out there — the firmware has no such
+    // delay (same technique as the NVS putBytes latency, negative-only here
+    // because it models no firmware latency).
+    std::this_thread::sleep_for(std::chrono::microseconds(80));
+#endif
+    _frToken[0] = '\0';                 // consume
+    return true;
   }
   int findRefreshSlot() {
     int oldest = -1;
@@ -976,6 +1066,11 @@ private:
 
   Slot _slots[MAX_REFRESH_TOKENS];
   std::atomic<uint32_t> _tokenCounter{1};
+  // [p.476] Factory-reset token state — the shared mutable pair the auth
+  // mutex now serializes (written by prepare, read+cleared by confirm).
+  char _frToken[16] = {0};
+  uint32_t _frTokenTime = 0;
+  std::atomic<uint32_t> _frTokenCounter{1};
   mutable MutexCell _cell;
   std::atomic<uint32_t> _lockFailures{0};
 };
@@ -1462,8 +1557,128 @@ static bool phaseU() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase X — LOCK-UNAVAILABLE STORM (the p.472-p.475 core): post-boot handle
-// loss + creation failure → EVERY operation must be refused fail-closed with
+// Phase F — AuthManager (p.476): the factory-reset ONE-TIME token. 8
+// concurrent confirmers present the SAME token — EXACTLY ONE may consume it
+// (the race the auditor demonstrated: REST web task + MQTT network task both
+// passing the compare before either clears). A prepare storm racing confirms
+// must never leave a torn token/time pair. TTL expiry discards under the
+// lock; a wrong token must not consume the pending one. The pending
+// authorization survives a lock outage un-consumed (Phase X set-B) and
+// confirms exactly ONCE after recovery (Phase W).
+// ---------------------------------------------------------------------------
+static bool phaseF() {
+  g_phase = "F-factory-reset";
+  Services::AuthMgr auth;
+  REQUIRE(auth.begin(), "p.476 auth begin must succeed");
+
+  // F1 — single-winner confirm (the ONE-TIME invariant), 3 rounds.
+  for (int round = 0; round < 3; round++) {
+    std::string tok = auth.prepareFactoryReset();
+    REQUIRE(tok.size() == Services::AuthMgr::FR_TOKEN_LEN,
+            "p.476 prepare must issue a well-formed token");
+    // START BARRIER (same rationale as Phase U): a staggered start would let
+    // the first racer clear the token before the others arrive, hiding the
+    // double-confirm race in the negative controls.
+    std::atomic<bool> go{false};
+    std::mutex resultMx;
+    int successes = 0;
+    std::vector<std::thread> racers;
+    for (int t = 0; t < 8; t++) {
+      racers.emplace_back([&] {
+        while (!go.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
+        if (auth.confirmFactoryReset(tok)) {
+          std::lock_guard<std::mutex> g(resultMx);
+          successes++;
+        }
+      });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));   // park all 8
+    go.store(true, std::memory_order_release);
+    for (auto& th : racers) th.join();
+#if defined(SVC_NO_LOCK) || defined(LOCK_FAIL_OPEN)
+    if (successes > 1)
+      SENTINEL_TRIP("476", "one-time factory token confirmed by MULTIPLE concurrent callers");
+#endif
+    REQUIRE(successes == 1,
+            "p.476 exactly ONE concurrent confirm may consume the one-time token");
+    REQUIRE(!auth.confirmFactoryReset(tok),
+            "p.476 the consumed token must never confirm again");
+    REQUIRE(auth.factoryTokenEmpty(),
+            "p.476 the token must be cleared after the single confirmation");
+  }
+
+  // F2 — a wrong token must NOT consume the pending one.
+  std::string tok = auth.prepareFactoryReset();
+  REQUIRE(!auth.confirmFactoryReset("F999999999999"),
+          "p.476 a wrong token must be rejected");
+  REQUIRE(!auth.factoryTokenEmpty(),
+          "p.476 a wrong token must NOT consume the pending one");
+  REQUIRE(auth.confirmFactoryReset(tok),
+          "p.476 the right token still confirms after a wrong attempt");
+
+  // F3 — TTL expiry discards the token under the lock.
+  tok = auth.prepareFactoryReset();
+  auth.backdateFactoryTokenForTest(Services::AuthMgr::FR_TTL_MS + 1);
+  REQUIRE(!auth.confirmFactoryReset(tok),
+          "p.476 an expired token must not confirm");
+  REQUIRE(auth.factoryTokenEmpty(),
+          "p.476 the expired token must be discarded (under the lock)");
+  REQUIRE(!auth.confirmFactoryReset(tok),
+          "p.476 the discarded token stays discarded");
+
+  // F4 — confirm with nothing pending answers false.
+  REQUIRE(!auth.confirmFactoryReset(std::string("F000000000042")),
+          "p.476 confirm with no pending token must answer false");
+
+  // F5 — prepare-vs-confirm storm: 2 preparers keep re-issuing while 6
+  // confirmers pound the tokens they last observed (web-task prepare racing
+  // network-task confirm — the second p.476 race). The pending token must
+  // stay well-formed at all times; the machinery must still work after.
+  std::atomic<int> confirms{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 2; t++) {
+    threads.emplace_back([&, t] {
+      std::mt19937 rng(0x0B0 + t);
+      for (int i = 0; i < 300; i++) {
+        (void)auth.prepareFactoryReset();
+        microSleep(rng, 50);
+      }
+    });
+  }
+  for (int t = 0; t < 6; t++) {
+    threads.emplace_back([&, t] {
+      std::mt19937 rng(0x0C0 + t);
+      std::string mine = auth.prepareFactoryReset();
+      for (int i = 0; i < 200; i++) {
+        if ((i % 20) == 0) mine = auth.prepareFactoryReset();
+        if (auth.confirmFactoryReset(mine)) confirms.fetch_add(1);
+        microSleep(rng, 40);
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  REQUIRE(auth.factoryTokenWellFormed(),
+          "p.476 the pending token must be well-formed after the storm (no torn token/time pair)");
+  std::string post = auth.prepareFactoryReset();
+  REQUIRE(post.size() == Services::AuthMgr::FR_TOKEN_LEN,
+          "p.476 prepare must work after the storm");
+  REQUIRE(auth.confirmFactoryReset(post),
+          "p.476 a fresh token must confirm after the storm");
+  REQUIRE(!auth.confirmFactoryReset(post),
+          "p.476 ... and exactly once");
+  REQUIRE(auth.lockFailures() == 0, "p.476 no lock failures with a healthy mutex");
+  printf("Phase F OK — 3 single-winner confirms, TTL/wrong-token paths clean, "
+         "prepare-vs-confirm storm left no torn token (%d storm confirms)\n",
+         confirms.load());
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Phase X — LOCK-UNAVAILABLE STORM (the p.472-p.475 core, extended in
+// round-11 with the p.476 factory-reset paths): post-boot handle loss +
+// creation failure → EVERY operation must be refused fail-closed with
 // ZERO state mutation and (journal) ZERO NVS writes. The OLD shapes proceed
 // unsynchronized — the sentinels must trip there.
 // ---------------------------------------------------------------------------
@@ -1481,6 +1696,12 @@ static bool phaseX() {
 
   std::string liveTok = authB.issueRefreshToken("seed");
   REQUIRE(!liveTok.empty(), "seed token must exist before the outage");
+  // [p.476] Seed a PENDING factory-reset authorization before the outage —
+  // the outage must neither consume nor corrupt it (Phase W proves it still
+  // confirms exactly once after recovery).
+  std::string frTok = authB.prepareFactoryReset();
+  REQUIRE(frTok.size() == Services::AuthMgr::FR_TOKEN_LEN,
+          "p.476 seed factory token must issue before the outage");
   logB.append("W00-000001");
   uint64_t nvsBefore = nvs.ops.load(std::memory_order_relaxed);
   uint16_t countBefore = logB.activityCount();
@@ -1494,6 +1715,7 @@ static bool phaseX() {
 
   // Storm the unavailable services from 8 threads.
   std::atomic<int> journalNewDecisions{0}, authRotations{0};
+  std::atomic<int> frPrepares{0}, frConfirms{0};   // [p.476]
   std::vector<std::thread> threads;
   for (int t = 0; t < 8; t++) {
     threads.emplace_back([&, t] {
@@ -1510,6 +1732,10 @@ static bool phaseX() {
         std::string out;
         if (authB.consumeRefreshToken(liveTok, out)) authRotations.fetch_add(1);
         (void)authB.issueRefreshToken("outage");
+        // [p.476] factory-reset paths must refuse fail-closed during the
+        // outage: prepare issues NOTHING, confirm consumes NOTHING.
+        if (!authB.prepareFactoryReset().empty()) frPrepares.fetch_add(1);
+        if (authB.confirmFactoryReset(frTok)) frConfirms.fetch_add(1);
         microSleep(rng, 30);
       }
     });
@@ -1525,6 +1751,8 @@ static bool phaseX() {
     SENTINEL_TRIP("473", "journal decided/executed or wrote NVS WITHOUT the mutex during the outage (fail-open)");
   if (authRotations.load() > 0)
     SENTINEL_TRIP("475", "refresh rotation proceeded WITHOUT the mutex during the outage (fail-open)");
+  if (frPrepares.load() > 0 || frConfirms.load() > 0)
+    SENTINEL_TRIP("476", "factory-reset prepare/confirm proceeded WITHOUT the mutex during the outage (fail-open)");
   // Old crossCheckShunt with a null handle returns NAN by accident — the
   // BMS old-shape detection is the Phase V boot-guard sentinel + the Phase T
   // TSAN races (unlocked crossCheckShunt vs locked tick writer).
@@ -1554,11 +1782,16 @@ static bool phaseX() {
   REQUIRE(!authB.consumeRefreshToken(liveTok, out), "p.475 consume must be refused during the outage");
   REQUIRE(authB.issueRefreshToken("outage").empty(), "p.475 issue must be refused during the outage");
   REQUIRE(authB.liveTokenCount() == 1, "p.475 no token state change during the outage");
-  REQUIRE(authB.lockFailures() > 0, "p.475 refusals must be counted");
+  REQUIRE(frPrepares.load() == 0, "p.476 NO factory token may issue during the outage");
+  REQUIRE(frConfirms.load() == 0, "p.476 NO factory confirmation during the outage");
+  REQUIRE(authB.prepareFactoryReset().empty(), "p.476 prepare must refuse during the outage");
+  REQUIRE(!authB.confirmFactoryReset(frTok), "p.476 confirm must refuse during the outage (token NOT consumed)");
+  REQUIRE(authB.lockFailures() > 0, "p.475/p.476 refusals must be counted");
 #endif
 
-  printf("Phase X OK — outage storm: nvsWrites=%llu, rotations=%d, countAnswer=%u\n",
-         (unsigned long long)(nvsAfter - nvsBefore), authRotations.load(), countAfter);
+  printf("Phase X OK — outage storm: nvsWrites=%llu, rotations=%d, frPrepares=%d, frConfirms=%d, countAnswer=%u\n",
+         (unsigned long long)(nvsAfter - nvsBefore), authRotations.load(),
+         frPrepares.load(), frConfirms.load(), countAfter);
 
   // Phase W (recovery) runs in the SAME phase function: it needs the set-B
   // instances with injection OFF again.
@@ -1577,6 +1810,12 @@ static bool phaseX() {
   REQUIRE(s2.gen == 7 && s2.current == 7.0f && s2.voltage == 70.0f,
           "p.474 BMS snapshots must resume after recovery");
   REQUIRE(authB.consumeRefreshToken(liveTok, nr), "p.475 rotation must resume after recovery");
+  // [p.476] The pending factory authorization survived the outage untouched
+  // — it confirms EXACTLY ONCE now, and never twice.
+  REQUIRE(authB.confirmFactoryReset(frTok),
+          "p.476 the pending factory token must confirm exactly ONCE after recovery (the outage consumed nothing)");
+  REQUIRE(!authB.confirmFactoryReset(frTok),
+          "p.476 ...and never twice");
   // Brief post-recovery storm (4 threads) — full service again.
   std::vector<std::thread> mini;
   for (int t = 0; t < 4; t++) {
@@ -1600,7 +1839,7 @@ static bool phaseX() {
 
 // ---------------------------------------------------------------------------
 int main() {
-  printf("=== verify_service_lock_concurrency (round-10, p.472-p.475) ===\n");
+  printf("=== verify_service_lock_concurrency (round-10 p.472-p.475 + round-11 p.476) ===\n");
 #if defined(SVC_NO_LOCK)
   printf("build mode: SVC_NO_LOCK (negative control — fully unlocked)\n");
 #elif defined(LOCK_FAIL_OPEN)
@@ -1615,6 +1854,7 @@ int main() {
   anyTrip |= !phaseS();
   anyTrip |= !phaseT();
   anyTrip |= !phaseU();
+  anyTrip |= !phaseF();   // [p.476] factory-reset one-time token
   anyTrip |= !phaseX();   // includes Phase W (recovery)
   (void)anyTrip;   // sentinel phases print + count; verdicts below are authoritative
 

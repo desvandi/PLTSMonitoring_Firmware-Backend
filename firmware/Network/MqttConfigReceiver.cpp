@@ -447,7 +447,14 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
   if (type == "system" && action == "factory_reset_prepare") {
     // [FW-22 CLOSED 2026-08] Real execution: issue a 60 s one-time token via
     // AuthManager (same two-step flow as REST).
+    // [AUDIT 2026-09 ROUND 11 / p.476] Fail-closed: empty token = refusal
+    // (no serialization → no token). The ACK must not claim a token was
+    // issued when none was.
     String token = Services::auth.prepareFactoryReset();
+    if (token.length() != 32) {
+      return { false, "REJECTED",
+               "factory reset unavailable (auth lock) — token not issued" };
+    }
     Services::Log.append(Core::LogType::ConfigurationChanged,
                           "MQTT: factory_reset_prepare (60s TTL)", -1);
     return { true, "ACCEPTED", "factory reset token issued (60s TTL)" };
@@ -458,6 +465,9 @@ MqttConfigReceiver::_applyCommand(const String& type, const String& action,
     // [FW-22 CLOSED 2026-08] Real execution: verify the one-time token, then
     // erase persisted state and reboot into first-boot provisioning.
     if (!Services::auth.confirmFactoryReset(token)) {
+      // [p.476] False covers an invalid/expired token AND the fail-closed
+      // lock refusal (no serialization → token NOT consumed, wipe NOT
+      // authorized) — both refuse conservatively.
       return { false, "REJECTED", "invalid or expired factory reset token" };
     }
     Services::Log.append(Core::LogType::ConfigurationChanged,

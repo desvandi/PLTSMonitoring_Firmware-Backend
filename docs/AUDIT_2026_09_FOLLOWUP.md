@@ -1567,3 +1567,130 @@ phantom yang tidak pernah muncul di g++-14 (200/200 bersih di mesin
 2-core lokal). Verifikasi akhir: treatment TSAN 150/150 + ASAN/UBSAN
 60/60 bersih lokal; negative control tetap trip; CI main penuh hijau
 (6 job) pada 18fd2e0.
+
+## 17. Round 11 (2026-09-15): remediasi p.476 — race token factory reset
+
+Temuan auditor round-11 (verdict atas HEAD 989ee487): `prepareFactoryReset()`
+dan `confirmFactoryReset()` berjalan **sepenuhnya tanpa serialisasi** atas
+state mutable bersama `_factoryResetToken` + `_factoryResetTokenTime`,
+padahal keduanya lintas task (REST = web task, MQTT = network task). Race
+yang dibuktikan auditor: dua confirm konkuren sama-sama lolos
+constant-time compare sebelum salah satunya menghapus token — token
+"one-time" dikonfirmasi DUA KALI, dan karena confirm bersifat destruktif
+kedua caller bebas masuk jalur wipe. Race kedua: prepare || confirm dapat
+membaca pasangan token/time yang robek (token setengah tersalin, atau token
+baru berpasangan timestamp lama). Severity **P1** — bukan karena mudah
+dieksploitasi dari kondisi normal, tetapi karena primitif ini mengendalikan
+factory reset: invariant "konfirmasi sekali" wajib atomik. Ini menutup
+observasi yang kami catat sendiri di §16.4 (fungsi ini sengaja tidak
+disentuh round-10 karena polanya berbeda dari keluarga fail-open — tidak
+ada `_lockAuth()` yang gagal-terbuka; memang tidak pernah dikunci sama
+sekali).
+
+### 17.1 Implementasi — mutex auth yang sama, SATU critical section
+
+Persis remediasi yang direkomendasikan auditor: kedua fungsi memakai mutex
+auth yang sama dengan rotasi refresh token (p.475), dengan seluruh rantai
+di dalam satu critical section — bukan kunci baca/tulis terpisah:
+
+```
+prepareFactoryReset()
+    _lockAuth()  ── gagal → "" (tidak ada token yang terbit) + log jujur
+    generate token 32 hex + store _factoryResetToken/_factoryResetTokenTime
+    _unlockAuth()
+    Log "prepared (60s TTL)"  ── SETELAH unlock (urutan auth→log satu arah,
+                                  hold time minimal, P3 diterima)
+
+confirmFactoryReset(token)
+    length guard 32  ── validasi input murni, baca NOL state bersama
+    _lockAuth()  ── gagal → false, token TIDAK dikonsumsi, reset TIDAK
+                   diotorisasi (operasi destruktif dibuktikan atau ditolak,
+                   tidak pernah ditebak) + log jujur
+    [dalam SATU kunci]: cek token pending → validasi TTL (kedaluwarsa →
+    discard tetap di bawah kunci) → constant-time compare → konsumsi
+    _unlockAuth()
+```
+
+Perilaku lama yang dipertahankan semuanya: TTL kedaluwarsa menghapus token
+pending; token kosong → false; mismatch → false TANPA mengonsumsi token
+pending (satu percobaan salah tidak membakar autorisasi yang sah). Length
+guard WAVE-5/FW-B1 tetap sebelum compare fixed-length. Boot guard FATAL
+p.475 di `begin()` otomatis menutup p.476 — mutex yang sama; counter
+`authLockFailures` di /api/diagnostics otomatis menghitung refusal factory
+reset (satu counter, satu degradasi).
+
+### 17.2 Call-site jujur (kontrak nilai kosong)
+
+`prepareFactoryReset()` kini dapat gagal (dulu mustahil gagal), sehingga
+kedua konsumen wajib memperlakukan string kosong sebagai penolakan —
+bukan sebagai token valid:
+
+- REST `handleFactoryResetPrepare()`: token kosong → **503** "Factory
+  reset unavailable (auth lock) — token not issued, retry". Tidak pernah
+  200 + token kosong (preseden login 500 jujur round-10).
+- MQTT `factory_reset_prepare`: token kosong → **REJECTED** "factory
+  reset unavailable (auth lock) — token not issued". ACK tidak pernah
+  mengklaim "token issued" saat tidak ada.
+- Kedua situs confirm: false → penolakan konservatif (REST 400 / MQTT
+  REJECTED) — mencakup token salah/kedaluwarsa DAN refusal fail-closed;
+  `authLockFailures` membedakan degradasinya. Tidak ada jalur sukses palsu.
+
+### 17.3 Bukti — harness native diperluas (fase F + X/W)
+
+`verify_service_lock_concurrency.cpp` diperluas (file yang sama, bukan
+harness baru): mirror AuthMgr kini membawa pasangan token/time factory
+reset dengan tiga mode build. Fase baru **F** (factory-reset) + fase
+**X/W** diperluas:
+
+- **F1 single-winner**: 8 konfirmer konkuren dengan start-barrier
+  menyodori token yang SAMA — 3 putaran, tepat SATU sukses; token habis
+  setelahnya; konfirmasi ulang ditolak.
+- **F2 wrong-token**: token salah ditolak TANPA mengonsumsi token pending;
+  token yang benar masih bisa dikonfirmasi setelahnya.
+- **F3 TTL**: token ber-usia melewati TTL ditolak + dihapus (di bawah
+  kunci) + tetap terhapus.
+- **F5 prepare-vs-confirm storm**: 2 preparer × 300 iterasi vs 6 konfirmer
+  × 200 iterasi — token pending tetap well-formed (detektor pasangan
+  robek), mesin tetap sehat pasca-storm.
+- **X (outage)**: token factory di-seed SEBELUM kehilangan mutex; storm
+  8 thread × 150 iterasi prepare+confirm saat unavailable → **nol token
+  terbit, nol konfirmasi**, lalu **W (recovery)**: token pending yang
+  sama dikonfirmasi TEPAT SEKALI — outage tidak mengonsumsi ataupun
+  merusak autorisasi yang tertunda.
+
+Hasil (lokal, g++ 14.2.0): treatment TSAN **20/20 run bersih** (0 race) +
+ASAN/UBSAN **20/20 bersih**; negative control `-DSVC_NO_LOCK` **10/10
+trip** (sentinel P476 "one-time token confirmed by MULTIPLE concurrent
+callers" + 83 laporan TSAN); negative control `-DLOCK_FAIL_OPEN` **10/10
+trip** (sentinel P476 + 45 laporan TSAN). Bentuk pra-round-11 untuk kedua
+fungsi ini TANPA kunci sama sekali (lebih buruk dari fail-open), sehingga
+kedua mode NC menjalankan body tanpa kunci — sentinel P476 trip deterministik
+berkat latensi 80 µs pembesar jendela compare→clear yang dikompilasi hanya
+pada mode NC (treatment memegang kunci melintasi jendela tersebut;
+firmware tidak punya delay seperti itu).
+
+### 17.4 Gate statis round-11 + regresi
+
+Gate baru `test_audit_round11_2026_09.py`: **26/26 PASS** — blok A/B
+(urutan rantai kritis via source tanpa komentar: lock < generate < copy <
+timestamp < unlock; lock < TTL < compare < consume < unlock; SEMUA mutasi
+`_factoryResetToken` di dalam kunci), blok C (call-site jujur 503/REJECTED),
+blok D (kontrak header + boot guard + observabilitas tak terregresi), blok
+E (fase F ada + dipanggil, sentinel P476 dua titik, storm X + recovery W),
+blok F (fingerprint lama hilang), blok G (dokumentasi ini). Syntax-check
+gnu++17 -Wall -Wextra AuthManager.cpp (header repo riil + stub ESP32):
+0 error/0 warning. Kedua file handler (SystemHandlers, MqttConfigReceiver)
+berubah minimal (guard token kosong + komentar) dan diverifikasi build CI
+penuh — deviasi yang sama dengan round-10 (§16.4): `pio` lokal tidak
+tersedia. Tidak ada gate lama yang perlu diubah: aserti round-10 tentang
+AuthManager tidak menyentuh kedua fungsi ini; seluruh suite Python (35
+tes) tetap hijau.
+
+### 17.5 Catatan lingkup
+
+Sisa dari §16.4 yang tetap TIDAK diubah round ini: `getJournalSize()`
+(advisory, tanpa pemanggil), `flushToDisk()` (tanpa pemanggil), dan
+lock-hold-time (P3 diterima auditor sejak round-9). Sweep auditor
+berikutnya (read → validate → mutate/consume pada token/nonce/session/
+command identity/state-machine transition, sesuai arahan auditor) akan
+kami sambut dengan pola bukti yang sama bila ada temuan baru.

@@ -30,6 +30,12 @@
 # which MUST trip (sentinels and/or TSAN reports) — a clean negative control
 # would mean the harness is blind.
 #
+# Round-11 (p.476) extends the SAME harness with Phase F + the Phase X/W
+# factory-reset invariants: prepare/confirm one-time token under the auth
+# mutex (the pre-round-11 shape had NO lock at all on those two functions —
+# both negative controls run them unlocked and MUST trip the P476
+# sentinels / TSAN races).
+#
 # Usage: bash scripts/native/run-native-tests.sh   (needs g++; exit 0 = PASS)
 set -u
 cd "$(dirname "$0")"
