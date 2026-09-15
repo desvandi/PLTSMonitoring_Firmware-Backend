@@ -56,6 +56,10 @@ static const uint8_t RT_BLOB_VERSION = 1;
 // still null → atomic count + rate-limited CRIT log (via LogService — a
 // DIFFERENT service's mutex, no cycle) + return false. Every caller refuses
 // the operation (see the header contract).
+// [AUDIT 2026-09 ROUND 11 / p.476] The SAME mutex also serializes the
+// factory-reset two-step (prepareFactoryReset/confirmFactoryReset) — the
+// one-time confirmation token is shared mutable state across the web task
+// (REST) and the network task (MQTT).
 bool AuthManager::_lockAuth() {
   if (_authMutex == nullptr) _authMutex = xSemaphoreCreateMutex();   // retry-create ONCE
   if (_authMutex != nullptr) {
@@ -68,8 +72,8 @@ bool AuthManager::_lockAuth() {
   if (now - last > 60000UL &&
       _lastLockFailLogMs.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
     Log.append(Core::LogType::AuthFail,
-               String("[AUTH] auth mutex UNAVAILABLE — refresh operation REJECTED "
-                      "(fail-closed, p.475); lockFailures=") +
+               String("[AUTH] auth mutex UNAVAILABLE — auth operation REJECTED "
+                      "(fail-closed, p.475/p.476); lockFailures=") +
                    _lockFailures.load(std::memory_order_relaxed),
                0);
   }
@@ -569,30 +573,66 @@ void AuthManager::_loadRefreshTokens() {
 }
 
 String AuthManager::prepareFactoryReset() {
+  // [AUDIT 2026-09 ROUND 11 / p.476] The token + timestamp are shared
+  // mutable state written here and read + cleared by confirmFactoryReset(),
+  // from DIFFERENT tasks (web/REST vs network/MQTT). Unserialized, a
+  // concurrent confirm could observe a torn token/time pair (mid-copy token,
+  // or a fresh token paired with the previous timestamp). Fail-closed: no
+  // serialization → NO token — the empty string is the honest "not issued"
+  // answer (same contract as issueRefreshToken), never a fabricated one.
+  if (!_lockAuth()) {
+    Log.append(Core::LogType::AuthFail,
+               "Factory reset PREPARE refused — auth mutex unavailable "
+               "(fail-closed, p.476); no token issued", 0);
+    return String();
+  }
   String t = Utils::generateToken(32);
   strncpy(_factoryResetToken, t.c_str(), 32);
   _factoryResetToken[32] = '\0';
   _factoryResetTokenTime = millis();
+  _unlockAuth();
+  // Log AFTER unlock: release the auth mutex before taking the LogService
+  // mutex (one-directional auth→log order, no cycle) and keep the hold time
+  // minimal (P3 lock-hold-time, accepted).
   Log.append(Core::LogType::ConfigurationChanged,
              "Factory reset prepared (60s TTL)", 0);
   return t;
 }
 
 bool AuthManager::confirmFactoryReset(const String& token) {
-  if (_factoryResetToken[0] == '\0') return false;
   // [WAVE-5 / FW-B1] Length guard before fixed-length constant-time compare
   // (token arrives from an MQTT JSON field — arbitrary length possible).
+  // Pure input validation — reads NO shared state, safe outside the lock.
   if (token.length() != 32) return false;
-  if (millis() - _factoryResetTokenTime > Core::FACTORY_RESET_TOKEN_TTL_MS) {
-    _factoryResetToken[0] = '\0';
+  // [AUDIT 2026-09 ROUND 11 / p.476] The WHOLE check → TTL-validate →
+  // constant-time-compare → consume chain runs inside ONE critical section.
+  // The old unsynchronized shape let two concurrent confirms (REST web task
+  // + MQTT network task) BOTH pass the compare before either cleared the
+  // token — a "one-time" authorization confirmed TWICE, both callers free
+  // to enter the destructive factory wipe. Fail-closed: no serialization →
+  // the token is NOT consumed and the reset is NOT authorized; counted in
+  // authLockFailures — a destructive operation is proven or refused, never
+  // guessed.
+  if (!_lockAuth()) {
+    Log.append(Core::LogType::AuthFail,
+               "Factory reset CONFIRM refused — auth mutex unavailable "
+               "(fail-closed, p.476); token NOT consumed, reset NOT authorized",
+               0);
     return false;
   }
-  if (!Utils::constantTimeMemEquals((const volatile uint8_t*)_factoryResetToken,
-                                      (const volatile uint8_t*)token.c_str(), 32)) {
-    return false;
+  bool ok = false;
+  if (_factoryResetToken[0] != '\0') {
+    if (millis() - _factoryResetTokenTime > Core::FACTORY_RESET_TOKEN_TTL_MS) {
+      _factoryResetToken[0] = '\0';   // expired — discard under the same lock
+    } else if (Utils::constantTimeMemEquals(
+                   (const volatile uint8_t*)_factoryResetToken,
+                   (const volatile uint8_t*)token.c_str(), 32)) {
+      _factoryResetToken[0] = '\0';   // consume — SAME critical section
+      ok = true;
+    }
   }
-  _factoryResetToken[0] = '\0';
-  return true;
+  _unlockAuth();
+  return ok;
 }
 
 } // namespace Services

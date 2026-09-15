@@ -27,6 +27,13 @@ void handleFactoryResetPrepare() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
   if (!requireCsrf()) return;
   String token = Services::auth.prepareFactoryReset();
+  // [AUDIT 2026-09 ROUND 11 / p.476] Empty string = fail-closed refusal
+  // (no serialization → no token issued). NEVER answer 200 with an empty
+  // token — the client would present it back and the flow would lie.
+  if (token.length() != 32) {
+    sendError(503, "Factory reset unavailable (auth lock) — token not issued, retry");
+    return;
+  }
   String data = "{\"token\":\"" + token + "\",\"ttlSec\":60}";
   sendSuccess("Factory reset prepared — confirm within 60s", data);
 }
@@ -40,6 +47,10 @@ void handleFactoryResetConfirm() {
   if (deserializeJson(doc, raw)) { sendError(400, "Invalid JSON"); return; }
   const char* token = doc["token"] | "";
   if (!Services::auth.confirmFactoryReset(token)) {
+    // [p.476] False covers an invalid/expired token AND the fail-closed
+    // lock refusal (no serialization → token NOT consumed, wipe NOT
+    // authorized). Both refuse conservatively; authLockFailures on
+    // /api/diagnostics distinguishes the degradation.
     sendError(400, "Invalid or expired token");
     return;
   }

@@ -90,7 +90,23 @@ public:
   String getCsrfToken() const { return String(_csrfToken); }
   void rotateCsrfToken();
 
-  // Factory reset (two-step)
+  // Factory reset (two-step, 60s TTL).
+  // [AUDIT 2026-09 ROUND 11 / p.476] ONE-TIME CONFIRMATION INVARIANT. Both
+  // steps run under the SAME auth mutex as the refresh rotation, with the
+  // WHOLE check → TTL-validate → constant-time-compare → consume chain
+  // inside ONE critical section. The old shape ran both steps fully
+  // unsynchronized while they ARE cross-task (REST = web task,
+  // MQTT = network task): two concurrent confirms could BOTH pass the
+  // compare before either cleared the token — a "one-time" authorization
+  // confirmed twice, both callers free to enter the destructive wipe — and
+  // a prepare racing a confirm could observe a torn token/time pair.
+  //   prepareFactoryReset() → "" when the lock is unavailable (fail-closed:
+  //       NO token is issued; the handlers treat the empty string as a
+  //       refusal — REST 503 / MQTT REJECTED — never as a valid token).
+  //   confirmFactoryReset() → false when the lock is unavailable
+  //       (fail-closed, conservative: the token is NOT consumed, the reset
+  //       is NOT authorized; counted in authLockFailures — a destructive
+  //       operation is never guessed, only proven).
   String prepareFactoryReset();
   bool confirmFactoryReset(const String& token);
 
@@ -100,6 +116,8 @@ private:
   Core::AuthAttempt _attempts[Core::MAX_TRACKED_IPS] = {};
   RefreshToken _refreshTokens[Core::MAX_REFRESH_TOKENS] = {};
   uint8_t _refreshIdx = 0;
+  // [p.476] Guarded by _authMutex (written by prepareFactoryReset, read +
+  // cleared by confirmFactoryReset — cross-task: web/REST vs network/MQTT).
   char _factoryResetToken[33] = {0};
   unsigned long _factoryResetTokenTime = 0;
   bool _authReady = false;          // [P0-003] fail-closed readiness
@@ -120,11 +138,20 @@ private:
   //       issueRefreshToken()  → "" (login degrades honestly — handler 500s)
   //       verifyRefreshToken() → false (read-only check refuses)
   //       revokeAllRefreshTokens() → refused + logged (no false "revoked")
+  //       prepareFactoryReset() → "" (no one-time token without serialization)
+  //       confirmFactoryReset() → false (token NOT consumed, reset NOT
+  //                                authorized — destructive ops are proven,
+  //                                never guessed)
   //   - issueRefreshToken() NOW ALSO TAKES THE LOCK: it mutates the same
   //     _refreshTokens[] slots + persists the same NVS blob that
   //     consumeRefreshToken() rotates — leaving it unlocked would make the
   //     "atomic critical section" claim only partial (login vs refresh
   //     could interleave slot allocation with rotation).
+  //   - [ROUND 11 / p.476] prepareFactoryReset()/confirmFactoryReset() share
+  //     this SAME mutex: the factory-reset token + timestamp are shared
+  //     mutable state across the web task (REST) and the network task
+  //     (MQTT). prepare → "" and confirm → false when unavailable; the
+  //     one-time check→compare→consume chain is ONE critical section.
   void* _authMutex = nullptr;       // SemaphoreHandle_t (AUTH-GATE-05)
   bool _lockAuth();
   void _unlockAuth();
