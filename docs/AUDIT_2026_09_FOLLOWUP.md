@@ -1546,3 +1546,24 @@ ada regresi invarian round sebelumnya).
   auditor berikutnya), `getJournalSize()` (advisory, tanpa pemanggil),
   `flushToDisk()` (tanpa pemanggil — API publik dipertahankan), serta
   lock-hold-time (P3 diterima auditor — tidak disentuh, persis round-9).
+
+### 16.5 Pengerasan harness lintas-runner (pelajaran CI, iterasi 1–4)
+
+Harness round-10 sendiri menjalani empat iterasi pengerasan sebelum hijau
+di runner CI 2-core — semuanya terdokumentasi di riwayat commit PR #41 dan
+menjadi bukti bahwa harness-nya benar-benar dieksekusi, bukan asuransi
+kertas: (1) fase S mendapat putaran terminal deterministik pasca-storm —
+invarian "ack final = TERM" tidak dijamin struktur thread ketika sebuah
+store tertunda absah melewati putaran updateAck terakhir; (2) fase T
+event-driven — anggaran iterasi sensitif terhadap penjadwalan runner
+yang kelaparan-schedule; (3) MutexCell handle-heap setia semantik
+FreeRTOS (xSemaphoreCreateMutex mengembalikan objek baru; rekonstruksi
+placement-new di atas alamat lama adalah UB yang merusak pembukuan
+per-alamat sanitizer) dengan registri kepemilikan bebas-urutan-destruktor;
+(4) bounded-wait via loop try_lock biasa — runtime TSAN gcc-13 di runner
+CI salah melacak tepi happens-begin edgex akuisisi
+std::timed_mutex::try_lock_for (pthread_mutex_timedlock), melaporkan race
+phantom yang tidak pernah muncul di g++-14 (200/200 bersih di mesin
+2-core lokal). Verifikasi akhir: treatment TSAN 150/150 + ASAN/UBSAN
+60/60 bersih lokal; negative control tetap trip; CI main penuh hijau
+(6 job) pada 18fd2e0.
