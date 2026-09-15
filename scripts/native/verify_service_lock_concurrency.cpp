@@ -155,21 +155,37 @@ struct Preferences {
 // ============================================================================
 // MutexCell — the "SemaphoreHandle_t" mirror: nullable handle + placement-
 // new'd std::timed_mutex. created==false mirrors _mutex == nullptr.
+// [CI lesson, 2nd iteration] `created` is ATOMIC and the placement-new is
+// gated by a process-wide std::mutex: two threads racing the lazy
+// (re-)create could otherwise each construct their OWN timed_mutex over
+// the storage — both would then "hold a lock" on different objects and
+// race the protected state (exactly the CI TSAN signature on _head). The
+// firmware's post-boot-guard retry-create has the same theoretical window;
+// there it is unreachable-in-practice (the handle is never null after
+// begin()) — the gate here is mirror-only defense.
 // ============================================================================
 struct MutexCell {
-  mutable bool created = false;
+  mutable std::atomic<bool> created{false};
   union { unsigned char storage[sizeof(std::timed_mutex)]; long long align; };
+
+  static std::mutex& createGate() {
+    static std::mutex gate;
+    return gate;
+  }
 
   std::timed_mutex& ref() const {
     return *const_cast<std::timed_mutex*>(
         reinterpret_cast<const std::timed_mutex*>(storage));
   }
-  // Mirrors xSemaphoreCreateMutex() — fails under injection.
+  // Mirrors xSemaphoreCreateMutex() — fails under injection. Creation is
+  // serialized process-wide; double-construct is impossible by construction.
   bool create() const {
-    if (created) return true;
+    if (created.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> g(createGate());
+    if (created.load(std::memory_order_relaxed)) return true;
     if (g_injectMutexCreateFail.load(std::memory_order_relaxed)) return false;
     ::new (static_cast<void*>(const_cast<unsigned char*>(storage))) std::timed_mutex();
-    created = true;
+    created.store(true, std::memory_order_release);
     return true;
   }
 };
@@ -1249,15 +1265,18 @@ static bool phaseT() {
   // BUDGET is scheduling-sensitive — on an oversubscribed 2-core runner the
   // budget can run out before the tick writer reaches gen>10, so the
   // interlock never activates and the assertion fails spuriously): phase 1
-  // disagrees until the interlock has REALLY activated, phase 2 feeds NAN
-  // until it has REALLY cleared. Caps only guard against a broken build.
+  // disagrees until the interlock has REALLY activated. Phase 2 feeds a
+  // FIXED block of NAN — every successful call CLEARS the streak/interlock
+  // under the lock, so a block of attempts overwhelms any bounded-wait
+  // timeout streak. isMismatchActive() must NOT gate this loop: its
+  // conservative timeout→false answer would lie. Caps guard a broken build.
   threads.emplace_back([&] {
     std::mt19937 rng(0x1F00);
     for (int i = 0; i < 200000 && bms.mismatchActivations() < 1; i++) {
       (void)bms.crossCheckShunt(0.0f);   // disagree with the BMS
       microSleep(rng, 40);
     }
-    for (int i = 0; i < 200000 && bms.isMismatchActive(); i++) {
+    for (int i = 0; i < 3000; i++) {
       (void)bms.crossCheckShunt(NAN);    // invalid shunt → arbitration resets
       microSleep(rng, 40);
     }
@@ -1275,9 +1294,21 @@ static bool phaseT() {
 
   REQUIRE(bms.mismatchActivations() >= 1,
           "p.474 the mismatch interlock must have activated on sustained disagreement");
-  REQUIRE(!bms.isMismatchActive(),
+  // Settled-state retry: a single isMismatchActive()/socAuthoritative()
+  // call can time out its 50 ms bounded wait on a saturated runner and
+  // answer the conservative false — retry until both agree (or 1 s, which
+  // after 3000 clearing NAN calls can only mean a real defect).
+  bool cleared = false, authoritative = false;
+  for (int r = 0; r < 100 && !(cleared && authoritative); r++) {
+    cleared = !bms.isMismatchActive();
+    authoritative = bms.socAuthoritative();
+    if (!(cleared && authoritative)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  REQUIRE(cleared,
           "p.474 invalid-shunt half must have cleared the interlock");
-  REQUIRE(bms.socAuthoritative(),
+  REQUIRE(authoritative,
           "p.474 authority must return once the interlock clears and data is fresh");
   REQUIRE(bms.lockFailures() == 0, "p.474 no lock failures with a healthy mutex");
   REQUIRE(tornReads.load() == 0, "p.474 zero torn snapshots across the storm");
