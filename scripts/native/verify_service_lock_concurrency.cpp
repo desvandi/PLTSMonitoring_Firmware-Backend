@@ -20,7 +20,7 @@
 // are copied modulo the Arduino shims; the LOCK DISCIPLINE is the mirror's
 // subject:
 //   public API → if (!_lock()) return <fail-closed value> → body → _unlock()
-// std::timed_mutex stands in for the FreeRTOS mutex (xSemaphoreCreateMutex +
+// std::mutex stands in for the FreeRTOS mutex (xSemaphoreCreateMutex +
 // xSemaphoreTake with/without timeout): both are non-recursive; FreeRTOS
 // adds priority inheritance, std::mutex does not — the harness threads are
 // OS-scheduled, so this difference does not affect the serialization
@@ -154,7 +154,7 @@ struct Preferences {
 
 // ============================================================================
 // MutexCell — the "SemaphoreHandle_t" mirror. A heap-allocated
-// std::timed_mutex behind an atomically-published pointer — THIS IS THE
+// std::mutex behind an atomically-published pointer — THIS IS THE
 // FAITHFUL FreeRTOS SHAPE: xSemaphoreCreateMutex() returns a NEW heap
 // object and a dropped handle is never reconstructed over the old memory.
 // [CI lesson, 3rd iteration] The first mirror used placement-new over
@@ -170,7 +170,7 @@ struct Preferences {
 // intentional drop-and-replace cycle never trips LeakSanitizer.
 // ============================================================================
 struct MutexCell {
-  mutable std::atomic<std::timed_mutex*> ptr{nullptr};
+  mutable std::atomic<std::mutex*> ptr{nullptr};
 
   static std::mutex& createGate() {
     static std::mutex gate;
@@ -182,8 +182,8 @@ struct MutexCell {
   // handler AFTER that destruction (use-after-free at exit — exactly what
   // ASAN reported). A heap vector behind an immortal pointer is
   // "still reachable", which LeakSanitizer does not report.
-  static std::vector<std::timed_mutex*>& registry() {
-    static std::vector<std::timed_mutex*>* reg = new std::vector<std::timed_mutex*>();
+  static std::vector<std::mutex*>& registry() {
+    static std::vector<std::mutex*>* reg = new std::vector<std::mutex*>();
     return *reg;
   }
   static void registerCleanup() {
@@ -205,13 +205,27 @@ struct MutexCell {
     if (ptr.load(std::memory_order_relaxed) != nullptr) return true;
     if (g_injectMutexCreateFail.load(std::memory_order_relaxed)) return false;
     registerCleanup();
-    std::timed_mutex* m = new std::timed_mutex();
+    std::mutex* m = new std::mutex();
     registry().push_back(m);
     ptr.store(m, std::memory_order_release);
     return true;
   }
   bool created() const { return ptr.load(std::memory_order_acquire) != nullptr; }
-  std::timed_mutex& ref() const { return *ptr.load(std::memory_order_acquire); }
+  std::mutex& ref() const { return *ptr.load(std::memory_order_acquire); }
+  // [CI lesson, 4th iteration] Bounded wait as a plain try_lock retry loop.
+  // std::timed_mutex::try_lock_for (pthread_mutex_timedlock) was mis-tracked
+  // by gcc-13's ThreadSanitizer runtime on the CI runner — it fails to
+  // establish the happens-before edge for a timed acquisition and reports
+  // phantom "both threads hold the lock" races. Plain try_lock is the
+  // standard, correctly-intercepted path (round-6..9 harnesses use it).
+  bool tryLockBounded(unsigned ms) const {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    for (;;) {
+      if (ref().try_lock()) return true;
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  }
 
   // MIRROR-ONLY (single-threaded, between phases): models losing the handle.
   // The old object stays registry-owned until process exit — its sanitizer
@@ -342,7 +356,7 @@ private:
   }
   void _unlock() const { _cell.ref().unlock(); }
   bool tryLockBody(unsigned ms) const {
-    return _cell.ref().try_lock_for(std::chrono::milliseconds(ms));
+    return _cell.tryLockBounded(ms);
   }
 
   void appendBody(const char* msg) {
@@ -630,7 +644,7 @@ public:
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape: `if (!_mutex) return; if (take != ok) return; ...`
     if (!_cell.created()) return;
-    if (!_cell.ref().try_lock_for(std::chrono::milliseconds(100))) return;
+    if (!_cell.tryLockBounded(100)) return;
     writeBody(gen);
     _cell.ref().unlock();
 #else
@@ -646,7 +660,7 @@ public:
 #elif defined(LOCK_FAIL_OPEN)
     // OLD shape: `if (_mutex && take==ok) { copy; give; } return copy;`
     BmsSnap copy;   // default: NAN fields, lastUpdateMs=0
-    if (_cell.created() && _cell.ref().try_lock_for(std::chrono::milliseconds(50))) {
+    if (_cell.created() && _cell.tryLockBounded(50)) {
       copy = _data;
       _cell.ref().unlock();
     }
@@ -725,7 +739,7 @@ private:
     }
     // Timeout → false WITHOUT counting (bounded-wait skip-cycle semantics
     // are pre-existing design, not the unavailable-mutex class).
-    return _cell.ref().try_lock_for(std::chrono::milliseconds(timeoutMs));
+    return _cell.tryLockBounded(timeoutMs);
   }
   void _unlock() const { _cell.ref().unlock(); }
 
