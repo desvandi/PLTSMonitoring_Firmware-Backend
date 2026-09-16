@@ -69,6 +69,15 @@ void handleUploadStep() {
                            "OTA upload rejected: unauthenticated", 0);
       return;   // chunks are discarded; final handler sends 401
     }
+    // [audit p.489 REMEDIATION] Role gate BEFORE Update.begin() — a
+    // viewer-scoped token can never flash firmware. Same flag pattern as the
+    // auth gate: reject early, discard chunks, the final handler reports.
+    if (!Services::auth.checkAuthRole(http, "operator")) {
+      s_uploadRejected = true;
+      Services::Log.append(Core::LogType::AuthFail,
+                           "OTA upload rejected: token role is not 'operator' (viewer scope)", 0);
+      return;
+    }
     if (!requireCsrf()) {
       s_uploadRejected = true;
       return;
@@ -132,6 +141,7 @@ void handleUpload() {
     return;
   }
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   // After upload completes, send response
   if (Services::ota.getState() == Services::OtaState::Done) {

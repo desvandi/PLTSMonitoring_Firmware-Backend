@@ -50,6 +50,15 @@ inline void sendSecurityHeaders() {
   http.sendHeader("X-Content-Type-Options", "nosniff");
   http.sendHeader("Cache-Control", "no-store");
   http.sendHeader("Referrer-Policy", "no-referrer");
+#ifdef PRODUCTION_BUILD
+  // [audit p.490 REMEDIATION] HSTS for the documented production transport:
+  // the device API is reached through a TLS gateway (Cloudflare Tunnel /
+  // nginx TLS proxy) that terminates TLS and forwards to :80. The header
+  // passes through the gateway to the browser and pins HTTPS for the
+  // exposed hostname. (Ignored by browsers when received over plain HTTP —
+  // harmless on the isolated LAN path.)
+  http.sendHeader("Strict-Transport-Security", "max-age=31536000");
+#endif
 }
 
 inline void sendSuccess(const String& message, const String& dataJson = "{}") {
@@ -65,6 +74,19 @@ inline void sendError(int code, const String& message) {
 }
 
 inline bool requireAuth() { return Services::auth.checkAuth(http); }
+// [audit p.489 REMEDIATION] Role-gated auth for EVERY mutation endpoint:
+// 401 when not authenticated, 403 when authenticated but the token's role
+// claim does not carry the required capability. Tokens without a role claim
+// resolve to viewer (least privilege) — see Utils::jwtVerify.
+inline bool requireRole(const char* role) {
+  if (Services::auth.checkAuthRole(http, role)) return true;
+  if (!Services::auth.checkAuth(http)) {
+    sendError(401, "Unauthorized");
+  } else {
+    sendError(403, String("Forbidden — this endpoint requires the '") + role + "' role");
+  }
+  return false;
+}
 inline bool requireCsrf() {
   if (!Services::auth.checkCsrfToken(http)) {
     sendError(403, "Invalid CSRF token");

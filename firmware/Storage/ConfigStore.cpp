@@ -294,13 +294,30 @@ void ConfigStore::loadDeviceConfig() {
 #endif
 }
 
-void ConfigStore::saveDeviceConfig() {
+// [STORAGE-GATE-04 / audit p.491] Checked persistence — begin() failure and
+// every short write are reported; the caller MUST surface false (REST 500 /
+// mutation FAILED + RAM rollback). Previously void + unchecked, so a failed
+// NVS write was logged as "Device config saved".
+bool ConfigStore::saveDeviceConfig() {
   Preferences p;
-  p.begin(Core::NVS_NAMESPACE, false);
-  p.putString("name", Core::deviceName);
-  p.putString("tz", Core::cfgTimezone);
+  if (!p.begin(Core::NVS_NAMESPACE, false)) {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: namespace open failed — device config NOT saved", 0);
+    return false;
+  }
+  bool ok = true;
+  // putString returns the number of bytes written; char[] fields compare
+  // against strlen (they are fixed buffers, not Arduino Strings).
+  ok &= p.putString("name", Core::deviceName) == strlen(Core::deviceName);
+  ok &= p.putString("tz", Core::cfgTimezone)  == strlen(Core::cfgTimezone);
   p.end();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Device config saved", 0);
+  if (ok) {
+    Services::Log.append(Core::LogType::ConfigurationChanged, "Device config saved", 0);
+  } else {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: device config short-write — NOT saved, durability degraded", -1);
+  }
+  return ok;
 }
 
 // ============================================================================
@@ -462,22 +479,36 @@ void ConfigStore::loadAlarmConfig() {
     Core::cfgAlarmSocLowCriticalPct = Core::ALARM_SOC_LOW_CRITICAL_PCT;
 }
 
-void ConfigStore::saveAlarmConfig() {
+// [STORAGE-GATE-04 / audit p.491] Alarm thresholds are SAFETY POLICY —
+// begin() failure or any short write returns false so the caller fails the
+// mutation and rolls RAM back. Previously void + always logged "saved".
+bool ConfigStore::saveAlarmConfig() {
   Preferences p;
-  p.begin("plts_alarm", false);
-  p.putFloat("vLoW", Core::cfgAlarmVoltageLowWarnV);
-  p.putFloat("vLoC", Core::cfgAlarmVoltageLowCriticalV);
-  p.putFloat("vHiW", Core::cfgAlarmVoltageHighWarnV);
-  p.putFloat("vHiC", Core::cfgAlarmVoltageHighCriticalV);
-  p.putFloat("iW",   Core::cfgAlarmCurrentHighWarnA);
-  p.putFloat("iC",   Core::cfgAlarmCurrentHighCriticalA);
-  p.putFloat("tW",   Core::cfgAlarmTemperatureHighWarnC);
-  p.putFloat("tC",   Core::cfgAlarmTemperatureHighCriticalC);
-  p.putFloat("hW",   Core::cfgAlarmHumidityHighWarnPct);
-  p.putFloat("socW", Core::cfgAlarmSocLowWarnPct);
-  p.putFloat("socC", Core::cfgAlarmSocLowCriticalPct);
+  if (!p.begin("plts_alarm", false)) {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: plts_alarm open failed — alarm config NOT saved", 0);
+    return false;
+  }
+  bool ok = true;
+  ok &= p.putFloat("vLoW", Core::cfgAlarmVoltageLowWarnV)        == sizeof(float);
+  ok &= p.putFloat("vLoC", Core::cfgAlarmVoltageLowCriticalV)    == sizeof(float);
+  ok &= p.putFloat("vHiW", Core::cfgAlarmVoltageHighWarnV)       == sizeof(float);
+  ok &= p.putFloat("vHiC", Core::cfgAlarmVoltageHighCriticalV)   == sizeof(float);
+  ok &= p.putFloat("iW",   Core::cfgAlarmCurrentHighWarnA)       == sizeof(float);
+  ok &= p.putFloat("iC",   Core::cfgAlarmCurrentHighCriticalA)   == sizeof(float);
+  ok &= p.putFloat("tW",   Core::cfgAlarmTemperatureHighWarnC)   == sizeof(float);
+  ok &= p.putFloat("tC",   Core::cfgAlarmTemperatureHighCriticalC) == sizeof(float);
+  ok &= p.putFloat("hW",   Core::cfgAlarmHumidityHighWarnPct)    == sizeof(float);
+  ok &= p.putFloat("socW", Core::cfgAlarmSocLowWarnPct)          == sizeof(float);
+  ok &= p.putFloat("socC", Core::cfgAlarmSocLowCriticalPct)      == sizeof(float);
   p.end();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Alarm config saved", 0);
+  if (ok) {
+    Services::Log.append(Core::LogType::ConfigurationChanged, "Alarm config saved", 0);
+  } else {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: alarm config short-write — NOT saved (safety policy unchanged on disk)", -1);
+  }
+  return ok;
 }
 
 #if PLTS_ENABLE_EMERGENCY
@@ -526,24 +557,39 @@ void ConfigStore::loadEmergencyConfig() {
   if (Core::cfgEmgSensorFailPolicy > 1)                          Core::cfgEmgSensorFailPolicy = Core::EMG_SENSOR_FAIL_POLICY;
 }
 
-void ConfigStore::saveEmergencyConfig() {
+// [STORAGE-GATE-04 / audit p.491] Emergency trigger thresholds are SAFETY
+// POLICY — begin() failure or any short write returns false so the caller
+// fails the mutation and rolls RAM back. Previously void + always logged
+// "saved".
+bool ConfigStore::saveEmergencyConfig() {
   Preferences p;
-  p.begin("plts_emg", false);
-  p.putFloat("vLow",  Core::cfgEmgVbatLowV);
-  p.putFloat("vLowH", Core::cfgEmgVbatLowHystV);
-  p.putFloat("vHi",   Core::cfgEmgVbatHighV);
-  p.putFloat("vHiH",  Core::cfgEmgVbatHighHystV);
-  p.putFloat("iDc",   Core::cfgEmgIDcOverA);
-  p.putFloat("iAcL",  Core::cfgEmgIAcLoadOverA);
-  p.putFloat("iAcG",  Core::cfgEmgIAcGenOverA);
-  p.putUChar("deb",   Core::cfgEmgDebounceN);
-  p.putULong("rec",   Core::cfgEmgRecoverySec);
-  p.putUChar("rlyPin", Core::cfgEmgRelayPin);
-  p.putChar("ePin",   Core::cfgEmgEstopPin);
-  p.putUChar("eEn",   Core::cfgEmgEstopEnabled);
-  p.putUChar("sfp",   Core::cfgEmgSensorFailPolicy);
+  if (!p.begin("plts_emg", false)) {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: plts_emg open failed — emergency config NOT saved", 0);
+    return false;
+  }
+  bool ok = true;
+  ok &= p.putFloat("vLow",  Core::cfgEmgVbatLowV)       == sizeof(float);
+  ok &= p.putFloat("vLowH", Core::cfgEmgVbatLowHystV)    == sizeof(float);
+  ok &= p.putFloat("vHi",   Core::cfgEmgVbatHighV)       == sizeof(float);
+  ok &= p.putFloat("vHiH",  Core::cfgEmgVbatHighHystV)   == sizeof(float);
+  ok &= p.putFloat("iDc",   Core::cfgEmgIDcOverA)        == sizeof(float);
+  ok &= p.putFloat("iAcL",  Core::cfgEmgIAcLoadOverA)    == sizeof(float);
+  ok &= p.putFloat("iAcG",  Core::cfgEmgIAcGenOverA)     == sizeof(float);
+  ok &= p.putUChar("deb",   Core::cfgEmgDebounceN)       == 1;
+  ok &= p.putULong("rec",   Core::cfgEmgRecoverySec)     == sizeof(unsigned long);
+  ok &= p.putUChar("rlyPin", Core::cfgEmgRelayPin)       == 1;
+  ok &= p.putChar("ePin",   Core::cfgEmgEstopPin)        == 1;
+  ok &= p.putUChar("eEn",   Core::cfgEmgEstopEnabled)    == 1;
+  ok &= p.putUChar("sfp",   Core::cfgEmgSensorFailPolicy) == 1;
   p.end();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Emergency config saved", 0);
+  if (ok) {
+    Services::Log.append(Core::LogType::ConfigurationChanged, "Emergency config saved", 0);
+  } else {
+    Services::Log.append(Core::LogType::Custom,
+                         "NVS FAILURE: emergency config short-write — NOT saved (safety policy unchanged on disk)", -1);
+  }
+  return ok;
 }
 #endif
 
@@ -722,6 +768,10 @@ bool ConfigStore::importAll(const String& json) {
   DynamicJsonDocument doc(8192);
   if (deserializeJson(doc, json)) return false;
   if (!Utils::verifyCRC(doc)) return false;
+  // [audit p.491] Import is fail-closed on persistence: any failed NVS save
+  // marks the whole import FAILED so the operator knows the restore is
+  // incomplete (the RAM copy stays sanitized by write-then-reload below).
+  bool importOk = true;
   if (doc.containsKey("deviceName")) {
     const char* n = doc["deviceName"];
     if (n) { strncpy(Core::deviceName, n, 39); Core::deviceName[39] = '\0'; }
@@ -740,7 +790,7 @@ bool ConfigStore::importAll(const String& json) {
     Core::cfgFullChargeCurrentThreshold  = b["endA"]       | Core::FULL_CHARGE_CURRENT_THRESHOLD_A;
     Core::cfgFullChargePersistenceSec    = b["persistS"]   | Core::FULL_CHARGE_PERSISTENCE_SEC;
     Core::cfgTelemetryIntervalSec        = b["telS"]       | Core::cfgTelemetryIntervalSec;
-    saveBatteryConfig();
+    if (!saveBatteryConfig()) importOk = false;
   }
   // [PARITY-4] alarm threshold backup/restore. Range-sanitized through the
   // SAME validator as loadAlarmConfig by write-then-reload: apply values,
@@ -759,12 +809,14 @@ bool ConfigStore::importAll(const String& json) {
     if (a.containsKey("humidityHighWarn"))        Core::cfgAlarmHumidityHighWarnPct    = a["humidityHighWarn"];
     if (a.containsKey("socLowWarn"))              Core::cfgAlarmSocLowWarnPct          = a["socLowWarn"];
     if (a.containsKey("socLowCritical"))          Core::cfgAlarmSocLowCriticalPct      = a["socLowCritical"];
-    saveAlarmConfig();
+    if (!saveAlarmConfig()) importOk = false;
     loadAlarmConfig();   // sanitize (ranges + tier order) — see comment above
   }
-  saveDeviceConfig();
-  Services::Log.append(Core::LogType::ConfigurationChanged, "Configuration imported", 0);
-  return true;
+  if (!saveDeviceConfig()) importOk = false;
+  Services::Log.append(Core::LogType::ConfigurationChanged,
+    importOk ? "Configuration imported"
+             : "Configuration imported WITH NVS PERSISTENCE FAILURES — restore incomplete", 0);
+  return importOk;
 }
 
 } // namespace Storage

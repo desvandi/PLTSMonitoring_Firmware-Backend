@@ -193,6 +193,7 @@ void handleDeviceGet() {
 
 void handleDevicePost() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(2048)) return;
   String raw = http.arg("plain");
@@ -235,6 +236,19 @@ void handleDevicePost() {
     http.send(200, "application/json; charset=utf-8", d.previousAckJson);
     return;
   }
+  // [audit p.491] Pre-commit snapshot — a failed NVS write rolls the device
+  // identity fields back instead of reporting success for a change that a
+  // reboot would silently revert.
+  char oldDeviceName[64];
+  strncpy(oldDeviceName, Core::deviceName, sizeof(oldDeviceName) - 1);
+  oldDeviceName[sizeof(oldDeviceName) - 1] = '\0';
+  char oldSiteName[64];
+  strncpy(oldSiteName, Core::siteName, sizeof(oldSiteName) - 1);
+  oldSiteName[sizeof(oldSiteName) - 1] = '\0';
+  char oldTimezone[40];
+  strncpy(oldTimezone, Core::cfgTimezone, sizeof(oldTimezone) - 1);
+  oldTimezone[sizeof(oldTimezone) - 1] = '\0';
+
   bool changed = false;
   if (doc.containsKey("deviceName")) {
     const char* n = doc["deviceName"];
@@ -248,7 +262,18 @@ void handleDevicePost() {
     const char* t = doc["timezone"];
     if (t && strlen(t) > 0) { strncpy(Core::cfgTimezone, t, 39); Core::cfgTimezone[39] = '\0'; changed = true; }
   }
-  if (changed) Storage::config.saveDeviceConfig();
+  if (changed && !Storage::config.saveDeviceConfig()) {
+    // [audit p.491] FAIL-CLOSED: roll RAM back to the durable state and
+    // surface the persistence failure — never "Device config updated".
+    strncpy(Core::deviceName, oldDeviceName, sizeof(Core::deviceName) - 1);
+    Core::deviceName[sizeof(Core::deviceName) - 1] = '\0';
+    strncpy(Core::siteName, oldSiteName, sizeof(Core::siteName) - 1);
+    Core::siteName[sizeof(Core::siteName) - 1] = '\0';
+    strncpy(Core::cfgTimezone, oldTimezone, sizeof(Core::cfgTimezone) - 1);
+    Core::cfgTimezone[sizeof(Core::cfgTimezone) - 1] = '\0';
+    sendError(500, "device config NOT saved — NVS persistence FAILED; RAM rolled back to previous values");
+    return;
+  }
   String ack = "{\"success\":true,\"message\":\"Device config updated\",\"data\":{\"updated\":" +
                String(changed ? "true" : "false") + "}}";
   Services::journal.storeTransaction(canon.transactionId, canon.commandHash, ack);
@@ -262,6 +287,7 @@ void handleDevicePost() {
 // ---------------------------------------------------------------------------
 void handlePasswordPost() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(2048)) return;
   String raw = http.arg("plain");
@@ -368,6 +394,7 @@ void handleExport() {
 
 void handleImport() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(Core::HTTP_MAX_BODY_SIZE * 2)) return;
   String raw = http.arg("plain");

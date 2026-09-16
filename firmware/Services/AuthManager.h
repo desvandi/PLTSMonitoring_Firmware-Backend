@@ -47,6 +47,11 @@ class AuthManager {
 public:
   void begin();
   bool checkAuth(WebServer& server);
+  // [audit p.489 REMEDIATION] Authentication + AUTHORIZATION: verifies the
+  // JWT AND its role claim against the required capability. Tokens without
+  // a role claim resolve to "viewer" (least privilege, fail-closed) in
+  // Utils::jwtVerify — mutation endpoints enforce "operator" here.
+  bool checkAuthRole(WebServer& server, const char* requiredRole);
   bool checkCsrfToken(WebServer& server);
 
   // [P0-004] Per-IP rate limiting (packed IPv4, monotonic window).

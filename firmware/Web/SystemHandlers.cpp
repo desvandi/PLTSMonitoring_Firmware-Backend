@@ -17,6 +17,7 @@ namespace SystemHandlers {
 
 void handleReboot() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   sendSuccess("Rebooting", "{}");
   delay(500);
@@ -25,6 +26,7 @@ void handleReboot() {
 
 void handleFactoryResetPrepare() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   String token = Services::auth.prepareFactoryReset();
   // [AUDIT 2026-09 ROUND 11 / p.476] Empty string = fail-closed refusal
@@ -40,6 +42,7 @@ void handleFactoryResetPrepare() {
 
 void handleFactoryResetConfirm() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(1024)) return;
   String raw = http.arg("plain");

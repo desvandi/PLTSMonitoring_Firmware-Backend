@@ -285,6 +285,10 @@ function webPushSend_(subscription, payloadObj, urgency) {
  */
 function sendAlarmToAll(alarm) {
   var payload = normalizeAlarm_(alarm);
+  // [audit p.482 REMEDIATION] Setiap notifikasi membawa capability token ACK
+  // terikat alarm ini (HMAC, bucket 6 jam) — dikirim terenkripsi end-to-end
+  // oleh push service, dan menjadi SATU-SATUNYA otorisasi aksi "ackAlarm".
+  payload.ackToken = makeAckToken_(payload.id);
   logAlarmEvent_(payload, alarm);
   var subs = getSubscriptions_();
   var sent = 0, failed = 0, removed = 0;
@@ -377,6 +381,68 @@ function normalizeAlarm_(alarm) {
   };
 }
 
+/* ======================= [audit p.482] ACK Capability Token ======================= */
+
+/**
+ * [AUDIT p.482 REMEDIATION 2026-09] aksi "ackAlarm" adalah MUTASI STATE,
+ * tetapi sebelumnya hanya divalidasi terhadap alarmId — siapa pun yang
+ * mengetahui URL Web App + ID alarm bisa mengirim ACK palsu. Kini setiap
+ * alarm yang dikirim membawa `ackToken` = HMAC-SHA256(ACK_SECRET,
+ * alarmId + '|' + bucket-waktu) dan doPost MENOLAK ACK tanpa token valid.
+ *
+ * - Secret: Script Property PUSH_ACK_SECRET (auto-provision 64-hex saat
+ *   pertama kali dibutuhkan; rotasi manual cukup ganti property).
+ * - Masa berlaku: bucket 6 jam; verifikasi menerima bucket saat ini +
+   *   sebelumnya (≈12 jam jendela) — cukup untuk alarm interaktif.
+ * - Jalur legacy tanpa token HANYA aktif bila Script Property
+ *   PUSH_ACK_ALLOW_LEGACY === 'true' (default: closed).
+ */
+var ACK_TOKEN_BUCKET_MS = 6 * 60 * 60 * 1000;   // 6 jam per bucket
+
+function getAckSecret_() {
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty('PUSH_ACK_SECRET');
+  if (!secret) {
+    // Auto-provision (CSPRNG milik Apps Script) — sekali per deployment.
+    secret = Utilities.getUuid().replace(/-/g, '') +
+             Utilities.getUuid().replace(/-/g, '');
+    props.setProperty('PUSH_ACK_SECRET', secret);
+  }
+  return secret;
+}
+
+function ackTokenBucket_(shift) {
+  shift = shift || 0;
+  return Math.floor(Date.now() / ACK_TOKEN_BUCKET_MS) - shift;
+}
+
+function computeAckToken_(alarmId, bucket) {
+  var sig = Utilities.computeHmacSha256Signature(
+    String(alarmId) + '|' + String(bucket), getAckSecret_());
+  return sig.map(function (b) {
+    return ('0' + (b & 0xff).toString(16)).slice(-2);
+  }).join('');
+}
+
+/** Token utk alarm ini pada bucket berjalan (ditempel ke payload push). */
+function makeAckToken_(alarmId) {
+  return computeAckToken_(alarmId, ackTokenBucket_(0));
+}
+
+/** Validasi token: cocok untuk bucket sekarang ATAU sebelumnya. */
+function verifyAckToken_(alarmId, token) {
+  if (!alarmId || typeof token !== 'string' || token.length === 0) return false;
+  var current = computeAckToken_(alarmId, ackTokenBucket_(0));
+  var previous = computeAckToken_(alarmId, ackTokenBucket_(1));
+  var a = String(token).toLowerCase();
+  return a === current || a === previous;
+}
+
+function ackLegacyAllowed_() {
+  return String(PropertiesService.getScriptProperties()
+    .getProperty('PUSH_ACK_ALLOW_LEGACY') || '') === 'true';
+}
+
 /* ======================= Handler HTTP Web App ======================= */
 
 function jsonOut_(obj) {
@@ -447,6 +513,18 @@ function doPost(e) {
   }
 
   if (body.action === 'ackAlarm') {
+    // [audit p.482 REMEDIATION] ACK wajib membawa capability token valid yang
+    // diterbitkan bersama notifikasi alarm yang sama. Tanpa token, ACK palsu
+    // dari pihak yang hanya mengetahui URL + alarmId DITOLAK (fail-closed).
+    // Jalur legacy tanpa token hanya aktif bila operator eksplisit mengatur
+    // Script Property PUSH_ACK_ALLOW_LEGACY='true' (untuk jendela migrasi).
+    if (!verifyAckToken_(body.alarmId, body.ackToken) && !ackLegacyAllowed_()) {
+      return jsonOut_({
+        ok: false,
+        message: 'ACK ditolak: capability token tidak valid / tidak disertakan. ' +
+                 'Gunakan aksi "Tandai Ditangani" pada notifikasi (token terbit otomatis).'
+      });
+    }
     var ackRes = markAlarmAcknowledged_(body.alarmId);
     if (!ackRes.found) {
       return jsonOut_({ ok: false, message: 'Alarm tidak ditemukan: ' + body.alarmId });
@@ -806,7 +884,9 @@ function getLatestAlarm_() {
   for (var i = log.length - 1; i >= 0; i--) {
     if (!log[i].clearedAt && log[i].sensor) {
       // Kembalikan HANYA field skema payload (konsistensi dua arah).
-      return {
+      // [audit p.482] Token dihitung SEGAR saat dibaca (fallback push ini
+      // bisa terjadi berjam-jam setelah alarm dicatat).
+      var out = {
         id: log[i].id,
         title: log[i].title,
         body: log[i].body,
@@ -816,6 +896,8 @@ function getLatestAlarm_() {
         timestamp: log[i].timestamp,
         requireInteraction: log[i].severity === 'critical'
       };
+      out.ackToken = makeAckToken_(out.id);
+      return out;
     }
   }
   return null;

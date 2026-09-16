@@ -212,6 +212,31 @@ bool AuthManager::checkAuth(WebServer& server) {
   return false;
 }
 
+bool AuthManager::checkAuthRole(WebServer& server, const char* requiredRole) {
+  // [audit p.489 REMEDIATION] The DEVICE-side authorization boundary.
+  // Previously every dangerous endpoint (reboot, factory reset, config,
+  // calibration, relay, OTA, password, import) stopped at checkAuth() —
+  // ANY valid JWT controlled everything, and the role model existed only
+  // in the PWA. Now the JWT itself carries the role claim and the device
+  // enforces it: a viewer-scoped token can never mutate the device no
+  // matter what the PWA UI allows.
+  if (!_authReady) return false;
+  if (requiredRole == nullptr || requiredRole[0] == '\0') return false;
+  if (!server.hasHeader("Authorization")) return false;
+  String h = server.header("Authorization");
+  if (!h.startsWith("Bearer ")) return false;
+  String token = h.substring(7);
+  String user, role;
+  if (!Utils::jwtVerify(token, String(Core::jwtSecret), user, role)) return false;
+  // Constant-time comparison — same discipline as the CSRF check.
+  size_t reqLen = strlen(requiredRole);
+  if (role.length() != reqLen) return false;
+  return Utils::constantTimeMemEquals(
+    (const volatile uint8_t*)role.c_str(),
+    (const volatile uint8_t*)requiredRole,
+    reqLen);
+}
+
 // ---------------------------------------------------------------------------
 // [P0-004] Per-IP rate limiting — slot management
 // ---------------------------------------------------------------------------
@@ -328,7 +353,9 @@ uint8_t AuthManager::trackedIpCount() const {
 String AuthManager::issueAccessToken(const String& username) {
   if (!_authReady) return String();   // NOT_READY — never sign
   // [P0-003] per-device NVS-provisioned secret.
-  return Utils::jwtSign(username, String(Core::jwtSecret), Core::JWT_ACCESS_TTL_SEC);
+  // [audit p.489] The web account login issues an OPERATOR token (explicit
+  // for documentation — the single admin account model).
+  return Utils::jwtSign(username, String(Core::jwtSecret), Core::JWT_ACCESS_TTL_SEC, "operator");
 }
 
 int AuthManager::_findRefreshSlot() {
