@@ -165,3 +165,61 @@ scripts/native/run-native-tests.sh → ALL NATIVE HARNESS GREEN
 Kontrak GAS K-7 lengkapan operator: token yang dipakai PWA saat mendaftar
 push adalah token perangkat AKTIF (sama dengan yang dipakai firmware untuk
 `ingest`) — pastikan `FW_DEVICE_TOKEN`/`FW_DEVICE_TOKENS` memuatnya.
+
+---
+
+## Putaran 2026-09-16 (P0-2, P0-3, P1 push hardening, p.493 backend)
+
+### P0-2 — Unifikasi kontrak push ke canonical GAS
+- `code.gs/PushService.gs` BARU: modul Web Push pada backend CANONICAL —
+  SATU trust boundary untuk telemetry + push. Aksi baru di dispatcher:
+  `PUSH_SUBSCRIBE` / `PUSH_UNSUBSCRIBE` / `PUSH_ACK` (push-scoped token,
+  p.493), `PUSH_ALARM_INGEST` (auth canonical: HMAC ATAU token — kontrak
+  sensor identik legacy), `PUSH_TEST` (ADMIN token — tanpa jalur publik),
+  `PUSH_STATUS` (observability).
+- `code.gs/Code.gs`: hook `pushEvaluateEmergency_` pada recordTelemetry_
+  (DI LUAR lock telemetry; kegagalan push tidak pernah menggagalkan
+  telemetry) — tepi TRIP/SAFE emergency menjadi AlarmEvent critical.
+- `push-alarm/gas/Code.gs`: ditandai LEGACY (jalur migrasi) + hardening
+  penuh (lihat bawah). Target arsitektur: ESP32 → canonical GAS → alarm
+  state → PushService → PWA.
+
+### P0-3 — Outbox AlarmEvent durable (kedua backend)
+- Model: AlarmEvent { eventId, deviceId, alarmCode, generation, raisedAt,
+  clearedAt, state, delivery{status, attempts, lastAttemptAt, ...} }.
+- Urutan DURABLE-FIRST: event disimpan PENDING DULU → push dikirim →
+  status delivery diperbarui. Kegagalan → PENDING → retry backoff
+  eksponensial (maks 6 percobaan, umur 24 jam → EXPIRED jujur).
+- Menutup dua failure mode auditor: (a) push terkirim tapi state gagal
+  disimpan → duplikat; (b) state tersimpan tapi push gagal → notifikasi
+  hilang diam-diam.
+
+### P1 — Hardening push service
+- **LockService** pada SEMUA mutasi state (subscribe/unsubscribe/ingest/
+  ack/outbox) — disiplin yang sama dengan canonical telemetry.
+- **deviceId binding** pada record langganan (audit fleet: endpoint ↔
+  device ↔ lastSeen); delivery ter-scoped per device (record lama tanpa
+  binding tetap menerima selama migrasi).
+- **Ownership unsubscribe**: hanya record milik device (atau record lama
+  tanpa binding) yang bisa dihapus — device A tidak bisa menghapus
+  langganan device B.
+- **testPush**: GET ditutup default (`TEST_PUSH_ALLOW_PUBLIC='true'`
+  untuk jendela migrasi); POST wajib device.id + token. "Rate limiting
+  adalah mitigasi DoS, bukan authorization."
+- **p.493 backend**: PUSH_TOKENS (Script Property) — kapabilitas langganan
+  SAJA, DITOLAK untuk ingest. Kredensial browser ≠ kredensial firmware.
+- **apiBase pada payload** (getScriptUrl_): SW ACK tidak lagi bergantung
+  konstanta yang tertanam di file.
+
+### P0-4 — Clock authority (kontrak + prosedur)
+- `docs/CLOCK_AUTHORITY_E2E.md` BARU: kontrak otoritas waktu lintas-layer
+  (event_time = otoritas ordering; timeQuality menyertai sampel; sequence
+  independen waktu; DAILY = timezone deployment) + 6 skenario acceptance
+  E2E (T1-T6) pada perangkat nyata dengan bukti ke
+  docs/hardware-acceptance/.
+
+### Verifikasi
+- Audit silang PWA-GAS-FW: **181/181 PASS** (dari 164; kontrak baru K9 =
+  14 asersi: PUSH_TOKENS, deviceId binding, ownership, outbox
+  PENDING/SENT/retry, migrasi localStorage, apiBase payload).
+- Syntax check canonical Code.gs + PushService.gs + legacy Code.gs: OK.

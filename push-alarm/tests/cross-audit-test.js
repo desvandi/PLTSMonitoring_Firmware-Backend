@@ -120,6 +120,17 @@ const pushService = {
 const gasCtx = vm.createContext({
   PropertiesService,
   UrlFetchApp: { fetch: (u, o) => pushService.fetch(u, o) },
+  // [P1 concurrency 2026-09-16] LockService mock — tryLock selalu sukses
+  // (eksekusi serial diuji lewat urutan panggilan, bukan kontensi nyata).
+  LockService: {
+    getScriptLock() {
+      return { tryLock: () => true, releaseLock() {} };
+    }
+  },
+  // [P0-1] ScriptApp.getService().getUrl() — sumber apiBase payload ACK.
+  ScriptApp: {
+    getService() { return { getUrl: () => GAS_URL }; }
+  },
   ContentService: {
     MimeType: { JSON: 'JSON' },
     createTextOutput(t) { return { _text: t, setMimeType() { return this; } }; }
@@ -306,6 +317,15 @@ const pageCtx = vm.createContext({
       removeItem: (k) => m.delete(k)
     };
   })(),
+  // [p.493] sessionStorage — kredensial push kini hidup selama sesi saja.
+  sessionStorage: (() => {
+    const m = new Map();
+    return {
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      removeItem: (k) => m.delete(k)
+    };
+  })(),
   fetch: bridgeFetch,
   AbortController,
   setTimeout,
@@ -330,13 +350,12 @@ vm.runInContext(fs.readFileSync(path.join(PWA, 'js', 'push-manager.js'), 'utf8')
   pageCtx, { filename: 'push-manager.js' });
 const AlarmPushManager = pageCtx.module.exports;
 
-// [SELF-AUDIT 2026-09-16] Kontrak GAS K-7: subscribe/unsubscribe kini WAJIB
-// membawa device.id + token (GAS memvalidasinya terhadap FW_DEVICE_TOKEN,
-// diprovision di atas). Seed kredensial yang sama ke localStorage mock
-// PWA — persis jalur operator nyata ('push.deviceId' / 'push.deviceToken'
-// atau APP_CONFIG.DEVICE_ID / DEVICE_TOKEN).
-pageCtx.localStorage.setItem('push.deviceId', DEVICE_ID);
-pageCtx.localStorage.setItem('push.deviceToken', DEVICE_TOKEN);
+// [AUDIT p.493 2026-09-16] Kontrak GAS K-7: subscribe/unsubscribe WAJIB
+// membawa device.id + token. Seed kredensial ke sessionStorage mock PWA
+// (jalur operator baru). Jalur LEGACY localStorage diuji terpisah pada
+// bagian K9 (migrasi sekali-jalan).
+pageCtx.sessionStorage.setItem('push.deviceId', DEVICE_ID);
+pageCtx.sessionStorage.setItem('push.deviceToken', DEVICE_TOKEN);
 
 /* ======================= Muat sw.js (PWA) ======================= */
 
@@ -358,9 +377,9 @@ const swSelf = {
 };
 
 const swSrcRaw = fs.readFileSync(path.join(PWA, 'sw.js'), 'utf8');
-// Substitusi API_BASE persis seperti langkah deployment (README langkah 5).
-const swSrc = swSrcRaw.replace(/const API_BASE =\s*'[^']*';/,
-  "const API_BASE = '" + GAS_URL + "';");
+// [P0-1 2026-09-16] sw.js tidak lagi menanam konstanta API_BASE. Konfigurasi
+// runtime dikirim via postMessage dari halaman — persis jalur app.js baru.
+const swSrc = swSrcRaw;
 
 const cachesMock = {
   async open() {
@@ -383,12 +402,19 @@ const swCtx = vm.createContext({
   console: { log() {} }
 });
 vm.runInContext(swSrc, swCtx, { filename: 'sw.js' });
-vm.runInContext('this.__swApi = { API_BASE: API_BASE };', swCtx, { filename: 'sw-api.js' });
+// [P0-1] Ekpose helper runtime sebagai ganti konstanta API_BASE yang hilang.
+vm.runInContext('this.__swApi = { getApiBase: (typeof getApiBase_ === "function") ? getApiBase_ : null };', swCtx, { filename: 'sw-api.js' });
 const swApi = swCtx.__swApi;
 
-// [SELF-AUDIT 2026-09-16] Kirim kredensial perangkat ke konteks SW — persis
-// yang dilakukan js/app.js pada deployment nyata setelah register(). resubscribe()
-// (pushsubscriptionchange) membutuhkannya demi kontrak GAS K-7.
+// [AUDIT p.493 / P0-1 2026-09-16] Kirim konfigurasi runtime + kredensial
+// perangkat ke konteks SW — persis yang dilakukan js/app.js pada deployment
+// nyata setelah register(). resubscribe() dan ACK membutuhkannya.
+swHandlers.message({
+  data: {
+    type: 'PLTS_PUSH_ALARM_RUNTIME_CONFIG',
+    config: { apiBase: GAS_URL }
+  }
+});
 swHandlers.message({
   data: {
     type: 'PLTS_PUSH_ALARM_DEVICE_CREDENTIALS',
@@ -467,16 +493,16 @@ async function main() {
   // kredensial harus DITOLAK GAS (fail-closed) — membuktikan gerbangnya
   // aktif sebelum membuktikan jalur positifnya.
   {
-    const savedId = pageCtx.localStorage.getItem('push.deviceId');
-    const savedTok = pageCtx.localStorage.getItem('push.deviceToken');
-    pageCtx.localStorage.removeItem('push.deviceId');
-    pageCtx.localStorage.removeItem('push.deviceToken');
+    const savedId = pageCtx.sessionStorage.getItem('push.deviceId');
+    const savedTok = pageCtx.sessionStorage.getItem('push.deviceToken');
+    pageCtx.sessionStorage.removeItem('push.deviceId');
+    pageCtx.sessionStorage.removeItem('push.deviceToken');
     const anon = new AlarmPushManager(GAS_URL, VAPID_PUB);
     const rAnon = await anon.enable();
     check('K1', 'subscribe TANPA device.id+token DITOLAK GAS (K-7)',
       rAnon.ok === false && /perangkat/i.test(String(rAnon.message)));
-    pageCtx.localStorage.setItem('push.deviceId', savedId);
-    pageCtx.localStorage.setItem('push.deviceToken', savedTok);
+    pageCtx.sessionStorage.setItem('push.deviceId', savedId);
+    pageCtx.sessionStorage.setItem('push.deviceToken', savedTok);
   }
   const r1 = await pushMgr.enable();
   check('K1', 'PWA enable() sukses', r1.ok === true && r1.state === 'enabled');
@@ -975,14 +1001,19 @@ async function main() {
     claims.exp > Date.now() / 1000 && claims.exp <= Date.now() / 1000 + 12 * 3600 + 60);
 
   const cfgSrc = fs.readFileSync(path.join(PWA, 'js', 'config.js'), 'utf8');
-  const cfgUrl = /API_BASE:\s*'([^']+)'/.exec(cfgSrc)[1];
-  const swUrlConst = /const API_BASE =\s*'([^']+)'/.exec(swSrcRaw)[1];
-  check('K7', 'API_BASE config.js === API_BASE sw.js', cfgUrl === swUrlConst);
-  check('K7', 'placeholder deployment belum dikonfigurasi (pengingat)',
-    cfgUrl.indexOf('GANTI_DENGAN_ID_DEPLOYMENT_ANDA') >= 0);
-  const cfg = require(path.join(PWA, 'js', 'config.js'));
-  check('K7', 'config.js menyediakan slot VAPID_PUBLIC_KEY',
-    typeof cfg.VAPID_PUBLIC_KEY === 'string' && cfg.VAPID_PUBLIC_KEY.length > 40);
+  // [P0-1 2026-09-16] Template config kini KOSONG (bukan placeholder).
+  // Nilai produksi datang dari build-config.js (env) atau setup runtime.
+  const cfgUrlMatch = /API_BASE:\s*['"]([^'"]*)['"]/.exec(cfgSrc);
+  const cfgUrl = cfgUrlMatch ? cfgUrlMatch[1] : '';
+  check('K7', 'template config.js KOSONG & bebas placeholder (nilai via build/setup)',
+    cfgUrl === '' && cfgSrc.indexOf('GANTI_DENGAN') === -1);
+  check('K7', 'sw.js TIDAK lagi menanam konstanta API_BASE (runtime config)',
+    /const API_BASE\s*=/.test(swSrcRaw) === false);
+  const cfgMod = require(path.join(PWA, 'js', 'config.js'));
+  check('K7', 'config.js menyediakan slot VAPID_PUBLIC_KEY (build-time)',
+    typeof cfgMod.APP_CONFIG.VAPID_PUBLIC_KEY === 'string');
+  check('K7', 'config.js mengekspor status APP_PROVISIONED (kejujuran deployment)',
+    cfgMod.APP_PROVISIONED === false);
   const conv = AlarmPushManager.urlBase64ToUint8Array(VAPID_PUB);
   check('K7', 'konversi base64url -> Uint8Array 65 byte (mekanisme substitusi)',
     conv.length === 65 && conv[0] === 4);
@@ -1002,7 +1033,9 @@ async function main() {
     check('K7', 'decoder menolak mentah base64url & menormalkan dengan benar',
       conv2.length === 65 && Buffer.from(conv2).equals(urlSafeRaw));
   }
-  check('K7', 'titik substitusi API_BASE sw.js berfungsi', swApi.API_BASE === GAS_URL);
+  check('K7', 'getApiBase_() SW menurunkan URL dari runtime config halaman',
+    typeof swApi.getApiBase === 'function' &&
+    (await swApi.getApiBase()) === GAS_URL);
   // Alat verifikasi dapat hidup di dua layout: paket rilis (DL/tools/)
   // atau repo PWA mandiri (DL/pwa-push-alarm/tools/).
   check('K7', 'alat verifikasi deployment tersedia',
@@ -1036,14 +1069,29 @@ async function main() {
   gasProps.set('VAPID_PRIVATE_KEY', VAPID_PRIV);
 
   /* ---------------- K8: Hardening produksi ---------------- */
-  console.log('\n--- K8 Hardening produksi (anti-spam, subjek, TLS) ---');
+  console.log('\n--- K8 Hardening produksi (testPush terautentikasi, subjek, TLS) ---');
 
-  // (a) rate-limit testPush publik
+  // (a0) [P1 hardening 2026-09-16] testPush GET kini DITUTUP default —
+  // "rate limiting adalah mitigasi DoS, bukan authorization".
   const tpMark = pushService.requests.length;
-  const tp1 = gasGet('testPush');
-  check('K8', 'testPush pertama diterima (mengirim push uji)',
+  const tp0 = gasGet('testPush');
+  check('K8', 'testPush GET publik DITOLAK default (auth wajib)',
+    tp0.ok === false && /dinonaktifkan/i.test(tp0.message || ''));
+  check('K8', 'penolakan GET tidak memicu kirim push',
+    pushService.requests.length === tpMark);
+
+  // (a1) testPush POST tanpa kredensial -> DITOLAK
+  const tpAnon = gasPost({ action: 'testPush' });
+  check('K8', 'testPush POST tanpa device.id+token DITOLAK',
+    tpAnon.ok === false && /autentikasi/i.test(tpAnon.message || ''));
+
+  // (a2) testPush POST dengan kredensial -> diterima (rate limit mulai)
+  const tp1 = gasPost({ action: 'testPush',
+    device: { id: DEVICE_ID }, token: DEVICE_TOKEN });
+  check('K8', 'testPush POST terautentikasi diterima (mengirim push uji)',
     tp1.ok === true && pushService.requests.length === tpMark + 1);
-  const tp2 = gasGet('testPush');
+  const tp2 = gasPost({ action: 'testPush',
+    device: { id: DEVICE_ID }, token: DEVICE_TOKEN });
   check('K8', 'testPush kedua dalam interval ditolak (rate-limit)',
     tp2.ok === false && /ditolak/i.test(tp2.message || ''));
   check('K8', 'testPush yang ditolak TIDAK memicu kirim push',
@@ -1051,19 +1099,33 @@ async function main() {
 
   // (b) override interval tidak valid -> fallback konfigurasi (tetap ditolak)
   gasProps.set('TEST_PUSH_MIN_INTERVAL_MS', 'bukan-angka');
-  const tp3 = gasGet('testPush');
+  const tp3 = gasPost({ action: 'testPush',
+    device: { id: DEVICE_ID }, token: DEVICE_TOKEN });
   check('K8', 'interval tidak valid -> fallback konfigurasi (ditolak)',
     tp3.ok === false);
 
   // (c) override 0 = tanpa batas
   gasProps.set('TEST_PUSH_MIN_INTERVAL_MS', '0');
-  const tp4 = gasGet('testPush');
+  const tp4 = gasPost({ action: 'testPush',
+    device: { id: DEVICE_ID }, token: DEVICE_TOKEN });
   check('K8', 'override interval 0 mengizinkan testPush', tp4.ok === true);
 
   // (d) hapus property -> kembali ke konfigurasi default
   gasProps.delete('TEST_PUSH_MIN_INTERVAL_MS');
-  const tp5 = gasGet('testPush');
+  const tp5 = gasPost({ action: 'testPush',
+    device: { id: DEVICE_ID }, token: DEVICE_TOKEN });
   check('K8', 'tanpa property: rate-limit default aktif lagi', tp5.ok === false);
+
+  // (d2) jendela migrasi eksplisit: TEST_PUSH_ALLOW_PUBLIC=true membuka GET.
+  // Reset gerbang rate-limit agar menguji LOGIKA allow-public, bukan jam.
+  gasProps.delete('TEST_PUSH_LAST_AT');
+  gasProps.set('TEST_PUSH_ALLOW_PUBLIC', 'true');
+  const tp6 = gasGet('testPush');
+  check('K8', 'TEST_PUSH_ALLOW_PUBLIC=true membuka GET (jendela migrasi)',
+    tp6.ok === true);
+  gasProps.delete('TEST_PUSH_ALLOW_PUBLIC');
+  const tp7 = gasGet('testPush');
+  check('K8', 'setelah property dihapus, GET kembali tertutup', tp7.ok === false);
 
   // (e) VAPID_SUBJECT override menimpa PUSH_CONFIG.SUBJECT
   const subjOverride = 'mailto:ops-monitoring@farm.example.id';
@@ -1117,11 +1179,126 @@ async function main() {
     check('K8', 'PEM ' + name + ' byte-identik root pki.goog (sidik jari DER)', fpOk);
   }
 
+  /* ---------------- K9: p.493 / P0-3 — push hardening baru ---------------- */
+  console.log('\n--- K9 Push hardening 2026-09-16 (p.493, P0-3, ownership) ---');
+
+  // (a) [p.493] PUSH_TOKENS: token langganan bisa subscribe,
+  //     TIDAK bisa ingest (pemisahan kapabilitas).
+  const PUSH_TOKEN = 'token-push-khusus-langganan-2026';
+  gasProps.set('PUSH_TOKENS',
+    JSON.stringify([{ deviceId: DEVICE_ID, token: PUSH_TOKEN }]));
+  {
+    const savedTok = pageCtx.sessionStorage.getItem('push.deviceToken');
+    pageCtx.sessionStorage.setItem('push.deviceToken', PUSH_TOKEN);
+    const pmPushTok = new AlarmPushManager(GAS_URL, VAPID_PUB);
+    const rPushTok = await pmPushTok.enable();
+    check('K9', 'PUSH_TOKENS diterima untuk subscribe (kapabilitas langganan)',
+      rPushTok.ok === true);
+    check('K9', 'record langganan menyimpan deviceId (binding fleet)',
+      storedSubs().some(function (s) { return s.deviceId === DEVICE_ID; }));
+    pageCtx.sessionStorage.setItem('push.deviceToken', savedTok);
+  }
+  check('K9', 'PUSH_TOKENS DITOLAK untuk ingest (bukan kredensial telemetry)',
+    gasPost({ action: 'ingest', token: PUSH_TOKEN,
+      device: { id: DEVICE_ID },
+      sensors: [{ name: 'Suhu Greenhouse 1', value: 41, unit: 'C' }] }).ok === false);
+  check('K9', 'push token salah tetap ditolak untuk subscribe',
+    gasPost({ action: 'subscribe', device: { id: DEVICE_ID },
+      token: 'salah', endpoint: 'https://push.test.local/x',
+      keys: { p256dh: 'a', auth: 'b' } }).ok === false);
+
+  // (b) [P1 ownership] unsubscribe tidak boleh menghapus langganan device lain
+  const subsBefore = storedSubs().length;
+  gasProps.set('PUSH_TOKENS',
+    JSON.stringify([{ deviceId: DEVICE_ID, token: PUSH_TOKEN },
+      { deviceId: 'esp32-lain', token: 'token-device-lain' }]));
+  const ownedSub = storedSubs().find(function (s) { return s.deviceId === DEVICE_ID; });
+  const crossUnsub = gasPost({ action: 'unsubscribe',
+    device: { id: 'esp32-lain' }, token: 'token-device-lain',
+    endpoint: ownedSub ? ownedSub.endpoint : 'https://push.test.local/tidak-ada' });
+  check('K9', 'unsubscribe device lain TIDAK menghapus langganan device ini',
+    crossUnsub.ok === true && storedSubs().length === subsBefore);
+
+  // (c) [P0-3] Outbox durable: edge alarm menghasilkan AlarmEvent dengan
+  //     status delivery, dan kegagalan pengiriman tetap PENDING untuk retry.
+  gasProps.delete('PUSH_TOKENS');
+  const evMark = JSON.parse(gasProps.get('ALARM_EVENTS') || '[]').length;
+  const rRaise = gasPost(fwReport([
+    { name: 'Suhu Greenhouse 1', value: 42.0, unit: 'C', alarm: true, severity: 'critical' },
+    S_HUM(70, false), S_SOIL(50, false)
+  ], fwT()));
+  let events = JSON.parse(gasProps.get('ALARM_EVENTS') || '[]');
+  check('K9', 'tepi naik membuat AlarmEvent baru di outbox',
+    rRaise.ok === true && events.length === evMark + 1);
+  const lastEv = events[events.length - 1];
+  check('K9', 'AlarmEvent membawa identitas durable (eventId/deviceId/generation)',
+    typeof lastEv.eventId === 'string' && lastEv.eventId.indexOf('ALM-') === 0 &&
+    lastEv.deviceId === DEVICE_ID && lastEv.generation >= 1);
+  check('K9', 'pengiriman sukses tercatat SENT di outbox',
+    lastEv.delivery && lastEv.delivery.status === 'SENT' &&
+    lastEv.delivery.attempts === 1);
+
+  // (c2) Kegagalan total -> PENDING; setelah backoff jatuh tempo -> retry.
+  // (Laporan juga memulihkan suhu dari (c), jadi event RSV ikut tercipta —
+  // pilih event RAISED kelembapan-udara secara eksplisit, bukan events[last].)
+  pushService.setNextStatus(500);
+  gasPost(fwReport([
+    { name: 'Kelembapan Udara', value: 20, unit: '%', alarm: true, severity: 'warning' },
+    S_TEMP(30, false), S_SOIL(50, false)
+  ], fwT()));
+  events = JSON.parse(gasProps.get('ALARM_EVENTS') || '[]');
+  let failEv = null;
+  for (const ev of events) {
+    if (ev.state === 'RAISED' && ev.alarmCode === 'kelembapan-udara') failEv = ev;
+  }
+  check('K9', 'kegagalan pengiriman -> event tetap PENDING (tidak hilang)',
+    !!failEv && failEv.delivery.status === 'PENDING' && failEv.delivery.attempts === 1);
+  // Paksa backoff jatuh tempo (lastAttemptAt digeser 10 menit ke belakang),
+  // lalu ingest netral -> retry event PENDING terjadi.
+  events = JSON.parse(gasProps.get('ALARM_EVENTS') || '[]');
+  for (const ev of events) {
+    if (ev.delivery && ev.delivery.status === 'PENDING' && ev.delivery.lastAttemptAt) {
+      ev.delivery.lastAttemptAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    }
+  }
+  gasProps.set('ALARM_EVENTS', JSON.stringify(events));
+  const retryBefore = events.filter(function (e) { return e.delivery.status === 'PENDING'; }).length;
+  gasPost(fwReport([S_TEMP(30, false), S_HUM(70, false), S_SOIL(50, false)], fwT()));
+  events = JSON.parse(gasProps.get('ALARM_EVENTS') || '[]');
+  const retryAfter = events.filter(function (e) { return e.delivery.status === 'PENDING'; }).length;
+  check('K9', 'event PENDING di-retry setelah backoff jatuh tempo',
+    retryAfter < retryBefore);
+
+  // (d) [p.493] Migrasi sekali-jalan: kredensial lama di localStorage
+  //     dipindah ke sessionStorage lalu localStorage dibersihkan.
+  pageCtx.sessionStorage.removeItem('push.deviceId');
+  pageCtx.sessionStorage.removeItem('push.deviceToken');
+  pageCtx.localStorage.setItem('push.deviceId', DEVICE_ID);
+  pageCtx.localStorage.setItem('push.deviceToken', DEVICE_TOKEN);
+  {
+    const pmLegacy = new AlarmPushManager(GAS_URL, VAPID_PUB);
+    const creds = pmLegacy._deviceCredentials();
+    check('K9', 'migrasi: kredensial terbaca dari jalur baru (sessionStorage)',
+      creds && creds.deviceId === DEVICE_ID && creds.token === DEVICE_TOKEN);
+    check('K9', 'migrasi: localStorage dibersihkan dari kredensial',
+      pageCtx.localStorage.getItem('push.deviceId') === null &&
+      pageCtx.localStorage.getItem('push.deviceToken') === null);
+    check('K9', 'migrasi: nilai tersimpan di sessionStorage',
+      pageCtx.sessionStorage.getItem('push.deviceId') === DEVICE_ID);
+  }
+
+  // (e) [P0-1] Payload push membawa apiBase (ACK SW tidak lagi bergantung
+  //     konstanta sw.js).
+  const lastReq = pushService.requests[pushService.requests.length - 1];
+  const lastPayload = decryptRequest(lastReq);
+  check('K9', 'payload push membawa apiBase untuk ACK SW',
+    lastPayload.apiBase === GAS_URL);
+
   /* ---------------- Ringkasan ---------------- */
   console.log('\n==============================================================');
   console.log(' RINGKASAN PER KONTRAK (Tabel 11)');
   console.log('==============================================================');
-  const order = ['K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8'];
+  const order = ['K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'];
   const names = {
     K1: 'Langganan (PWA-GAS)',
     K2: 'Penghapusan (PWA-GAS)',
@@ -1130,7 +1307,8 @@ async function main() {
     K5: 'Deep-link (PWA internal)',
     K6: 'Ambang alarm (FW-GAS)',
     K7: 'Kunci VAPID (GAS-PWA)',
-    K8: 'Hardening produksi'
+    K8: 'Hardening produksi',
+    K9: 'Push hardening p.493/P0-3'
   };
   for (const k of order) {
     const t = tally[k] || { pass: 0, fail: 0 };

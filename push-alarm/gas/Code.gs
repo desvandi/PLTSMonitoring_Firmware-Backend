@@ -1,6 +1,15 @@
 /**
  * Code.gs (= PushService) - Modul pengirim Web Push (VAPID) untuk GAS.
  * =======================================================================
+ * [ARSITEKTUR 2026-09-16 — audit P0-2] File ini adalah backend push LEGACY
+ * (deployment standalone). Target arsitektur akhir adalah SATU trust
+ * boundary canonical: ESP32 → canonical GAS (code.gs/Code.gs, HMAC) →
+ * alarm state → PushService → PWA. Backend canonical kini memiliki modul
+ * push setara (code.gs/PushService.gs — aksi PUSH_SUBSCRIBE / PUSH_
+ * UNSUBSCRIBE / PUSH_ACK / PUSH_ALARM_INGEST dengan autentikasi + outbox
+ * yang sama). Deployment BARU sebaiknya memakai canonical; file ini
+ * dipertahankan untuk migrasi dan hardening deployment yang masih berjalan.
+ *
  * File ini identik dengan PushService.gs pada rilis paket - hanya nama
  * filenya mengikuti konvensi Apps Script (Code.gs). Pasangan file:
  * WebPushCore.gs (tempel sebagai file terpisah di proyek GAS). File ini
@@ -12,13 +21,21 @@
  *  2. GAS -> Project Settings -> Script Properties, tambahkan:
  *       VAPID_PUBLIC_KEY  = <public key base64url>
  *       VAPID_PRIVATE_KEY = <private key base64url>   (RAHASIA)
+ *       PUSH_TOKENS       = [{"deviceId":"...","token":"..."}]  (p.493:
+ *                            token khusus subscribe/unsubscribe/testPush;
+ *                            TIDAK bisa dipakai untuk ingest)
  *     Opsional (Script Properties tambahan):
  *       VAPID_SUBJECT             = kontak pengirim (mailto: atau https:)
  *                                    menimpa PUSH_CONFIG.SUBJECT.
- *       TEST_PUSH_MIN_INTERVAL_MS = jeda minimal antar testPush publik
- *                                    (default 60000; 0 = tanpa batas).
+ *       TEST_PUSH_MIN_INTERVAL_MS = jeda minimal antar testPush (default
+ *                                    60000; 0 = tanpa batas).
+ *       TEST_PUSH_ALLOW_PUBLIC    = 'true' untuk mengizinkan testPush GET
+ *                                    tanpa autentikasi (default: CLOSED —
+ *                                    rate limit bukan authorization).
  *  3. Deploy Web App: Execute as "Me", Access "Anyone".
- *  4. Salin URL deployment ke js/config.js PWA (API_BASE) dan sw.js.
+ *  4. Salin URL deployment ke env PUSH_API_BASE Vercel project
+ *     plts-monitor-push-alarm (build via tools/build-config.js) atau ke
+ *     layar setup runtime PWA.
  *
  * API UTAMA (dipanggil handler firmware/data sensor Anda):
  *  sendAlarmToAll(alarm) - kirim push alarm ke semua perangkat langganan.
@@ -79,6 +96,18 @@ var PUSH_CONFIG = {
 
   // Batas jumlah sensor per laporan firmware (PWA merender maks 24):
   MAX_SENSORS_PER_REPORT: 24,
+
+  // [AUDIT P0-3] Outbox durable — model pengiriman alarm:
+  //   AlarmEvent (identitas eventId, state RAISED/CLEARED) disimpan
+  //   DULU, push dikirim SETELAHNYA, status delivery diperbarui terakhir.
+  //   Event PENDING akan di-retry pada ingest berikutnya (backoff
+  //   eksponensial, maks MAX_ATTEMPTS). Ini menutup dua failure mode:
+  //   (a) push terkirim tapi state gagal disimpan -> duplikat tak terbatas;
+  //   (b) state tersimpan tapi push gagal -> notifikasi hilang diam-diam.
+  OUTBOX_MAX_EVENTS: 200,        // batas ring buffer event (identitas tetap)
+  OUTBOX_RETRY_MAX_ATTEMPTS: 6,  // setelah ini status FAILED (tercatat, dihitung)
+  OUTBOX_RETRY_BASE_MS: 60000,   // backoff: base * 2^(attempt-1)
+  OUTBOX_MAX_RETRY_AGE_MS: 24 * 60 * 60 * 1000, // lewat umur ini -> EXPIRED
 
   // Ambang jaring pengaman sisi GAS: dipakai HANYA bila laporan
   // firmware TIDAK menyertakan field `alarm` (mis. firmware lama).
@@ -160,6 +189,20 @@ function upsertSubscription_(sub) {
 function removeSubscription_(endpoint) {
   var subs = getSubscriptions_();
   var kept = subs.filter(function (s) { return s.endpoint !== endpoint; });
+  if (kept.length !== subs.length) saveSubscriptions_(kept);
+  return subs.length - kept.length;
+}
+
+/** [P1 ownership] Hapus langganan HANYA bila record milik device tersebut
+ *  (atau record lama tanpa deviceId — warisan pra-binding). Mencegah
+ *  device A menghapus langganan device B meski A memegang token sah. */
+function removeSubscriptionOwned_(endpoint, deviceId) {
+  var subs = getSubscriptions_();
+  var kept = subs.filter(function (s) {
+    if (s.endpoint !== endpoint) return true; // bukan endpoint target
+    if (!s.deviceId) return false;           // record lama -> boleh dihapus
+    return String(s.deviceId) !== String(deviceId); // milik device lain -> pertahankan
+  });
   if (kept.length !== subs.length) saveSubscriptions_(kept);
   return subs.length - kept.length;
 }
@@ -275,11 +318,57 @@ function webPushSend_(subscription, payloadObj, urgency) {
 }
 
 /**
+ * URL Web App deployment ini — dipakai untuk menempel apiBase pada payload
+ * push sehingga service worker PWA tahu ke mana ACK harus dikirim TANPA
+ * konstanta yang tertanam di sw.js (audit P0-1: tidak ada lagi placeholder).
+ */
+function getScriptUrl_() {
+  try {
+    var url = ScriptApp.getService().getUrl();
+    return url ? String(url) : null;
+  } catch (e) {
+    return null; // eksekusi di luar Web App (editor/trigger) -> tanpa URL
+  }
+}
+
+/**
+ * [P0-3] Kirim SATU AlarmEvent ke langganan yang relevan.
+ * Cakupan langganan (fleet):
+ *   - record dengan deviceId sama dengan event -> tujuan utama;
+ *   - record TANPA deviceId (warisan lama, sebelum binding ada) -> tetap
+ *     menerima (perilaku lama dipertahankan agar deployment existing tidak
+ *     kehilangan notifikasi sebelum semua pelanggan re-subscribe).
+ * Mengembalikan { sent, failed, removed, total }.
+ */
+function deliverAlarmEvent_(ev) {
+  var payload = normalizeAlarm_(ev.payload);
+  payload.apiBase = getScriptUrl_(); // [P0-1] SW memakai ini untuk ACK
+  // [audit p.482] capability token ACK terikat eventId ini.
+  payload.ackToken = makeAckToken_(payload.id);
+
+  var subs = getSubscriptions_();
+  var scoped = subs.filter(function (s) {
+    return !s.deviceId || String(s.deviceId) === String(ev.deviceId);
+  });
+
+  var sent = 0, failed = 0, removed = 0;
+  for (var i = 0; i < scoped.length; i++) {
+    var r = webPushSend_(scoped[i], payload,
+      payload.severity === 'critical' ? 'high' : 'normal');
+    if (r.ok) sent++;
+    else { failed++; if (r.error === 'endpoint-mati') removed++; }
+  }
+  return { sent: sent, failed: failed, removed: removed, total: scoped.length };
+}
+
+/**
  * API UTAMA - kirim alarm ke semua perangkat.
  * Panggil dari handler data sensor / time-driven trigger Anda.
  * Setiap alarm yang melewati fungsi ini DICATAT ke ALARM_LOG secara
  * terpusat (temuan X-6 audit silang) sehingga ACK dari PWA diterima
  * untuk SEMUA alarm yang pernah terkirim, apa pun jalurnya.
+ * [P1 concurrency] Kini juga dijalankan dalam lock; pengiriman langsung
+ * (testPush/simulasi) tetap didukung, jalur ingest memakai outbox.
  * @param {object} alarm { id, title, body, severity, url }
  * @returns {{sent:number, failed:number, removed:number}}
  */
@@ -289,10 +378,10 @@ function sendAlarmToAll(alarm) {
   // terikat alarm ini (HMAC, bucket 6 jam) — dikirim terenkripsi end-to-end
   // oleh push service, dan menjadi SATU-SATUNYA otorisasi aksi "ackAlarm".
   payload.ackToken = makeAckToken_(payload.id);
+  payload.apiBase = getScriptUrl_(); // [P0-1] ACK tidak lagi bergantung konstanta sw.js
   logAlarmEvent_(payload, alarm);
   var subs = getSubscriptions_();
   var sent = 0, failed = 0, removed = 0;
-  var total = subs.length;
 
   // [audit-2 S-12 FIX] Process ALL subscriptions in batches of BATCH_SIZE,
   // not just the first BATCH_SIZE. The previous loop `i < subs.length && i <
@@ -462,17 +551,14 @@ function doPost(e) {
   }
 
   if (body.action === 'subscribe') {
-    // [audit-2 K-7 FIX] subscribe MUST be authenticated. The previous code
-    // accepted any anonymous POST — an attacker could register thousands of
-    // garbage endpoints, exhausting GAS UrlFetchApp quota when firmware
-    // triggers sendAlarmToAll (functional DoS: real operators stop receiving
-    // alarms). Now require a valid device token (same auth as `ingest`).
-    // The PWA passes its bound device token via the `token` field; firmware
-    // already sends `token` for `ingest`.
+    // [audit-2 K-7 FIX + p.493] subscribe MUST be authenticated. Kredensial
+    // yang diterima: PUSH_TOKENS (token khusus langganan — preferred) ATAU
+    // kredensial perangkat ingest (jalur migrasi; PWA baru memakai
+    // PUSH_TOKENS sehingga kompromi push ≠ kompromi ingest).
     if (!body.device || !body.device.id || !body.token) {
       return jsonOut_({ ok: false, message: 'Langganan butuh autentikasi perangkat (device.id + token)' });
     }
-    if (!isDeviceAuthorized_(String(body.device.id), body.token)) {
+    if (!isSubscriptionAuthorized_(String(body.device.id), body.token)) {
       return jsonOut_({ ok: false, message: 'Token perangkat tidak valid' });
     }
     if (!body.endpoint || !body.keys || !body.keys.p256dh || !body.keys.auth) {
@@ -485,47 +571,61 @@ function doPost(e) {
         typeof body.keys.p256dh !== 'string' || typeof body.keys.auth !== 'string') {
       return jsonOut_({ ok: false, message: 'Endpoint/kunci langganan tidak valid' });
     }
-    // [audit-2 K-7] Cap total subscriptions to bound resource growth. The
-    // original README target is 2 phones, but we cap at 50 for headroom.
-    // Beyond this, oldest subscriptions are pruned (LRU).
-    var existing = loadJsonObject_('PUSH_SUBSCRIPTIONS', []);
-    if (existing.length >= 50) {
-      existing.sort(function (a, b) {
-        return new Date(a.lastSeenAt || a.addedAt).getTime() -
-               new Date(b.lastSeenAt || b.addedAt).getTime();
-      });
-      existing = existing.slice(existing.length - 49);
-    }
-    var sub = {
-      endpoint: ep,
-      keys: { p256dh: body.keys.p256dh, auth: body.keys.auth },
-      context: body.context || {},
-      addedAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString()
-    };
-    var total = upsertSubscription_(sub);
-    return jsonOut_({ ok: true, message: 'Langganan tersimpan', total: total });
+
+    // [P1 concurrency + P1 ownership] Mutasi daftar langganan di DALAM LOCK,
+    // dan record kini MENYIMPAN deviceId secara canonical — ownership
+    // relation subscription -> device dipertahankan untuk audit fleet:
+    // endpoint mana milik device mana, sejak kapan, terakhir terlihat kapan.
+    var result = withLock_(function () {
+      // [audit-2 K-7] Cap total subscriptions to bound resource growth. The
+      // original README target is 2 phones, but we cap at 50 for headroom.
+      // Beyond this, oldest subscriptions are pruned (LRU).
+      var existing = loadJsonObject_('PUSH_SUBSCRIPTIONS', []);
+      if (existing.length >= 50) {
+        existing.sort(function (a, b) {
+          return new Date(a.lastSeenAt || a.addedAt).getTime() -
+                 new Date(b.lastSeenAt || b.addedAt).getTime();
+        });
+        existing = existing.slice(existing.length - 49);
+      }
+      var sub = {
+        endpoint: ep,
+        keys: { p256dh: body.keys.p256dh, auth: body.keys.auth },
+        // [P1 data-model] deviceId canonical pada record — dipakai untuk
+        // delivery ter-scoped per device + audit kepemilikan fleet.
+        deviceId: String(body.device.id).slice(0, 64),
+        context: body.context || {},
+        addedAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString()
+      };
+      var total = upsertSubscription_(sub);
+      return { ok: true, total: total };
+    });
+    if (!result.ok) return jsonOut_(result);
+    return jsonOut_({ ok: true, message: 'Langganan tersimpan', total: result.total });
   }
 
   if (body.action === 'unsubscribe') {
-    // [SELF-AUDIT 2026-09-16] unsubscribe kini mewajibkan autentikasi
-    // perangkat yang SAMA dengan subscribe (audit-2 K-7). Tanpa ini, siapa
-    // pun yang mengetahui URL endpoint push korban bisa menghapus langganan
-    // korban secara diam-diam — mematikan pengiriman alarm (DoS mutasi tanpa
-    // autentikasi, satu keluarga temuan dengan p.482). Browser tetap bisa
-    // berhenti berlangganan lokal; endpoint yang tidak dikenali GAS akan
-    // dipangkas saat push berikutnya gagal 410.
+    // [SELF-AUDIT 2026-09-16 + P1 ownership] unsubscribe mewajibkan
+    // autentikasi perangkat yang SAMA dengan subscribe (audit-2 K-7), dan
+    // hanya boleh menghapus record yang MEMANG milik device tersebut
+    // (atau record lama tanpa deviceId). Tanpa ownership check, siapa pun
+    // yang memegang token device A bisa menghapus langganan device B.
     if (!body.device || !body.device.id || !body.token) {
       return jsonOut_({
         ok: false,
         message: 'Pembatalan langganan butuh autentikasi perangkat (device.id + token)'
       });
     }
-    if (!isDeviceAuthorized_(String(body.device.id), body.token)) {
+    if (!isSubscriptionAuthorized_(String(body.device.id), body.token)) {
       return jsonOut_({ ok: false, message: 'Token perangkat tidak valid' });
     }
-    var removedN = removeSubscription_(body.endpoint);
-    return jsonOut_({ ok: true, message: 'Langganan dihapus', removed: removedN });
+    var unsub = withLock_(function () {
+      return { ok: true, removed: removeSubscriptionOwned_(body.endpoint,
+        String(body.device.id).slice(0, 64)) };
+    });
+    if (!unsub.ok) return jsonOut_(unsub);
+    return jsonOut_({ ok: true, message: 'Langganan dihapus', removed: unsub.removed });
   }
 
   if (body.action === 'ackAlarm') {
@@ -541,12 +641,39 @@ function doPost(e) {
                  'Gunakan aksi "Tandai Ditangani" pada notifikasi (token terbit otomatis).'
       });
     }
-    var ackRes = markAlarmAcknowledged_(body.alarmId);
+    // [P1 concurrency] Mutasi ALARM_LOG (dan status event) di dalam lock.
+    var ackRes = withLock_(function () {
+      return markAlarmAcknowledged_(body.alarmId);
+    });
+    if (!ackRes.ok) return jsonOut_(ackRes);
     if (!ackRes.found) {
       return jsonOut_({ ok: false, message: 'Alarm tidak ditemukan: ' + body.alarmId });
     }
     return jsonOut_({ ok: true, message: 'Alarm ditandai ditangani',
       alarmId: ackRes.alarmId, acknowledgedAt: ackRes.at });
+  }
+
+  // [P1 hardening] testPush via POST — autentikasi WAJIB (push token atau
+  // kredensial device). Rate limit tetap berlaku, tetapi rate limit bukan
+  // authorization: endpoint publik yang bisa memicu push adalah permukaan
+  // spam/DoS terhadap fleet langganan.
+  if (body.action === 'testPush') {
+    var tpAuth = body.device && body.device.id && body.token &&
+      isSubscriptionAuthorized_(String(body.device.id), body.token);
+    if (!tpAuth) {
+      return jsonOut_({ ok: false,
+        message: 'testPush butuh autentikasi perangkat (device.id + push token)' });
+    }
+    var tpGate = checkTestPushRate_();
+    if (!tpGate.ok) return jsonOut_({ ok: false, message: tpGate.message });
+    var r = sendAlarmToAll({
+      id: 'TEST-' + Date.now(),
+      title: 'Uji Push Berhasil',
+      body: 'Jika Anda menerima ini, jalur GAS -> push service -> PWA sudah benar.',
+      severity: 'info',
+      tag: 'test-push'
+    });
+    return jsonOut_({ ok: true, result: r });
   }
 
   return jsonOut_({ ok: false, message: 'Aksi tidak dikenal: ' + body.action });
@@ -563,9 +690,20 @@ function doGet(e) {
   }
 
   if (action === 'testPush') {
-    // Endpoint ini terbuka (deploy "Anyone") sehingga bisa dipakai spam
-    // push. Rate-limit global memutus vektor banjir tanpa merusak tombol
-    // "Uji Push" PWA (hardening produksi; konfigurasi di PUSH_CONFIG).
+    // [P1 hardening 2026-09-16] testPush GET kini DITUTUP secara default —
+    // "rate limiting adalah mitigasi DoS, bukan authorization". Jalur
+    // terautentikasi adalah POST dengan device.id + push token. Operator
+    // yang benar-benar butuh endpoint GET publik dapat mengaktifkan
+    // Script Property TEST_PUSH_ALLOW_PUBLIC='true' (jendela migrasi).
+    var allowPublicGet = String(PropertiesService.getScriptProperties()
+      .getProperty('TEST_PUSH_ALLOW_PUBLIC') || '').toLowerCase() === 'true';
+    if (!allowPublicGet) {
+      return jsonOut_({
+        ok: false,
+        message: 'testPush GET dinonaktifkan. Gunakan POST dengan device.id + push token ' +
+                 '(autentikasi), atau set TEST_PUSH_ALLOW_PUBLIC=true untuk jendela migrasi.'
+      });
+    }
     var gate = checkTestPushRate_();
     if (!gate.ok) {
       return jsonOut_({ ok: false, message: gate.message });
@@ -652,10 +790,148 @@ function constantTimeStrEq_(a, b) {
   return diff === 0;
 }
 
+/* ======================= [p.493] Push-scoped tokens ======================= */
+
+/**
+ * [AUDIT p.493 REMEDIATION] Kredensial khusus langganan push — DIPISAHKAN
+ * dari kredensial ingest firmware (FW_DEVICE_TOKEN / FW_DEVICE_TOKENS).
+ *
+ * Script Property PUSH_TOKENS = [{"deviceId":"...","token":"..."}]
+ *
+ * Kapabilitas: subscribe / unsubscribe / testPush SAJA. TIDAK dapat
+ * memanggil `ingest`. Dengan pemisahan ini, kompromi PWA push (XSS,
+ * sessionStorage bocor) tidak serta-merta menjadi kompromi kredensial
+ * ingest telemetry perangkat — kebalikan dari model lama yang memakai
+ * token firmware yang sama di browser.
+ */
+function isPushSubscriberAuthorized_(deviceId, token) {
+  if (!deviceId || !token) return false;
+  var raw;
+  try {
+    raw = PropertiesService.getScriptProperties().getProperty('PUSH_TOKENS');
+  } catch (e) {
+    return false; // fail-closed
+  }
+  if (!raw) return false;
+  var list;
+  try {
+    list = JSON.parse(raw);
+  } catch (e) {
+    return false; // daftar korup -> tolak (fail-closed)
+  }
+  if (!Array.isArray(list)) return false;
+  for (var i = 0; i < list.length; i++) {
+    var rec = list[i] || {};
+    if (String(rec.deviceId) === String(deviceId)) {
+      return constantTimeStrEq_(String(rec.token), String(token));
+    }
+  }
+  return false;
+}
+
+/** Autentikasi jalur langganan: PUSH_TOKENS (preferred) ATAU kredensial
+ *  perangkat ingest (jalur migrasi — mengikuti aturan p.493, PWA baru
+ *  seharusnya memakai PUSH_TOKENS). */
+function isSubscriptionAuthorized_(deviceId, token) {
+  return isPushSubscriberAuthorized_(deviceId, token) ||
+    isDeviceAuthorized_(String(deviceId), String(token || ''));
+}
+
+/* ======================= [P1] Serialisasi mutasi (LockService) ======================= */
+
+/**
+ * [AUDIT P1 — concurrency] Semua mutasi state (subscription list, alarm
+ * state, ALARM_LOG, outbox) kini berjalan di dalam script lock. Tanpa ini,
+ * dua eksekusi Apps Script paralel bisa load-modify-save saling menimpa
+ * (lost update): subscribe A + unsubscribe B berbarengan bisa menghapus
+ * salah satunya. canonical telemetry backend sudah memakai LockService;
+ * push service kini mengikuti disiplin yang sama.
+ */
+function withLock_(fn) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return { ok: false, message: 'Server sibuk (lock timeout) — coba lagi.' };
+  }
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ======================= [P0-3] Outbox AlarmEvent durable ======================= */
+
+/**
+ * Model pengiriman alarm (audit P0-3 — "push membutuhkan durable
+ * event/outbox"). Identitas event:
+ *
+ *   eventId   = ALM-<sensor-slug>-<reportedAt36>  (raise) / RSV-... (clear)
+ *   deviceId  = perangkat asal
+ *   alarmCode = slug sensor
+ *   generation= pencacah kejadian per sensor (naik tiap raise)
+ *   raisedAt / clearedAt
+ *   state     = 'RAISED' | 'CLEARED'
+ *   delivery  = { status: 'PENDING'|'SENT'|'PARTIAL'|'FAILED'|'EXPIRED',
+ *                 attempts, lastAttemptAt, sent, failed, removed }
+ *
+ * Urutan tulis: (1) event dibuat/disimpan DULU dengan delivery PENDING,
+ * (2) push dikirim, (3) status delivery diperbarui. Bila eksekusi mati
+ * di tengah, event tetap PENDING dan di-retry pada eksekusi berikutnya
+ * dengan backoff — tidak ada notifikasi yang hilang diam-diam, dan
+ * duplikat dibatasi oleh identitas event + tag notifikasi di klien.
+ */
+function loadAlarmEvents_() {
+  return loadJsonObject_('ALARM_EVENTS', []);
+}
+
+function saveAlarmEvents_(events) {
+  if (events.length > PUSH_CONFIG.OUTBOX_MAX_EVENTS) {
+    events = events.slice(events.length - PUSH_CONFIG.OUTBOX_MAX_EVENTS);
+  }
+  PropertiesService.getScriptProperties()
+    .setProperty('ALARM_EVENTS', JSON.stringify(events));
+}
+
+function findEventIndex_(events, eventId) {
+  for (var i = events.length - 1; i >= 0; i--) {
+    if (events[i].eventId === eventId) return i;
+  }
+  return -1;
+}
+
+/** Apakah event PENDING sudah boleh dicoba ulang? (backoff eksponensial) */
+function eventRetryDue_(ev, now) {
+  if (!ev.delivery || ev.delivery.status !== 'PENDING') return false;
+  if (ev.delivery.attempts >= PUSH_CONFIG.OUTBOX_RETRY_MAX_ATTEMPTS) return false;
+  var age = now - new Date(ev.raisedAt).getTime();
+  if (age > PUSH_CONFIG.OUTBOX_MAX_RETRY_AGE_MS) return false;
+  if (!ev.delivery.attempts || !ev.delivery.lastAttemptAt) return true;
+  var backoff = PUSH_CONFIG.OUTBOX_RETRY_BASE_MS *
+    Math.pow(2, Math.max(0, ev.delivery.attempts - 1));
+  return (now - new Date(ev.delivery.lastAttemptAt).getTime()) >= backoff;
+}
+
+/** Tandai event kedaluwarsa (melewati umur retry) — tercatat jujur. */
+function expireStaleEvents_(events, now) {
+  for (var i = 0; i < events.length; i++) {
+    var ev = events[i];
+    if (ev.delivery && ev.delivery.status === 'PENDING') {
+      var age = now - new Date(ev.raisedAt).getTime();
+      if (age > PUSH_CONFIG.OUTBOX_MAX_RETRY_AGE_MS ||
+          ev.delivery.attempts >= PUSH_CONFIG.OUTBOX_RETRY_MAX_ATTEMPTS) {
+        ev.delivery.status = (age > PUSH_CONFIG.OUTBOX_MAX_RETRY_AGE_MS)
+          ? 'EXPIRED' : 'FAILED';
+      }
+    }
+  }
+}
+
 /** Utama: proses satu laporan firmware.
- *  Tiga fase agar ALARM_LOG bebas lost-update:
- *  (1) deteksi tepi dari state, (2) kirim push (pencatatan terpusat
- *  di sendAlarmToAll), (3) tandai pulih dengan log termutakhir. */
+ *  [AUDIT P0-3 + P1] Eksekusi kini DI DALAM LOCK dengan urutan outbox:
+ *  (1) deteksi tepi dari state, (2) tulis AlarmEvent PENDING + state DULU
+ *  (durable sebelum efek samping), (3) kirim push, (4) perbarui status
+ *  delivery, (5) tulis snapshot. Gagal di tengah -> event PENDING di-retry
+ *  pada ingest berikutnya (backoff) — tidak ada push hilang diam-diam. */
 function handleIngest_(body) {
   var deviceId = body.device && body.device.id
     ? String(body.device.id).slice(0, 64) : '(tanpa-id)';
@@ -673,100 +949,186 @@ function handleIngest_(body) {
     .slice(0, PUSH_CONFIG.MAX_SENSORS_PER_REPORT)
     .map(normalizeIngestSensor_);
 
-  var state = loadJsonObject_('FW_ALARM_STATE', {});
-  var triggered = [];
-  var resolved = [];
-  var toPush = []; // {kind:'raise'|'resolve', alarm, eventId?}
-  var pushAgg = { sent: 0, failed: 0, removed: 0, batches: 0 };
+  var locked = withLock_(function () {
+    var state = loadJsonObject_('FW_ALARM_STATE', {});
+    var events = loadAlarmEvents_();
+    var now = Date.now();
+    expireStaleEvents_(events, now);
 
-  /* ---- Fase 1: deteksi tepi per sensor (tanpa efek samping I/O) ---- */
-  for (var i = 0; i < sensors.length; i++) {
-    var s = sensors[i];
-    var prev = state[s.name]; // { alarm, since, eventId, severity }
-    var prevAlarm = !!(prev && prev.alarm);
+    var triggered = [];
+    var resolved = [];
+    var toPush = []; // {kind:'raise'|'resolve', eventIndex}
+    var generations = loadJsonObject_('FW_ALARM_GENERATIONS', {});
 
-    if (s.alarm && !prevAlarm) {
-      // Tepi naik: kejadian alarm BARU (push satu kali).
-      var alarm = normalizeAlarm_({
-        id: 'ALM-' + slugify_(s.name) + '-' + reportedAt.toString(36),
-        title: (s.severity === 'critical' ? 'KRITIS: ' : 'PERINGATAN: ') + s.name,
-        body: s.status || (s.name + ' keluar batas aman (' +
-          s.value + ' ' + s.unit + ')'),
-        severity: s.severity,
-        tag: 'alarm-' + slugify_(s.name),
-        url: './index.html?from=push',
-        timestamp: reportedAt
-      });
-      alarm.sensor = s.name;
-      alarm.raisedAt = new Date(reportedAt).toISOString();
-      triggered.push(alarm.id);
-      state[s.name] = { alarm: true, since: alarm.raisedAt,
-        eventId: alarm.id, severity: s.severity };
-      toPush.push({ kind: 'raise', alarm: alarm });
+    /* ---- Fase 1: deteksi tepi per sensor (tanpa efek samping I/O) ---- */
+    for (var i = 0; i < sensors.length; i++) {
+      var s = sensors[i];
+      var prev = state[s.name]; // { alarm, since, eventId, severity }
+      var prevAlarm = !!(prev && prev.alarm);
+
+      if (s.alarm && !prevAlarm) {
+        // Tepi naik: kejadian alarm BARU -> AlarmEvent durable.
+        generations[s.name] = (generations[s.name] || 0) + 1;
+        var alarm = normalizeAlarm_({
+          id: 'ALM-' + slugify_(s.name) + '-' + reportedAt.toString(36),
+          title: (s.severity === 'critical' ? 'KRITIS: ' : 'PERINGATAN: ') + s.name,
+          body: s.status || (s.name + ' keluar batas aman (' +
+            s.value + ' ' + s.unit + ')'),
+          severity: s.severity,
+          tag: 'alarm-' + slugify_(s.name),
+          url: './index.html?from=push',
+          timestamp: reportedAt
+        });
+        alarm.sensor = s.name;
+        alarm.raisedAt = new Date(reportedAt).toISOString();
+        triggered.push(alarm.id);
+        state[s.name] = { alarm: true, since: alarm.raisedAt,
+          eventId: alarm.id, severity: s.severity };
+        events.push({
+          eventId: alarm.id,
+          deviceId: deviceId,
+          alarmCode: slugify_(s.name),
+          generation: generations[s.name],
+          severity: s.severity,
+          raisedAt: alarm.raisedAt,
+          clearedAt: null,
+          state: 'RAISED',
+          payload: alarm,
+          delivery: { status: 'PENDING', attempts: 0, lastAttemptAt: null,
+            sent: 0, failed: 0, removed: 0 }
+        });
+        toPush.push({ kind: 'raise', eventId: alarm.id });
+      }
+
+      else if (!s.alarm && prevAlarm) {
+        // Tepi turun: kejadian selesai (+ notifikasi pulih).
+        resolved.push(prev.eventId);
+        var rsv = normalizeAlarm_({
+          id: 'RSV-' + slugify_(s.name) + '-' + reportedAt.toString(36),
+          title: 'PULIH: ' + s.name,
+          body: (s.status && s.status !== '-') ? s.status :
+            (s.name + ' kembali normal (' + s.value + ' ' + s.unit + ')'),
+          severity: 'info',
+          tag: 'alarm-' + slugify_(s.name), // tag sama -> timpa notifikasi lama
+          url: './index.html?from=push',
+          timestamp: reportedAt
+        });
+        rsv.sensor = s.name; // atribusi sensor pada jejak log
+        events.push({
+          eventId: rsv.id,
+          deviceId: deviceId,
+          alarmCode: slugify_(s.name),
+          generation: generations[s.name] || 1,
+          severity: 'info',
+          raisedAt: new Date(reportedAt).toISOString(),
+          clearedAt: new Date(reportedAt).toISOString(),
+          state: 'CLEARED',
+          resolveFor: prev.eventId, // entri ALM asal yang harus ditutup di log
+          payload: rsv,
+          delivery: { status: 'PENDING', attempts: 0, lastAttemptAt: null,
+            sent: 0, failed: 0, removed: 0 }
+        });
+        toPush.push({ kind: 'resolve', eventId: rsv.id, resolves: prev.eventId });
+        state[s.name] = { alarm: false, since: null,
+          eventId: prev.eventId, severity: 'info' };
+        // Tutup entri ALM asal SEKARANG (durable-first): daftar alarm aktif
+        // harus benar meski notifikasi pulih belum/gagal terkirim.
+        markAlarmCleared_(prev.eventId);
+      }
+
+      else {
+        // Level (tetap true / tetap false): tidak ada push.
+        if (s.alarm && prev) prev.severity = s.severity;
+      }
     }
 
-    else if (!s.alarm && prevAlarm) {
-      // Tepi turun: kejadian selesai (+ notifikasi pulih).
-      resolved.push(prev.eventId);
-      var rsv = normalizeAlarm_({
-        id: 'RSV-' + slugify_(s.name) + '-' + reportedAt.toString(36),
-        title: 'PULIH: ' + s.name,
-        body: (s.status && s.status !== '-') ? s.status :
-          (s.name + ' kembali normal (' + s.value + ' ' + s.unit + ')'),
-        severity: 'info',
-        tag: 'alarm-' + slugify_(s.name), // tag sama -> timpa notifikasi lama
-        url: './index.html?from=push',
-        timestamp: reportedAt
-      });
-      rsv.sensor = s.name; // atribusi sensor pada jejak log
-      toPush.push({ kind: 'resolve', eventId: prev.eventId, alarm: rsv });
-      state[s.name] = { alarm: false, since: null,
-        eventId: prev.eventId, severity: 'info' };
+    /* ---- Fase 2: DURABLE-FIRST — simpan event + state SEBELUM push ---- */
+    saveAlarmEvents_(events);
+    PropertiesService.getScriptProperties()
+      .setProperty('FW_ALARM_STATE', JSON.stringify(state));
+    PropertiesService.getScriptProperties()
+      .setProperty('FW_ALARM_GENERATIONS', JSON.stringify(generations));
+
+    /* ---- Fase 3: kirim push (event baru + retry PENDING yang jatuh tempo) ---- */
+    var pushAgg = { sent: 0, failed: 0, removed: 0, batches: 0, retries: 0 };
+    var deliverIds = {};
+    for (var k = 0; k < toPush.length; k++) deliverIds[toPush[k].eventId] = true;
+    for (var e = 0; e < events.length; e++) {
+      var ev = events[e];
+      var isNew = deliverIds[ev.eventId];
+      var isRetry = !isNew && eventRetryDue_(ev, now);
+      if (!isNew && !isRetry) continue;
+      if (isRetry) pushAgg.retries++;
+      var r = deliverAlarmEvent_(ev);
+      pushAgg.sent += r.sent; pushAgg.failed += r.failed;
+      pushAgg.removed += r.removed; pushAgg.batches++;
+      ev.delivery.attempts++;
+      ev.delivery.lastAttemptAt = new Date().toISOString();
+      ev.delivery.sent = r.sent; ev.delivery.failed = r.failed;
+      ev.delivery.removed = r.removed;
+      // Status: SENT penuh / PARTIAL (sebagian, masih bisa retry) /
+      // PENDING (gagal total, retry sampai maksimum) / FAILED (habis
+      // percobaan) / SENT-0 (tidak ada pelanggan — bukan kegagalan).
+      var exhausted = ev.delivery.attempts >= PUSH_CONFIG.OUTBOX_RETRY_MAX_ATTEMPTS;
+      if (r.sent === 0 && r.total === 0) {
+        ev.delivery.status = 'SENT'; // tidak ada pelanggan — tercatat jujur
+      } else if (r.sent > 0 && r.failed === 0) {
+        ev.delivery.status = 'SENT';
+      } else if (exhausted) {
+        ev.delivery.status = (r.sent > 0) ? 'PARTIAL' : 'FAILED';
+      } else {
+        ev.delivery.status = 'PENDING'; // sebagian/gagal -> retry dengan backoff
+      }
+      // Pencatatan terpusat di ALARM_LOG (ACK PWA) tetap jalan.
+      logAlarmEvent_(ev.payload, { sensor: ev.payload.sensor,
+        raisedAt: ev.raisedAt,
+        clearedAt: ev.state === 'CLEARED' ? ev.clearedAt : undefined });
     }
 
-    else {
-      // Level (tetap true / tetap false): tidak ada push.
-      if (s.alarm && prev) prev.severity = s.severity;
-    }
+    /* ---- Fase 4: perbarui status delivery + snapshot dari log termutakhir ---- */
+    saveAlarmEvents_(events);
+    var logNow = loadJsonObject_('ALARM_LOG', []);
+    var snapshot = {
+      ok: true,
+      updatedAt: new Date().toISOString(),
+      reportedAt: reportedAt,
+      device: {
+        id: deviceId,
+        fw: body.device && body.device.fw ? String(body.device.fw).slice(0, 16) : null,
+        uptimeMs: body.device ? Number(body.device.uptimeMs) || 0 : 0
+      },
+      sensors: sensors,
+      alarms: activeAlarmsFromLog_(logNow),
+      outbox: outboxSummary_(events)
+    };
+    PropertiesService.getScriptProperties()
+      .setProperty('FW_LAST_SNAPSHOT', JSON.stringify(snapshot));
+
+    return {
+      ok: true,
+      received: sensors.length,
+      triggered: triggered,
+      resolved: resolved,
+      pushes: pushAgg
+    };
+  });
+
+  if (locked && locked.ok === false && locked.message) return locked;
+  return locked;
+}
+
+/** Ringkasan outbox untuk observability snapshot. */
+function outboxSummary_(events) {
+  var s = { pending: 0, sent: 0, partial: 0, failed: 0, expired: 0, total: events.length };
+  for (var i = 0; i < events.length; i++) {
+    var st = events[i].delivery && events[i].delivery.status;
+    if (st === 'PENDING') s.pending++;
+    else if (st === 'SENT') s.sent++;
+    else if (st === 'PARTIAL') s.partial++;
+    else if (st === 'FAILED') s.failed++;
+    else if (st === 'EXPIRED') s.expired++;
   }
-
-  /* ---- Fase 2: kirim push + pencatatan terpusat ---- */
-  for (var k = 0; k < toPush.length; k++) {
-    var item = toPush[k];
-    var r = sendAlarmToAll(item.alarm);
-    pushAgg.sent += r.sent; pushAgg.failed += r.failed;
-    pushAgg.removed += r.removed; pushAgg.batches++;
-    if (item.kind === 'resolve') {
-      markAlarmCleared_(item.eventId); // log segar, aman
-    }
-  }
-
-  /* ---- Fase 3: simpan state + snapshot dari log termutakhir ---- */
-  var logNow = loadJsonObject_('ALARM_LOG', []);
-  var snapshot = {
-    ok: true,
-    updatedAt: new Date().toISOString(),
-    reportedAt: reportedAt,
-    device: {
-      id: deviceId,
-      fw: body.device && body.device.fw ? String(body.device.fw).slice(0, 16) : null,
-      uptimeMs: body.device ? Number(body.device.uptimeMs) || 0 : 0
-    },
-    sensors: sensors,
-    alarms: activeAlarmsFromLog_(logNow)
-  };
-  PropertiesService.getScriptProperties()
-    .setProperty('FW_LAST_SNAPSHOT', JSON.stringify(snapshot));
-  PropertiesService.getScriptProperties()
-    .setProperty('FW_ALARM_STATE', JSON.stringify(state));
-
-  return {
-    ok: true,
-    received: sensors.length,
-    triggered: triggered,
-    resolved: resolved,
-    pushes: pushAgg
-  };
+  return s;
 }
 
 /**
@@ -845,9 +1207,11 @@ function activeAlarmsFromLog_(log) {
   return out;
 }
 
-/** Tandai alarm ditangani (ACK dari PWA). Idempoten. */
+/** Tandai alarm ditangani (ACK dari PWA). Idempoten.
+ *  [P1 concurrency] Selalu dipanggil dalam withLock_ oleh handler.
+ *  [P0-3] Juga menyinkronkan status event outbox terkait (jika ada). */
 function markAlarmAcknowledged_(alarmId) {
-  if (!alarmId) return { found: false, alarmId: null };
+  if (!alarmId) return { ok: true, found: false, alarmId: null, at: null };
   alarmId = String(alarmId);
   var log = loadJsonObject_('ALARM_LOG', []);
   var at = new Date().toISOString();
@@ -856,10 +1220,10 @@ function markAlarmAcknowledged_(alarmId) {
       if (!log[i].acknowledgedAt) log[i].acknowledgedAt = at;
       PropertiesService.getScriptProperties()
         .setProperty('ALARM_LOG', JSON.stringify(log));
-      return { found: true, alarmId: alarmId, at: log[i].acknowledgedAt };
+      return { ok: true, found: true, alarmId: alarmId, at: log[i].acknowledgedAt };
     }
   }
-  return { found: false, alarmId: alarmId };
+  return { ok: true, found: false, alarmId: alarmId, at: null };
 }
 
 /** Baca properti JSON dengan toleransi korupsi. */
@@ -913,6 +1277,8 @@ function getLatestAlarm_() {
         requireInteraction: log[i].severity === 'critical'
       };
       out.ackToken = makeAckToken_(out.id);
+      // [P0-1] apiBase ikut dikirim agar SW tahu ke mana ACK dikirim.
+      out.apiBase = getScriptUrl_();
       return out;
     }
   }
