@@ -25,6 +25,8 @@ on:
       - 'firmware/**'
       - 'firmware-generic/**'
       - 'scripts/**'
+      - 'code.gs/**'
+      - 'push-alarm/**'
       - '.github/workflows/build-firmware.yml'
     tags:
       - 'v*'
@@ -50,6 +52,39 @@ env:
   PIP_VERSION: "24.2"
 
 jobs:
+  # --------------------------------------------------------------------------
+  # [AUDIT P0-2/P0-3 2026-09-16] Push contract cross-audit — the 181-assertion
+  # harness (K1-K9: subscribe/unsubscribe/ACK/alarm edges/VAPID/outbox/
+  # PUSH_TOKENS/ownership/migration) runs REAL GAS + PWA code in a vm. It used
+  # to be a manual engineer step; now it is a permanent CI gate so a GAS or
+  # PWA push-layer change can never regress the cross-layer contract.
+  # --------------------------------------------------------------------------
+  push-contract-cross-audit:
+    name: Push contract cross-audit (K1-K9, 181 asersi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: firmware
+      - uses: actions/checkout@v4
+        with:
+          repository: desvandi/PLTSMonitoring_PWA
+          path: pwa
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Assemble checkout layout expected by the harness
+        run: |
+          mkdir -p monitoriot-checkout
+          ln -s "${GITHUB_WORKSPACE}/pwa/pwa-push-alarm" monitoriot-checkout/pwa-push-alarm
+          ln -s "${GITHUB_WORKSPACE}/firmware/push-alarm/gas" monitoriot-checkout/gas
+          ln -s "${GITHUB_WORKSPACE}/firmware/push-alarm/firmware/MonitorIoT_Firmware" monitoriot-checkout/MonitorIoT_Firmware
+      - name: Run cross-audit harness
+        run: |
+          cd firmware/push-alarm
+          MONITORIOT_DL="${GITHUB_WORKSPACE}/monitoriot-checkout" node tests/cross-audit-test.js
+
   test:
     name: Python unit + property tests
     runs-on: ubuntu-latest
