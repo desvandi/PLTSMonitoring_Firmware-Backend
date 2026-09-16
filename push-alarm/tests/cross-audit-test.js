@@ -330,6 +330,14 @@ vm.runInContext(fs.readFileSync(path.join(PWA, 'js', 'push-manager.js'), 'utf8')
   pageCtx, { filename: 'push-manager.js' });
 const AlarmPushManager = pageCtx.module.exports;
 
+// [SELF-AUDIT 2026-09-16] Kontrak GAS K-7: subscribe/unsubscribe kini WAJIB
+// membawa device.id + token (GAS memvalidasinya terhadap FW_DEVICE_TOKEN,
+// diprovision di atas). Seed kredensial yang sama ke localStorage mock
+// PWA — persis jalur operator nyata ('push.deviceId' / 'push.deviceToken'
+// atau APP_CONFIG.DEVICE_ID / DEVICE_TOKEN).
+pageCtx.localStorage.setItem('push.deviceId', DEVICE_ID);
+pageCtx.localStorage.setItem('push.deviceToken', DEVICE_TOKEN);
+
 /* ======================= Muat sw.js (PWA) ======================= */
 
 const swHandlers = {};
@@ -377,6 +385,16 @@ const swCtx = vm.createContext({
 vm.runInContext(swSrc, swCtx, { filename: 'sw.js' });
 vm.runInContext('this.__swApi = { API_BASE: API_BASE };', swCtx, { filename: 'sw-api.js' });
 const swApi = swCtx.__swApi;
+
+// [SELF-AUDIT 2026-09-16] Kirim kredensial perangkat ke konteks SW — persis
+// yang dilakukan js/app.js pada deployment nyata setelah register(). resubscribe()
+// (pushsubscriptionchange) membutuhkannya demi kontrak GAS K-7.
+swHandlers.message({
+  data: {
+    type: 'PLTS_PUSH_ALARM_DEVICE_CREDENTIALS',
+    credentials: { deviceId: DEVICE_ID, token: DEVICE_TOKEN }
+  }
+});
 
 async function dispatchPush(payloadOrNull) {
   const waits = [];
@@ -445,6 +463,21 @@ async function main() {
 
   /* ---------------- K1: Langganan (PWA-GAS) ---------------- */
   console.log('\n--- K1 Langganan (PWA -> GAS) ---');
+  // [SELF-AUDIT 2026-09-16] Kontrol negatif K-7 dulu: subscribe TANPA
+  // kredensial harus DITOLAK GAS (fail-closed) — membuktikan gerbangnya
+  // aktif sebelum membuktikan jalur positifnya.
+  {
+    const savedId = pageCtx.localStorage.getItem('push.deviceId');
+    const savedTok = pageCtx.localStorage.getItem('push.deviceToken');
+    pageCtx.localStorage.removeItem('push.deviceId');
+    pageCtx.localStorage.removeItem('push.deviceToken');
+    const anon = new AlarmPushManager(GAS_URL, VAPID_PUB);
+    const rAnon = await anon.enable();
+    check('K1', 'subscribe TANPA device.id+token DITOLAK GAS (K-7)',
+      rAnon.ok === false && /perangkat/i.test(String(rAnon.message)));
+    pageCtx.localStorage.setItem('push.deviceId', savedId);
+    pageCtx.localStorage.setItem('push.deviceToken', savedTok);
+  }
   const r1 = await pushMgr.enable();
   check('K1', 'PWA enable() sukses', r1.ok === true && r1.state === 'enabled');
   check('K1', 'tepat satu langganan tersimpan di GAS', storedSubs().length === 1);
@@ -458,6 +491,18 @@ async function main() {
   check('K1', 'auth valid 16 byte', b64urlToBuf(stored1.keys.auth).length === 16);
   check('K1', 'context klien tercatat (lang/tz/ua)',
     !!(stored1.context && stored1.context.lang && stored1.context.ua));
+  // [SELF-AUDIT 2026-09-16] Regresi kontrak K-7: payload subscribe WAJIB
+  // membawa autentikasi perangkat (device.id + token) — tanpa itu GAS
+  // menolak (lihat kontrol negatif di atas). Post TERAKHIR dipakai karena
+  // kontrol negatif di atas juga mengirim POST subscribe (tanpa kredensial).
+  {
+    const subReq = [...gasRequests].reverse().find((r) => r.method === 'POST' &&
+      r.body.indexOf('"subscribe"') >= 0);
+    const subBody = subReq ? JSON.parse(subReq.body) : {};
+    check('K1', 'payload subscribe membawa device.id + token (K-7)',
+      subBody.device && subBody.device.id === DEVICE_ID &&
+      subBody.token === DEVICE_TOKEN);
+  }
 
   const subCountBefore = browserEvents.filter((e) => e.t === 'subscribe').length;
   const r2 = await pushMgr.enable();
@@ -472,7 +517,10 @@ async function main() {
   const p2 = b64url(ecdh2.getPublicKey());
   const a2 = b64url(crypto.randomBytes(16));
   const upResp = gasPost({
-    action: 'subscribe', endpoint: stored1.endpoint,
+    action: 'subscribe',
+    device: { id: DEVICE_ID },
+    token: DEVICE_TOKEN,
+    endpoint: stored1.endpoint,
     keys: { p256dh: p2, auth: a2 }, context: { test: 'rotasi-kunci' }
   });
   check('K1', 'upsert endpoint sama -> jumlah tetap 1',
@@ -523,9 +571,31 @@ async function main() {
     Math.max(...serverSeqs) < Math.max(...localSeqs));
   check('K2', 'endpoint terhapus dari registri GAS', storedSubs().length === 0);
 
-  const unkRes = gasPost({ action: 'unsubscribe', endpoint: 'https://push.test.local/tak-ada' });
+  const unkRes = gasPost({
+    action: 'unsubscribe',
+    device: { id: DEVICE_ID },
+    token: DEVICE_TOKEN,
+    endpoint: 'https://push.test.local/tak-ada'
+  });
   check('K2', 'unsubscribe endpoint tak dikenal -> removed 0, tetap ok',
     unkRes.ok === true && unkRes.removed === 0);
+  // [SELF-AUDIT 2026-09-16] Kontrak K-7 simetris pada unsubscribe: tanpa
+  // kredensial / token salah DITOLAK fail-closed — menutup jalur DoS
+  // silent-unsubscribe bagi pihak yang mengetahui URL endpoint korban.
+  const unkNoAuth = gasPost({
+    action: 'unsubscribe',
+    endpoint: 'https://push.test.local/tak-ada'
+  });
+  check('K2', 'unsubscribe TANPA autentikasi DITOLAK (K-7 simetris)',
+    unkNoAuth.ok === false);
+  const unkBadTok = gasPost({
+    action: 'unsubscribe',
+    device: { id: DEVICE_ID },
+    token: 'token-salah',
+    endpoint: 'https://push.test.local/tak-ada'
+  });
+  check('K2', 'unsubscribe dengan token SALAH DITOLAK',
+    unkBadTok.ok === false);
 
   // 410 saat kirim -> pembersihan otomatis.
   const re1 = await pushMgr.enable();
@@ -686,6 +756,47 @@ async function main() {
   check('K6', 'FW mengirim reportedAt', fwCode.indexOf('doc["reportedAt"]') >= 0);
   check('K6', 'prinsip pengirim tunggal: FW tanpa jalur push/ACK',
     !/testPush|sendAlarmToAll|ackAlarm|"subscribe"/.test(fwCode));
+
+  /* ---------------- K6b: Firmware MODULAR (kontrak GAS HEAD) ---------------- */
+  // [SELF-AUDIT 2026-09-16] K6 di atas memeriksa snapshot monolitik lawas;
+  // firmware PRODUKSI sekarang modular (firmware_v1.ino + modul) dengan
+  // kontrak GAS yang lebih kuat: envelope TELEMETRY bertanda tangan
+  // HMAC-SHA256 (AI/GasAdvisor.cpp), bukan ingest+token polos. K6b memastikan
+  // kontrak HEAD itu tetap dipatuhi DAN prinsip pengirim tunggal berlaku di
+  // seluruh pohon sumber modular.
+  console.log('\n--- K6b Firmware modular (TELEMETRY bertanda tangan, GAS HEAD) ---');
+  const FW_MOD = path.join(DL, 'firmware');
+  if (fs.existsSync(path.join(FW_MOD, 'AI', 'GasAdvisor.cpp'))) {
+    const gasAdvisorSrc = fs.readFileSync(path.join(FW_MOD, 'AI', 'GasAdvisor.cpp'), 'utf8');
+    const gasAdvisorCode = gasAdvisorSrc.replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    check('K6b', 'FW modular mengirim action=TELEMETRY (kontrak HEAD)',
+      gasAdvisorCode.indexOf('envelope["action"] = "TELEMETRY"') >= 0);
+    check('K6b', 'FW modular menandatangani request GAS (HMAC-SHA256)',
+      /_signRequest/.test(gasAdvisorCode) && /HMAC-SHA256|sha256Hmac|sha256/i.test(gasAdvisorCode));
+    // Prinsip pengirim tunggal pada seluruh pohon modular: tidak ada jalur
+    // push/ACK/subscribe di firmware produksi.
+    let modFiles = [];
+    (function collect(dir) {
+      for (const name of fs.readdirSync(dir)) {
+        const p = path.join(dir, name);
+        const st = fs.statSync(p);
+        if (st.isDirectory() && !name.startsWith('.')) collect(p);
+        else if (/\.(cpp|h|ino)$/.test(name)) modFiles.push(p);
+      }
+    })(FW_MOD);
+    check('K6b', 'pohon sumber modular dapat dibaca (' + modFiles.length + ' file)',
+      modFiles.length > 20);
+    const violators = modFiles.filter((p) => {
+      const src = fs.readFileSync(p, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      return /testPush|sendAlarmToAll|ackAlarm|"subscribe"/.test(src);
+    });
+    check('K6b', 'prinsip pengirim tunggal: pohon modular tanpa jalur push/ACK',
+      violators.length === 0);
+  } else {
+    check('K6b', 'firmware modular tidak ada dalam checkout — LEWATI (opsional)', true);
+  }
 
   // (a) token salah
   const pBefore = pushService.requests.length;

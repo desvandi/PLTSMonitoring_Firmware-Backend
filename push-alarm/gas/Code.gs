@@ -508,6 +508,22 @@ function doPost(e) {
   }
 
   if (body.action === 'unsubscribe') {
+    // [SELF-AUDIT 2026-09-16] unsubscribe kini mewajibkan autentikasi
+    // perangkat yang SAMA dengan subscribe (audit-2 K-7). Tanpa ini, siapa
+    // pun yang mengetahui URL endpoint push korban bisa menghapus langganan
+    // korban secara diam-diam — mematikan pengiriman alarm (DoS mutasi tanpa
+    // autentikasi, satu keluarga temuan dengan p.482). Browser tetap bisa
+    // berhenti berlangganan lokal; endpoint yang tidak dikenali GAS akan
+    // dipangkas saat push berikutnya gagal 410.
+    if (!body.device || !body.device.id || !body.token) {
+      return jsonOut_({
+        ok: false,
+        message: 'Pembatalan langganan butuh autentikasi perangkat (device.id + token)'
+      });
+    }
+    if (!isDeviceAuthorized_(String(body.device.id), body.token)) {
+      return jsonOut_({ ok: false, message: 'Token perangkat tidak valid' });
+    }
     var removedN = removeSubscription_(body.endpoint);
     return jsonOut_({ ok: true, message: 'Langganan dihapus', removed: removedN });
   }

@@ -141,3 +141,27 @@ scripts/native/run-native-tests.sh → ALL NATIVE HARNESS GREEN
    ter-deploy untuk mengaktifkan kontrak ackToken.
 4. Opsional: set Script Property `PUSH_ACK_SECRET` manual untuk rotasi
    terkendali (tanpa diset, secret auto-provision sekali).
+
+## Self-Audit 2026-09-16 (pra-audit final)
+
+1. **`scripts/inject_production_flags.py`** — `KeyError: 'CPPDEFINES'` saat
+   build production dijalankan TANPA secret env: crash traceback menggantikan
+   laporan validasi yang jujur. Diperbaiki (dictionary live + `.get()`):
+   tanpa secret → build DITOLAK dengan daftar flag yang hilang (fail-closed
+   bersih); dengan secret → build SUCCESS seperti sebelumnya.
+2. **`push-alarm/gas/Code.gs` — unsubscribe kini mewajibkan autentikasi
+   perangkat (simetri K-7)**: sebelumnya siapa pun yang mengetahui URL
+   endpoint push korban dapat menghapus langganan korban secara diam-diam
+   (mematikan pengiriman alarm — mutasi tanpa autentikasi, keluarga temuan
+   p.482). Browser korban tetap dapat berhenti berlangganan lokal; endpoint
+   basi dipangkas GAS saat push berikutnya memantul 410.
+3. **`push-alarm/tests/cross-audit-test.js` dipulihkan** — 164/164 PASS:
+   kontrol negatif K-7 (subscribe/unsubscribe tanpa/salah token ditolak),
+   regresi payload ber-kredensial, kredensial tersalur ke SW untuk
+   pushsubscriptionchange, dan K6b baru (kontrak firmware modular:
+   TELEMETRY bertanda tangan HMAC + prinsip pengirim tunggal di seluruh
+   pohon sumber).
+
+Kontrak GAS K-7 lengkapan operator: token yang dipakai PWA saat mendaftar
+push adalah token perangkat AKTIF (sama dengan yang dipakai firmware untuk
+`ingest`) — pastikan `FW_DEVICE_TOKEN`/`FW_DEVICE_TOKENS` memuatnya.
