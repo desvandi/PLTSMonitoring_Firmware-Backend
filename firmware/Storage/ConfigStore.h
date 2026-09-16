@@ -22,7 +22,9 @@ public:
 
   // ---------- DEVICE CONFIG (name, timezone, secrets) ----------
   void loadDeviceConfig();
-  void saveDeviceConfig();
+  // [STORAGE-GATE-04 / audit p.491] bool = persistence verified; false must
+  // be surfaced by callers — never a silent success.
+  bool saveDeviceConfig();
 
   // ---------- RUNTIME BATTERY CONFIG (capacity, thresholds, intervals) ----------
   void loadBatteryConfig();   // populates Core::cfg* globals
@@ -35,14 +37,20 @@ public:
   // read + range sanitize — old NVS images upgrade silently, same pattern as
   // the emergency config. Consumed live by Services::AnomalyDetector.
   void loadAlarmConfig();     // populates Core::cfgAlarm* globals
-  void saveAlarmConfig();
+  // [STORAGE-GATE-04 / audit p.491] bool = persistence verified. Alarm
+  // thresholds are SAFETY POLICY — a failed save must fail the mutation
+  // (callers roll RAM back), never report "config updated".
+  bool saveAlarmConfig();
 
 #if PLTS_ENABLE_EMERGENCY
   // ---------- v1.7.0 E-WAVE EMERGENCY TRIGGER CONFIG (NVS "plts_emg") ----------
   // 13 fields, ranges mirror Code.gs EMERGENCY_CONFIG_FIELDS. Defaults-on-read
   // means old NVS images upgrade silently — no migration needed.
   void loadEmergencyConfig();   // populates Core::cfgEmg* globals
-  void saveEmergencyConfig();
+  // [STORAGE-GATE-04 / audit p.491] bool = persistence verified. Emergency
+  // trigger thresholds are SAFETY POLICY — a failed save must fail the
+  // mutation (callers roll RAM back), never report success.
+  bool saveEmergencyConfig();
 #endif
 
   // ---------- CALIBRATION ----------

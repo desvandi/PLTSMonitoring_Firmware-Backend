@@ -179,6 +179,7 @@ static void handleGetTransaction() {
 // POST /api/relays/{channel}/clear
 static void handleRelayCommand() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(768)) return;
 
@@ -322,6 +323,7 @@ static void handleRelayCommand() {
 // a direct hardware mutation from the HTTP task context.
 static void handleAllOff() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(384)) return;
 

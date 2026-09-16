@@ -128,9 +128,12 @@ const EMERGENCY_EVENTS_HEADER = [
   'ts', 'device_key', 'type', 'reason', 'detail', 'state_after', 'source'
 ];
 // Valid EMERGENCY_EVENT types (device-reported). Fail-closed whitelist.
+// [audit p.491 REMEDIATION 2026-09] 'CONFIG_REFUSED' added — the firmware now
+// refuses an emergency CONFIG whose NVS persistence failed (RAM rolled back)
+// instead of reporting APPLIED; GAS must accept the honest refusal event.
 const EMERGENCY_EVENT_TYPES = [
   'TRIP', 'ESTOP', 'BOOT', 'CRASHLOOP', 'ARMED', 'DISARMED',
-  'CONFIG_APPLIED', 'REJECTED', 'ESTOP_RELEASED'
+  'CONFIG_APPLIED', 'CONFIG_REFUSED', 'REJECTED', 'ESTOP_RELEASED'
 ];
 // Valid EMERGENCY_COMMAND commands (operator-issued).
 const EMERGENCY_COMMANDS = ['ARM', 'DISARM', 'CONFIG'];

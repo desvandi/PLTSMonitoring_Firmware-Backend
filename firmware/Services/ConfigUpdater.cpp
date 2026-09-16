@@ -237,6 +237,30 @@ ConfigUpdater::Result ConfigUpdater::applyUpdate(JsonDocument& doc) {
   if (atCrit <= atWarn)   { res.message = "temperatureHighCritical must be > temperatureHighWarn"; return res; }
   if (asocCrit >= asocWarn) { res.message = "socLowCritical must be < socLowWarn"; return res; }
 
+  // [audit p.491] Pre-commit snapshot of the mutable safety/device fields —
+  // a FAILED NVS write must roll RAM back so the runtime policy and the
+  // operator response never claim a persisted state that does not exist.
+  // (Battery keeps its documented WARNING-degraded path below — battery
+  // values are already committed to the runtime authority when the write
+  // fails; alarm/device fields are trivially revertible and SAFETY-relevant.)
+  const float oldAlWarn  = Core::cfgAlarmVoltageLowWarnV;
+  const float oldAlCrit  = Core::cfgAlarmVoltageLowCriticalV;
+  const float oldAhWarn  = Core::cfgAlarmVoltageHighWarnV;
+  const float oldAhCrit  = Core::cfgAlarmVoltageHighCriticalV;
+  const float oldAcWarn  = Core::cfgAlarmCurrentHighWarnA;
+  const float oldAcCrit  = Core::cfgAlarmCurrentHighCriticalA;
+  const float oldAtWarn  = Core::cfgAlarmTemperatureHighWarnC;
+  const float oldAtCrit  = Core::cfgAlarmTemperatureHighCriticalC;
+  const float oldAhumWarn = Core::cfgAlarmHumidityHighWarnPct;
+  const float oldAsocWarn = Core::cfgAlarmSocLowWarnPct;
+  const float oldAsocCrit = Core::cfgAlarmSocLowCriticalPct;
+  char oldDeviceName[64];
+  strncpy(oldDeviceName, Core::deviceName, sizeof(oldDeviceName) - 1);
+  oldDeviceName[sizeof(oldDeviceName) - 1] = '\0';
+  char oldTimezone[40];
+  strncpy(oldTimezone, Core::cfgTimezone, sizeof(oldTimezone) - 1);
+  oldTimezone[sizeof(oldTimezone) - 1] = '\0';
+
   // ---------------------------------------------------------------------------
   // PHASE 2 — COMMIT. The candidate is fully valid; mutate RAM + persist.
   // ---------------------------------------------------------------------------
@@ -284,9 +308,44 @@ ConfigUpdater::Result ConfigUpdater::applyUpdate(JsonDocument& doc) {
     }
   }
   if (alarmChanged) {
-    Storage::config.saveAlarmConfig();
+    // [audit p.491] Safety-policy persistence is FAIL-CLOSED: a failed NVS
+    // write rolls the alarm thresholds back to the pre-update values and the
+    // whole mutation is reported FAILED — the operator must never hold a
+    // false belief that new protection thresholds are active (the audit's
+    // reboot-loses-threshold scenario).
+    if (!Storage::config.saveAlarmConfig()) {
+      Core::cfgAlarmVoltageLowWarnV        = oldAlWarn;
+      Core::cfgAlarmVoltageLowCriticalV    = oldAlCrit;
+      Core::cfgAlarmVoltageHighWarnV       = oldAhWarn;
+      Core::cfgAlarmVoltageHighCriticalV   = oldAhCrit;
+      Core::cfgAlarmCurrentHighWarnA       = oldAcWarn;
+      Core::cfgAlarmCurrentHighCriticalA   = oldAcCrit;
+      Core::cfgAlarmTemperatureHighWarnC   = oldAtWarn;
+      Core::cfgAlarmTemperatureHighCriticalC = oldAtCrit;
+      Core::cfgAlarmHumidityHighWarnPct    = oldAhumWarn;
+      Core::cfgAlarmSocLowWarnPct          = oldAsocWarn;
+      Core::cfgAlarmSocLowCriticalPct      = oldAsocCrit;
+      res.ok = false;
+      res.message = "config NOT saved — NVS alarm persistence FAILED; alarm thresholds ROLLED BACK to previous values";
+      Services::Log.append(Core::LogType::ConfigurationChanged, res.message, -1);
+      return res;
+    }
   }
-  Storage::config.saveDeviceConfig();
+  if (hasDeviceName || hasTimezone) {
+    // [audit p.491] Device identity fields roll back the same way (and the
+    // unconditional save that used to run even with NO device change is
+    // gone — no more pointless NVS wear per config update).
+    if (!Storage::config.saveDeviceConfig()) {
+      strncpy(Core::deviceName, oldDeviceName, sizeof(Core::deviceName) - 1);
+      Core::deviceName[sizeof(Core::deviceName) - 1] = '\0';
+      strncpy(Core::cfgTimezone, oldTimezone, sizeof(Core::cfgTimezone) - 1);
+      Core::cfgTimezone[sizeof(Core::cfgTimezone) - 1] = '\0';
+      res.ok = false;
+      res.message = "config NOT saved — NVS device persistence FAILED; device name/timezone ROLLED BACK";
+      Services::Log.append(Core::LogType::ConfigurationChanged, res.message, -1);
+      return res;
+    }
+  }
 
   res.ok = true;
   res.message = "config updated";

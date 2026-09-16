@@ -152,7 +152,8 @@ String base64urlEncode(const String& s) {
   return base64urlEncode((const uint8_t*)s.c_str(), s.length());
 }
 
-String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds) {
+String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds,
+               const String& role) {
   extern uint32_t getCurrUnixTime();
   extern uint32_t getMonotonicSec();
 
@@ -162,8 +163,12 @@ String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds
   uint32_t iat = getCurrUnixTime();
   if (iat == 0) iat = getMonotonicSec();
   uint32_t exp = iat + ttlSeconds;
+  // [audit p.489] Role claim — the device-side authorization boundary.
+  // Empty role defaults to "operator" (the web account is the single admin).
+  String safeRole = (role.length() > 0) ? role : String("operator");
   String payloadJson = "{\"sub\":\"" + username + "\",\"iat\":" + String(iat) +
-                       ",\"exp\":" + String(exp) + "}";
+                       ",\"exp\":" + String(exp) +
+                       ",\"role\":\"" + safeRole + "\"}";
   String payloadB64 = base64urlEncode(payloadJson);
 
   String signingInput = headerB64 + "." + payloadB64;
@@ -176,6 +181,11 @@ String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds
 }
 
 bool jwtVerify(const String& token, const String& secret, String& outUsername) {
+  String ignoreRole;
+  return jwtVerify(token, secret, outUsername, ignoreRole);
+}
+
+bool jwtVerify(const String& token, const String& secret, String& outUsername, String& outRole) {
   int firstDot = token.indexOf('.');
   int lastDot  = token.lastIndexOf('.');
   if (firstDot <= 0 || lastDot <= firstDot) return false;
@@ -220,6 +230,18 @@ bool jwtVerify(const String& token, const String& secret, String& outUsername) {
   int subEnd = payload.indexOf("\"", subIdx);
   if (subEnd < 0) return false;
   outUsername = payload.substring(subIdx, subEnd);
+
+  // [audit p.489] Extract the role claim. A token WITHOUT a role claim
+  // (issued by pre-p.489 firmware, TTL ≤ 15 min) resolves to the LEAST
+  // privilege ("viewer") — mutation endpoints fail closed until re-login,
+  // never fail open.
+  outRole = "viewer";
+  int roleIdx = payload.indexOf("\"role\":\"");
+  if (roleIdx >= 0) {
+    roleIdx += 8;
+    int roleEnd = payload.indexOf("\"", roleIdx);
+    if (roleEnd > roleIdx) outRole = payload.substring(roleIdx, roleEnd);
+  }
 
   int expIdx = payload.indexOf("\"exp\":");
   if (expIdx >= 0) {

@@ -74,6 +74,7 @@ void handleGetConfig() {
 
 void handlePostConfig() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(Core::HTTP_MAX_BODY_SIZE)) return;
   String raw = http.arg("plain");

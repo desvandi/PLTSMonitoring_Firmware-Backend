@@ -417,6 +417,25 @@ String EmergencySupervisor::applyCommand(const String& commandId,
     if (cfg.isNull() || !cfg.is<JsonObject>()) {
       messageOut = "missing config object";
     } else {
+      // [audit p.491] Pre-commit snapshot — a failed NVS write must roll the
+      // emergency trigger thresholds back to the previous values. These are
+      // SAFETY POLICY (arm/trip boundaries); the operator must never believe
+      // new thresholds are active when only RAM changed and a reboot would
+      // silently revert the protection limits.
+      const float oVLow   = Core::cfgEmgVbatLowV;
+      const float oVLowH  = Core::cfgEmgVbatLowHystV;
+      const float oVHi    = Core::cfgEmgVbatHighV;
+      const float oVHiH   = Core::cfgEmgVbatHighHystV;
+      const float oIDc    = Core::cfgEmgIDcOverA;
+      const float oIAcL   = Core::cfgEmgIAcLoadOverA;
+      const float oIAcG   = Core::cfgEmgIAcGenOverA;
+      const uint8_t oDeb  = Core::cfgEmgDebounceN;
+      const uint32_t oRec = Core::cfgEmgRecoverySec;
+      const uint8_t oRly  = Core::cfgEmgRelayPin;
+      const int8_t  oEPin = Core::cfgEmgEstopPin;
+      const uint8_t oEEn  = Core::cfgEmgEstopEnabled;
+      const uint8_t oSfp  = Core::cfgEmgSensorFailPolicy;
+
       // Field-by-field: out-of-range/absent fields are dropped and keep the
       // current value (parity with firmware-generic + GAS EMERGENCY_CONFIG_
       // FIELDS validation ranges).
@@ -434,12 +453,35 @@ String EmergencySupervisor::applyCommand(const String& commandId,
       Core::cfgEmgEstopEnabled = (uint8_t)clampEmgInt(cfg["estopEnabled"]| (long)-1, 0, 1, Core::cfgEmgEstopEnabled);
       Core::cfgEmgSensorFailPolicy = (uint8_t)clampEmgInt(cfg["sensorFailPolicy"] | (long)-1, 0, 1, Core::cfgEmgSensorFailPolicy);
 
-      Drivers::emergencyRelay.applyPins(Core::cfgEmgRelayPin, Core::cfgEmgEstopPin,
-                                         Core::cfgEmgEstopEnabled != 0);
-      Storage::config.saveEmergencyConfig();
-      _queueEventUnlocked("CONFIG_APPLIED", "operator updated trigger thresholds");
-      result = "APPLIED";
-      messageOut = "emergency config updated";
+      // [audit p.491] FAIL-CLOSED persistence: a failed save rolls RAM back
+      // and reports REFUSED — never "APPLIED" for a threshold that a reboot
+      // would silently revert.
+      if (!Storage::config.saveEmergencyConfig()) {
+        Core::cfgEmgVbatLowV     = oVLow;
+        Core::cfgEmgVbatLowHystV = oVLowH;
+        Core::cfgEmgVbatHighV    = oVHi;
+        Core::cfgEmgVbatHighHystV= oVHiH;
+        Core::cfgEmgIDcOverA     = oIDc;
+        Core::cfgEmgIAcLoadOverA = oIAcL;
+        Core::cfgEmgIAcGenOverA  = oIAcG;
+        Core::cfgEmgDebounceN    = oDeb;
+        Core::cfgEmgRecoverySec  = oRec;
+        Core::cfgEmgRelayPin     = oRly;
+        Core::cfgEmgEstopPin     = oEPin;
+        Core::cfgEmgEstopEnabled= oEEn;
+        Core::cfgEmgSensorFailPolicy = oSfp;
+        Drivers::emergencyRelay.applyPins(Core::cfgEmgRelayPin, Core::cfgEmgEstopPin,
+                                          Core::cfgEmgEstopEnabled != 0);
+        _queueEventUnlocked("CONFIG_REFUSED", "NVS persistence FAILED — emergency config ROLLED BACK");
+        result = "REFUSED";
+        messageOut = "emergency config NOT saved (NVS persistence failed) — previous thresholds retained";
+      } else {
+        Drivers::emergencyRelay.applyPins(Core::cfgEmgRelayPin, Core::cfgEmgEstopPin,
+                                           Core::cfgEmgEstopEnabled != 0);
+        _queueEventUnlocked("CONFIG_APPLIED", "operator updated trigger thresholds");
+        result = "APPLIED";
+        messageOut = "emergency config updated";
+      }
     }
   } else {
     messageOut = "unknown command: " + cmd;

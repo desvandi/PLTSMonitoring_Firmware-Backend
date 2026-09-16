@@ -61,6 +61,7 @@ void handleGet() {
 
 void handlePost() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(Core::HTTP_MAX_BODY_SIZE)) return;
   String raw = http.arg("plain");
@@ -129,6 +130,7 @@ void handlePost() {
 // TWICE with no durable transaction identity (idempotency gap).
 static void handlePointImpl(const String& which) {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(1024)) return;
   String raw = http.arg("plain");
@@ -201,6 +203,7 @@ static void handlePointImpl(const String& which) {
 
 static void handleAcs712ZeroImpl() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(512)) return;
   String raw = http.arg("plain");

@@ -150,6 +150,7 @@ void handleGetAlarms() {
 
 static void handleAcknowledgeImpl() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   if (!requireCsrf()) return;
   if (!requireBody(512)) return;
   // Extract code from path: /api/alarms/{code}/acknowledge
@@ -179,6 +180,7 @@ void handleAcknowledge() { handleAcknowledgeImpl(); }
 // trailing slash) and dispatch by suffix.
 void handleAlarmWildcard() {
   if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+  if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
   String uri = http.uri();
   // Only handle POST /api/alarms/{code}/acknowledge here. Other sub-paths
   // fall through to 404 (the previous behavior).
@@ -198,6 +200,7 @@ void registerRoutes() {
   // transaction pipeline (audit BLOCKER D).
   http.on("/api/alarms/acknowledge-all", HTTP_POST, []() {
     if (!requireAuth()) { sendError(401, "Unauthorized"); return; }
+    if (!requireRole("operator")) return;   // [audit p.489] role-gated mutation
     if (!requireCsrf()) return;
     if (!requireBody(512)) return;
     String ack, err;

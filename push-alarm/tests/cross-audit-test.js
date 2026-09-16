@@ -126,6 +126,9 @@ const gasCtx = vm.createContext({
   },
   Utilities: {
     getUuid: () => crypto.randomUUID(),
+    // [audit p.482] HMAC untuk ACK capability token (node crypto ≈ GAS).
+    computeHmacSha256Signature: (message, secret) =>
+      Array.from(crypto.createHmac('sha256', String(secret)).update(String(message)).digest()),
     newBlob: (bytes, contentType) => ({
       __blob: true, bytes: Array.from(bytes || []), contentType
     })
@@ -598,6 +601,7 @@ async function main() {
 
   /* ---------------- K4: ACK (PWA -> GAS) ---------------- */
   console.log('\n--- K4 ACK alarm (PWA -> GAS) ---');
+  const ackTokenOf = (id) => gasCtx.makeAckToken_(id);
   await dispatchClick('ack', notifData);
   const ackReq = [...gasRequests].reverse()
     .find((r) => r.method === 'POST' && r.body.indexOf('"ackAlarm"') >= 0);
@@ -605,16 +609,33 @@ async function main() {
   const ackBody = ackReq ? JSON.parse(ackReq.body) : {};
   check('K4', 'alarmId pada ACK identik dengan payload terkirim',
     ackBody.alarmId === 'ALM-DIRECT-001');
+  // [audit p.482] Capability token ikut menempel pada notifikasi dan dikirim
+  // bersama ACK — inilah otorisasinya, bukan sekadar pengetahuan URL+alarmId.
+  check('K4', 'ACK membawa capability token (p.482)',
+    typeof ackBody.ackToken === 'string' && ackBody.ackToken.length === 64);
+  check('K4', 'payload push membawa ackToken (p.482)',
+    typeof (notifData && notifData.ackToken) === 'string');
   check('K4', 'GAS menerima ACK (ok) termasuk jalur sendAlarmToAll langsung (temuan X-6)',
     ackReq && ackReq.response && ackReq.response.ok === true);
   check('K4', 'respons memuat alarmId yang sama',
     ackReq && ackReq.response && ackReq.response.alarmId === 'ALM-DIRECT-001');
   const entry = alarmLog().find((e) => e.id === 'ALM-DIRECT-001');
   check('K4', 'ALARM_LOG mencatat acknowledgedAt', entry && !!entry.acknowledgedAt);
-  const ackAgain = gasPost({ action: 'ackAlarm', alarmId: 'ALM-DIRECT-001' });
+  const ackAgain = gasPost({ action: 'ackAlarm', alarmId: 'ALM-DIRECT-001',
+    ackToken: ackTokenOf('ALM-DIRECT-001') });
   check('K4', 'ACK idempoten (kali kedua tetap ok)', ackAgain.ok === true);
-  check('K4', 'ACK id tak dikenal ditolak eksplisit',
-    gasPost({ action: 'ackAlarm', alarmId: 'TIDAK-ADA' }).ok === false);
+  check('K4', 'ACK tak dikenal ditolak eksplisit',
+    gasPost({ action: 'ackAlarm', alarmId: 'TIDAK-ADA',
+      ackToken: ackTokenOf('TIDAK-ADA') }).ok === false);
+  // [audit p.482] NEGATIVE: tokenless / wrong-token ACK rejected (fail-closed).
+  check('K4', 'p.482: ACK TANPA token ditolak (fail-closed)',
+    gasPost({ action: 'ackAlarm', alarmId: 'ALM-DIRECT-001' }).ok === false);
+  check('K4', 'p.482: ACK dengan token SALAH ditolak',
+    gasPost({ action: 'ackAlarm', alarmId: 'ALM-DIRECT-001',
+      ackToken: 'deadbeef'.repeat(8) }).ok === false);
+  check('K4', 'p.482: token alarm LAIN tidak berlaku untuk alarm ini',
+    gasPost({ action: 'ackAlarm', alarmId: 'ALM-DIRECT-001',
+      ackToken: ackTokenOf('ALM-LAIN-999') }).ok === false);
 
   const gasReqBefore = gasRequests.length;
   await dispatchClick('ack', { alarmId: null, url: './index.html?from=push', ackUrl: GAS_URL });

@@ -43,8 +43,14 @@ String base64urlEncode(const uint8_t* data, size_t len);
 String base64urlEncode(const String& s);
 
 // JWT (HS256)
-String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds);
+// [audit p.489 REMEDIATION] The access token now carries a `role` claim —
+// the device-side authorization boundary. Default "operator" (single admin
+// account model); jwtVerify surfaces the claim so every dangerous endpoint
+// can enforce a capability, not just authentication.
+String jwtSign(const String& username, const String& secret, uint32_t ttlSeconds,
+               const String& role = "operator");
 bool jwtVerify(const String& token, const String& secret, String& outUsername);
+bool jwtVerify(const String& token, const String& secret, String& outUsername, String& outRole);
 
 // Random hex token (e.g. CSRF / factory reset)
 String generateToken(size_t hexChars);
