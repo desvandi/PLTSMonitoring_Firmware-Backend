@@ -323,6 +323,16 @@ function doPost(e) {
       return json_(resp_(auth.ok ? 200 : 401, auth.ok ? 'PONG' : auth.reason,
         auth.ok ? pingHandshakeData_(body, auth) : null));
     }
+
+    // [AUDIT P0-2 2026-09-16] Push browser actions use PUSH-SCOPED tokens
+    // (p.493), NOT the canonical device credential — they are intercepted
+    // BEFORE the canonical auth gate on purpose. One trust boundary: the
+    // same deployment now serves telemetry AND push. See PushService.gs.
+    if (action === 'PUSH_SUBSCRIBE' || action === 'PUSH_UNSUBSCRIBE' ||
+        action === 'PUSH_ACK') {
+      return json_(pushHandleBrowserAction_(action, body));
+    }
+
     if (!auth.ok) return json_(resp_(401, 'Unauthorized: ' + auth.reason, null));
 
     // [WAVE-3 / GAS-2-J] HMAC callers are pinned to the device named in the
@@ -354,6 +364,27 @@ function doPost(e) {
       const gate = requireRegisteredDevice_(auth.deviceKey);
       if (gate) return json_(gate);
       return json_(recordTelemetry_(body, auth.deviceKey));
+    }
+    // [AUDIT P0-2 2026-09-16] Sensor-level alarm ingest through the
+    // CANONICAL boundary (HMAC or legacy token) — the same trust domain as
+    // TELEMETRY. Replaces the separate legacy push GAS contract.
+    if (action === 'PUSH_ALARM_INGEST') {
+      const gate = requireRegisteredDevice_(auth.deviceKey);
+      if (gate) return json_(gate);
+      return json_(pushAlarmIngest_(bodyPayload_(body), auth.deviceKey));
+    }
+    // [AUDIT P0-2/P1 2026-09-16] Push observability + test — both are
+    // authenticated paths; PUSH_TEST additionally requires the ADMIN token
+    // (rate limit is not authorization).
+    if (action === 'PUSH_STATUS') {
+      return json_(pushStatus_());
+    }
+    if (action === 'PUSH_TEST') {
+      const publishPayload = bodyPayload_(body);
+      const admin = verifyAdminToken_(
+        body.admin_token !== undefined ? body.admin_token : publishPayload.admin_token);
+      if (!admin.ok) return json_(resp_(401, 'Unauthorized: ' + admin.reason, null));
+      return json_(pushTest_(publishPayload));
     }
     if (action === 'LATEST') {
       const dk = resolveDeviceKey_(body, auth);
@@ -764,6 +795,11 @@ function recordTelemetry_(body, deviceKey) {
   if (out && out.alert) {
     maybeSendTelegramAlert_(out.alert, 'PLTS_TG_LOWBATT_' + deviceKey);
   }
+  // [AUDIT P0-3 2026-09-16] Emergency edge → durable AlarmEvent → push
+  // outbox — AFTER the telemetry lock, guarded internally so a push
+  // failure can never fail telemetry (safety stays local-first on the
+  // device; this is the operator-notification path). See PushService.gs.
+  pushEvaluateEmergency_(norm, deviceKey);
   // [WAVE-7] Piggyback the device's pending emergency command on the ingest
   // response — the firmware consumes commands on its EXISTING cadence (zero
   // extra polls). Read-only scan of a small bounded sheet, outside the lock.
