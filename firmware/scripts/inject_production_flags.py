@@ -88,10 +88,22 @@ if _pem_macros:
 # [PRODUCTION-GRADE 2026-09 / audit p.115] The fallback must be the REAL
 # production PWA origin, not the placeholder example domain — a placeholder
 # allowlist silently refuses every direct browser->device request.
+# [SELF-AUDIT 2026-09-16] Dictionary("CPPDEFINES") raises KeyError when the
+# key does not exist yet (no secrets injected, ini flags not yet parsed) —
+# the crash replaced the intended clean validation failure. Use the LIVE
+# whole-dictionary reference + .get() so (a) the no-secrets path falls
+# through to the STEP 2 "build refused" report instead of a traceback, and
+# (b) an Append() performed below is visible to RAW_CPPDEFINES below.
+# NOTE: the presence check intentionally looks at CPPDEFINES ONLY — the
+# ini's -DALLOWED_CORS_ORIGINS is still a raw BUILD_FLAGS string at
+# pre-script time, so the append below must still run (identical-value
+# macro redefinition is harmless; the original design relied on this).
+_env_dict = build_env.Dictionary()
+_existing_defines = _env_dict.get("CPPDEFINES", [])
 _cors_present = any(
     (isinstance(d, (list, tuple)) and d[0] == "ALLOWED_CORS_ORIGINS") or
     (isinstance(d, str) and "ALLOWED_CORS_ORIGINS" in d)
-    for d in build_env.Dictionary("CPPDEFINES")
+    for d in _existing_defines
 )
 if not _cors_present:
     _cors_default = os.environ.get("PIO_ALLOWED_CORS_ORIGINS",
@@ -102,8 +114,10 @@ if not _cors_present:
 # STEP 2: Validate
 # ============================================================================
 
-# Read CPPDEFINES for non-PEM macros
-RAW_CPPDEFINES = build_env.Dictionary("CPPDEFINES")
+# Read CPPDEFINES for non-PEM macros ([SELF-AUDIT] KeyError-safe: the key
+# may not exist when no secrets were injected — treat as empty list and let
+# the STEP 2 validation report the missing flags).
+RAW_CPPDEFINES = _env_dict.get("CPPDEFINES", [])
 MACROS = {}
 for flag in RAW_CPPDEFINES:
     if isinstance(flag, (list, tuple)) and len(flag) == 2:
