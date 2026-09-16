@@ -110,9 +110,19 @@ check("ConfigStore.h declares load/saveAlarmConfig",
       "loadAlarmConfig" in read(FW / "Storage/ConfigStore.h"))
 check("exportAll carries alarmConfig backup",
       re.search(r'createNestedObject\("alarmConfig"\)', cs_src) is not None)
-check("importAll restores + re-sanitizes alarmConfig",
+check("importAll restores + re-sanitizes alarmConfig (p.491: fail-closed persistence)",
       re.search(r'containsKey\("alarmConfig"\)', cs_src) is not None and
-      re.search(r'saveAlarmConfig\(\);\s*\n\s*loadAlarmConfig\(\);', cs_src) is not None)
+      re.search(r'!\s*saveAlarmConfig\(\)\)\s*importOk\s*=\s*false;\s*\n\s*loadAlarmConfig\(\);', cs_src) is not None)
+# [audit p.491 REMEDIATION] importAll must be persistence fail-closed: any
+# failed NVS save marks the whole import FAILED (restore incomplete is
+# reported honestly, never a silent success).
+check("importAll is persistence fail-closed (p.491)",
+      'bool importOk = true' in cs_src and 'return importOk' in cs_src)
+# [audit p.491 REMEDIATION] saveAlarmConfig must return bool with per-write
+# size verification — a failed NVS write can never masquerade as "saved".
+check("saveAlarmConfig returns verified bool (p.491)",
+      re.search(r'bool\s+ConfigStore::saveAlarmConfig\(\)', cs_src) is not None and
+      'putFloat("vLoW"' in cs_src and '== sizeof(float)' in cs_src)
 
 # --- 2. REST surface (GET/POST /api/config) ----------------------------------
 ch_src = read(FW / "Web/ConfigHandlers.cpp")
