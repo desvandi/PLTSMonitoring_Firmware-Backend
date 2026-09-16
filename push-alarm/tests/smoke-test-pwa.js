@@ -5,6 +5,19 @@
  * - Mock endpoint GAS (script.google.com) via Playwright route()
  * - Verifikasi: halaman render, SW aktif, manifest valid, sensor render,
  *   alarm render, tombol push tersedia, tanpa error konsol JS.
+ *
+ * [REMEDIASI P0-1/p.493 2026-09-16] Arsitektur provisioning runtime:
+ * build produksi menyajikan config.js KOSONG yang jujur
+ * (APP_PROVISIONED=false) — dashboard sensor hanya muncul SETELAH
+ * pengguna mem-provision lewat layar setup (URL GAS / VAPID /
+ * deviceId / push token -> sessionStorage, BUKAN localStorage).
+ * Test ini kini tiga fase:
+ *   A. Kejujuran: tanpa provisioning -> layar setup tampil, dashboard
+ *      disembunyikan, form lengkap.
+ *   B. Provisioning via UI nyata: isi form + submit -> reload.
+ *   C. Dashboard: data mock ter-render, status online, dan kredensial
+ *      TIDAK pernah menulis ke localStorage (p.493 end-to-end).
+ * Override: env MONITORIOT_PWA (folder pwa-push-alarm).
  */
 'use strict';
 
@@ -62,7 +75,12 @@ async function main() {
 
   const { chromium } = require('playwright');
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } }); // ukuran ponsel
+  // [REMEDIASI P0-1] Route dipasang pada CONTEXT, bukan page: setelah
+  // provisioning via form, reload membuat halaman dikendalikan service
+  // worker, dan fetch GAS di-init dari dalam SW (network-only).
+  // page.route() TIDAK mencegat fetch dari SW; context.route() YA.
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); // ukuran ponsel
+  const page = await context.newPage();
 
   const consoleErrors = [];
   page.on('console', (msg) => {
@@ -70,7 +88,8 @@ async function main() {
   });
   page.on('pageerror', (err) => consoleErrors.push('PAGEERROR: ' + err.message));
 
-  // ---- Mock endpoint GAS ----
+  // ---- Mock endpoint GAS (di context: menangkap fetch dari page DAN SW;
+  //     bertahan lintas reload) ----
   const snapshot = {
     ok: true,
     sensors: [
@@ -83,10 +102,11 @@ async function main() {
       { id: 'ALM-002', title: 'Tanah Kering', body: 'Kelembapan tanah 24%', severity: 'warning' }
     ]
   };
-  await page.route('**/exec**', (route) => {
+  await context.route('**/exec**', (route) => {
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
+      headers: { 'Access-Control-Allow-Origin': '*' },
       body: JSON.stringify(snapshot)
     });
   });
@@ -97,11 +117,72 @@ async function main() {
     else { fail++; console.log('  FAIL ' + name); }
   };
 
-  // ---- Muat halaman ----
+  // ================================================================
+  // FASE A — Kejujuran keadaan belum diprovision (P0-1)
+  // ================================================================
+  console.log('  -- Fase A: keadaan tanpa provisioning --');
   await page.goto('http://127.0.0.1:8787/', { waitUntil: 'load' });
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(800);
 
   check('judul halaman', (await page.title()).includes('MonitorIoT'));
+  check('[A] layar setup tampil (belum diprovision = jujur)',
+    await page.locator('#section-setup').isVisible());
+  check('[A] dashboard sensor disembunyikan sebelum provisioning',
+    !(await page.locator('#section-sensors').isVisible()));
+  check('[A] form setup lengkap (apiBase/vapid/deviceId/token)',
+    (await page.locator('#setup-api-base').count()) === 1 &&
+    (await page.locator('#setup-vapid').count()) === 1 &&
+    (await page.locator('#setup-device-id').count()) === 1 &&
+    (await page.locator('#setup-device-token').count()) === 1);
+
+  // ================================================================
+  // FASE B — Provisioning runtime via UI nyata
+  // ================================================================
+  console.log('  -- Fase B: provisioning via form setup --');
+  await page.fill('#setup-api-base', 'https://script.google.com/macros/s/MOCKSMOKETESTID/exec');
+  // VAPID mock: base64url >= 80 karakter (validasi form: P-256 65-byte).
+  await page.fill('#setup-vapid', 'B'.repeat(87));
+  await page.fill('#setup-device-id', 'SMOKE-DEV-001');
+  await page.fill('#setup-device-token', 'smoke-push-token-01');
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'load', timeout: 15000 }),
+    page.click('#setup-form button[type="submit"]')
+  ]);
+  await page.waitForTimeout(2000); // beri waktu polling pertama + render
+
+  // ================================================================
+  // FASE C — Dashboard ter-render dari data mock
+  // ================================================================
+  console.log('  -- Fase C: dashboard pasca-provisioning --');
+  check('[C] layar setup tertutup setelah provisioning',
+    !(await page.locator('#section-setup').isVisible()));
+  check('[C] dashboard sensor tampil setelah provisioning',
+    await page.locator('#section-sensors').isVisible());
+
+  const sensorCards = await page.locator('.sensor-card').count();
+  check('3 kartu sensor ter-render', sensorCards === 3);
+  const alarmItems = await page.locator('.alarm-item').count();
+  check('2 alarm ter-render', alarmItems === 2);
+  const alarmText = await page.locator('#alarm-list').innerText();
+  check('alarm kritis tampil', alarmText.includes('SUHU KRITIS'));
+  const sensorText = await page.locator('#sensor-grid').innerText();
+  check('nilai sensor tampil (41.2 C)', sensorText.includes('41.2'));
+  check('status koneksi online', (await page.locator('#conn-label').innerText()) === 'Terhubung');
+
+  // ---- p.493 end-to-end: kredensial HIDUP di sessionStorage, BUKAN localStorage ----
+  const credStorage = await page.evaluate(() => ({
+    localDeviceId: localStorage.getItem('push.deviceId'),
+    localDeviceToken: localStorage.getItem('push.deviceToken'),
+    sessionDeviceId: sessionStorage.getItem('push.deviceId'),
+    sessionDeviceToken: sessionStorage.getItem('push.deviceToken')
+  }));
+  check('[p.493] localStorage TIDAK menyimpan deviceId',
+    credStorage.localDeviceId === null);
+  check('[p.493] localStorage TIDAK menyimpan deviceToken',
+    credStorage.localDeviceToken === null);
+  check('[p.493] kredensial tersimpan di sessionStorage (sesi saja)',
+    credStorage.sessionDeviceId === 'SMOKE-DEV-001' &&
+    credStorage.sessionDeviceToken === 'smoke-push-token-01');
 
   // ---- Manifest ----
   const manifestResp = await page.request.get('http://127.0.0.1:8787/manifest.json');
@@ -132,17 +213,6 @@ async function main() {
   });
   check('SW terdaftar', swState2.registered);
   check('SW aktif', swState2.active);
-
-  // ---- Render data mock ----
-  const sensorCards = await page.locator('.sensor-card').count();
-  check('3 kartu sensor ter-render', sensorCards === 3);
-  const alarmItems = await page.locator('.alarm-item').count();
-  check('2 alarm ter-render', alarmItems === 2);
-  const alarmText = await page.locator('#alarm-list').innerText();
-  check('alarm kritis tampil', alarmText.includes('SUHU KRITIS'));
-  const sensorText = await page.locator('#sensor-grid').innerText();
-  check('nilai sensor tampil (41.2 C)', sensorText.includes('41.2'));
-  check('status koneksi online', (await page.locator('#conn-label').innerText()) === 'Terhubung');
 
   // ---- UI Push ----
   const pushPermission = await page.evaluate(() =>
@@ -194,6 +264,7 @@ async function main() {
   if (realErrors.length) console.log('  [errors]', JSON.stringify(realErrors, null, 2));
 
   await page.screenshot({ path: '/home/z/my-project/scripts/smoke-pwa.png', fullPage: false });
+  await context.close();
   await browser.close();
   server.close();
 

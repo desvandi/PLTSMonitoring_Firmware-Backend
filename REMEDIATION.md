@@ -223,3 +223,26 @@ push adalah token perangkat AKTIF (sama dengan yang dipakai firmware untuk
   14 asersi: PUSH_TOKENS, deviceId binding, ownership, outbox
   PENDING/SENT/retry, migrasi localStorage, apiBase payload).
 - Syntax check canonical Code.gs + PushService.gs + legacy Code.gs: OK.
+
+### Self-audit pasca-remediasi — smoke UI suite di-upgrade ke arsitektur provisioning runtime (2026-09-16)
+- Temuan self-audit: `tests/smoke-test-pwa.js` (suite 2 dari 3 di
+  `tests/run-all.sh`) masih mengasumsikan arsitektur lama
+  (config.js statis terisi) sehingga 6 asersi render gagal palsu
+  setelah P0-1: app yang belum diprovision justru MENAMPILKAN layar
+  setup (perilaku benar), bukan dashboard.
+- Perbaikan: rewrite 3 fase —
+  (A) kejujuran tanpa provisioning (layar setup tampil, dashboard
+  disembunyikan, form lengkap);
+  (B) provisioning via UI nyata (fill + submit + reload);
+  (C) render dashboard dari mock GAS + asersi p.493 end-to-end
+  (localStorage TIDAK berisi deviceId/deviceToken; sessionStorage YA).
+- Bug harness ditemukan & diperbaiki: mock GAS dipasang di
+  `browserContext.route()` (bukan `page.route()`) — setelah reload
+  halaman dikendalikan service worker, dan fetch GAS di-inisiasi dari
+  dalam SW; `page.route()` tidak mencegatnya sehingga SW menjawab 503
+  internal. `context.route()` menangkap keduanya.
+- Jumlah asersi: 17 → 25 (suite PWA); total harness 241
+  (35 kripto + 25 smoke + 181 cross-audit K1-K9). Header `run-all.sh`
+  dan `tools/prepush-audit.js` disinkronkan.
+- Hasil: `tests/run-all.sh` = **3/3 SUITE LULUS** terhadap PWA main
+  (c22fe17) + firmware main.

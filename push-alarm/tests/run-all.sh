@@ -9,8 +9,10 @@
 # Skrip membuat <induk>/monitoriot-checkout/ berisi tautan simbolik dengan
 # nama yang diharapkan harness, lalu menjalankan:
 #   tests/test-webpush-core.js   (35 asersi kripto)
-#   tests/smoke-test-pwa.js      (17 asersi PWA; butuh Playwright+Chromium)
-#   tests/cross-audit-test.js    (151 asersi kontrak Tabel 11 K1-K8)
+#   tests/smoke-test-pwa.js      (25 asersi PWA; butuh Playwright+Chromium;
+#       tiga fase A/B/C: kejujuran provisioning, provisioning via UI,
+#       render dashboard + p.493 localStorage/sessionStorage)
+#   tests/cross-audit-test.js    (181 asersi kontrak Tabel 11 K1-K9)
 #
 # Layout lama (4 repo monitoriot-*) tetap didukung lewat auto-deteksi.
 # Override: MONITORIOT_CHECKOUT, MONITORIOT_PWA_DIR, MONITORIOT_GAS_DIR,
@@ -69,7 +71,7 @@ cleanup() { rm -rf "$CHECKOUT"; }
 trap cleanup EXIT
 
 echo "=============================================================="
-echo " SUITE REGRESI MONITORIOT (201 asersi)"
+echo " SUITE REGRESI MONITORIOT (241 asersi)"
 echo " PWA : $PWA_DIR"
 echo " GAS : $GAS_DIR"
 echo " FW  : $FW_DIR"
@@ -107,6 +109,6 @@ if [ $GAGAL -ne 0 ]; then
   echo "=============================================================="
   exit 1
 fi
-echo " HASIL: 3/3 SUITE LULUS (35 + 17 + 151 asersi)."
+echo " HASIL: 3/3 SUITE LULUS (35 + 25 + 181 asersi)."
 echo "=============================================================="
 exit 0
