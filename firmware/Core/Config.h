@@ -490,7 +490,7 @@ static constexpr const char* OTA_ALLOWED_HOSTS[] = {
 // [AUDIT 2026-09 ROUND 4 — device security provisioning / p.436+p.437]
 // -----------------------------------------------------------------------------
 // Hardware security posture + hardware-rooted anti-rollback. Implemented in
-// Services/SecurityPosture; operator runbook: docs/SECURE_PROVISIONING.md.
+// Services/SecurityPosture; provisioning = langkah operator (espefuse).
 //
 // Layer map (what answers which auditor question):
 //   Ed25519 OTA signature  — "is this IMAGE from the trusted releaser?"
@@ -583,7 +583,7 @@ extern bool calibrationDirty;
 
 // ---------------------------------------------------------------------------
 // [v1.8.0] 8-Channel Relay Configuration (PCF8574 I²C Expander)
-// See docs/ARCHITECTURE.md §5 (Hardware Interface: PCF8574) for full hardware spec.
+// Hardware interface: PCF8574 I2C expander (lihat skematik PCB sheet 12).
 // ---------------------------------------------------------------------------
 #if PLTS_ENABLE_RELAYS
 static constexpr uint8_t  RELAY_CHANNEL_COUNT       = 8;

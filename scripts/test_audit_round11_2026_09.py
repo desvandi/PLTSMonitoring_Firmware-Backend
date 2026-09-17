@@ -84,7 +84,6 @@ mcr_cpp = read(FW / "Network" / "MqttConfigReceiver.cpp")
 diag_cpp = read(FW / "Web" / "DiagnosticsHandlers.cpp")
 harness = read(NATIVE / "verify_service_lock_concurrency.cpp")
 runner = read(NATIVE / "run-native-tests.sh")
-audit_doc = read(ROOT / "docs" / "AUDIT_2026_09_FOLLOWUP.md")
 
 auth_nc = strip_comments(auth_cpp)
 
@@ -193,12 +192,6 @@ check("F2 confirm tidak lagi dibuka dengan baca state tanpa kunci",
 check("F3 tidak ada mutasi _factoryResetToken di luar critical section di seluruh file",
       all(m > auth_nc.find("_lockAuth()") for m in
           [mm.start() for mm in re.finditer(re.escape("_factoryResetToken[0] = '\\0'"), auth_nc)]))
-
-print("== [G] Dokumentasi ==")
-
-check("G1 §17 round-11 terdokumentasi di AUDIT_2026_09_FOLLOWUP.md",
-      "## 17. Round 11" in audit_doc and "p.476" in audit_doc and
-      "ONE-TIME" in audit_doc.upper())
 
 fails = [r for r in results if not r[1]]
 print()

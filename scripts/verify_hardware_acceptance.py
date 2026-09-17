@@ -77,9 +77,10 @@ def run() -> int:
     if not hw_json.is_file():
         blockers.append(
             f"hardware acceptance file not found: {hw_json}\n"
-            f"  Create it by completing docs/hardware-acceptance/v{args.version}.md "
+            f"  Create it by completing the {args.version} acceptance protocol "
             f"on real ESP32 hardware, then export the verdict to "
-            f"docs/hardware-acceptance/v{args.version}.json"
+            f"docs/hardware-acceptance/v{args.version}.json "
+            f"(schema: v{args.version}.template.json)"
         )
         print(f"[FAIL] file-exists: {hw_json} not found")
         print()

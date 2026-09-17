@@ -11,7 +11,7 @@
 // burned one-way anti-rollback floor. This service makes that state a
 // first-class, inspectable, enforceable part of the firmware.
 //
-// WHAT THIS SERVICE DOES (app-level, "Layer 2" — see docs/SECURE_PROVISIONING.md):
+// WHAT THIS SERVICE DOES (app-level, "Layer 2"):
 //   1. READS the hardware posture from eFuse (flash encryption parity,
 //      secure-boot V1/V2 bits, BLK3 SECURE_VERSION popcount, coding scheme).
 //   2. MAINTAINS the eFuse secure-version floor using the SAME semantics as
@@ -29,11 +29,11 @@
 //      This is the device-side half of "proof that the flashed binary is the
 //      audited artifact" (operator-side half: scripts/verify_flashed_image.py).
 //
-// WHAT IT DOES NOT DO (honest scope — see docs/SECURE_PROVISIONING.md "Layers"):
+// WHAT IT DOES NOT DO (honest scope — secure-provisioning "Layers"):
 //   - It does NOT make the BOOTLOADER reject images; the prebuilt
 //     arduino-esp32 bootloader has no secure-boot / anti-rollback support
 //     compiled in. Bootloader-level enforcement ("Layer 1") requires the
-//     ESP-IDF build migration documented in SECURE_PROVISIONING.md Gate B.
+//     ESP-IDF build migration (Gate B of the secure-provisioning plan).
 //   - It does NOT enable flash encryption or secure boot; those are one-way
 //     per-device provisioning steps performed by the operator (espefuse).
 //

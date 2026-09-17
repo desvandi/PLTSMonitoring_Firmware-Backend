@@ -200,7 +200,7 @@ void SecurityPosture::_reconcileLedger() {
     Log.append(Core::LogType::StorageError,
                "SECURITY: security ledger ABSENT but eFuse floor=" + String(floor) +
                " — NVS wiped/rolled back after security epochs were burned. " +
-               "OTA will be refused until re-provisioned (docs/SECURE_PROVISIONING.md).", 0);
+               "OTA will be refused until re-provisioned (Gate A, espefuse).", 0);
     return;
   }
 
@@ -216,7 +216,7 @@ void SecurityPosture::_reconcileLedger() {
 bool SecurityPosture::otaProvisioningOk(String* whyNot) const {
   if (_otaRequiresFlashEncryption() && !_s.flashEncryption) {
     if (whyNot) *whyNot = "PRODUCTION: flash encryption not provisioned — "
-                          "OTA refused (see docs/SECURE_PROVISIONING.md)";
+                          "OTA refused (flash encryption not provisioned)";
     return false;
   }
   if (_s.ledgerStatus == LedgerStatus::Tamper ||
@@ -385,7 +385,7 @@ void SecurityPosture::begin() {
     Log.append(Core::LogType::StorageError,
                "SECURITY: PRODUCTION device UNPROVISIONED — flash encryption "
                "is OFF. OTA will be refused until the device is provisioned "
-               "(docs/SECURE_PROVISIONING.md).", 0);
+               "(Gate A, espefuse).", 0);
   }
 #endif
 }

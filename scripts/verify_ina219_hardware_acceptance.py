@@ -147,7 +147,7 @@ def check_hardware_identity(hw, blockers, warnings, version):
                     f"(releaseEligible=false). Hardware acceptance performed on a "
                     f"development revision does not certify a production release. "
                     f"The v1.9.3 release-target hardware class is 'bench-prototype' "
-                    f"(see docs/HARDWARE_REVISIONS.md)."
+                    f"(see docs/hardware-revisions.json)."
                 )
                 print(f"[FAIL] hardwareIdentity.boardRevision: '{board}' is development-only (BLOCKED)")
             else:

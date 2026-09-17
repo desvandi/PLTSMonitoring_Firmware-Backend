@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Hardware revision registry [Audit 2026-09-05 re-audit, sections 17+20]. Machine-readable source of truth for the hardware-identity acceptance boundary. Evidence verifiers (verify_ina219_hardware_acceptance.py, verify_ota_evidence.py) validate evidence hardwareIdentity.boardRevision against this registry: a release may only cite revisions with releaseEligible=true. Development-only revisions (S10/S12 PCB work) can NEVER be the acceptance basis for a production release without a new, revision-specific acceptance. The companion document docs/HARDWARE_REVISIONS.md explains the boundary in prose.",
+  "description": "Hardware revision registry [Audit 2026-09-05 re-audit, sections 17+20]. Machine-readable source of truth for the hardware-identity acceptance boundary. Evidence verifiers (verify_ina219_hardware_acceptance.py, verify_ota_evidence.py) validate evidence hardwareIdentity.boardRevision against this registry: a release may only cite revisions with releaseEligible=true. Development-only revisions (S10/S12 PCB work) can NEVER be the acceptance basis for a production release without a new, revision-specific acceptance.",
   "revisions": [
     {
       "id": "bench-prototype",

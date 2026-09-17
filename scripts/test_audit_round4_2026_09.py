@@ -202,21 +202,6 @@ if vfi.is_file():
     check("F4 UART mode hashes parsed image (not raw slot)",
           "image_length_from_header" in vfi_src)
 
-prov = ROOT / "docs" / "SECURE_PROVISIONING.md"
-check("F5 docs/SECURE_PROVISIONING.md exists", prov.is_file())
-if prov.is_file():
-    ptxt = prov.read_text()
-    check("F6 runbook covers Gate A (flash encryption commands)",
-          "burn_key flash_encryption" in ptxt and "burn-efuse FLASH_CRYPT_CNT" in ptxt)
-    check("F7 runbook covers Gate B (secure boot migration) honestly",
-          "Gate B" in ptxt and "CONFIG_SECURE_BOOT" in ptxt)
-    check("F8 runbook warns one-way + key escrow",
-          "ONE-WAY" in ptxt and "vault" in ptxt.lower())
-    check("F9 runbook honest limits section (no over-claim)",
-          "Honest limits" in ptxt)
-    check("F10 runbook verification ties to /api/security + tool",
-          "/api/security" in ptxt and "verify_flashed_image.py" in ptxt)
-
 # ---------------------------------------------------------------------------
 # G. Python mirrors — decision tables
 # ---------------------------------------------------------------------------
