@@ -17,14 +17,19 @@
 #
 # Pemakaian:
 #   bash scripts/make-gas-bundle.sh [revision] [outdir]
-#   revision default: git rev-parse HEAD (pendek)
+#   revision default: git rev-parse HEAD (SHA penuh 40 hex — SAMA format
+#                      dengan GITHUB_SHA yang di-stamp CI, sehingga bundle
+#                      lokal == bundle CI byte-per-byte untuk revision sama)
 #   outdir  default: dist/gas-bundle
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-REV="${1:-$(git rev-parse --short HEAD)}"
+# [Audit 2026-09-17] Full SHA (bukan --short): CI men-stamp GITHUB_SHA
+# penuh; dengan default yang sama, build lokal CI == build lokal byte-per-byte
+# (terverifikasi: hash PushService.gs identik untuk revision e8b14a55...).
+REV="${1:-$(git rev-parse HEAD)}"
 OUT="${2:-dist/gas-bundle}"
 STAMP_PLACEHOLDER="dev-unstamped"
 
