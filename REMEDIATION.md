@@ -246,3 +246,101 @@ push adalah token perangkat AKTIF (sama dengan yang dipakai firmware untuk
   dan `tools/prepush-audit.js` disinkronkan.
 - Hasil: `tests/run-all.sh` = **3/3 SUITE LULUS** terhadap PWA main
   (c22fe17) + firmware main.
+
+## Putaran 3 — 2026-09-17 (P1 round-3: push canonical correctness)
+
+Temuan auditor round-3 pada HEAD 9ecc77e7 — semua P1 kini ditutup di
+source level DENGAN bukti mekanis (kontrak K10 baru, 54 asersi; total
+harness 295 = 35 kripto + 25 smoke + 235 cross-audit K1–K10):
+
+### 1. [P1-A] Alarm state tidak di-scope per deviceId — TERTUTUP
+- `PUSH_ALARM_STATE[name]` global diganti state **per-device**
+  (`PUSH_ST_<sha256-16(device)>`, key = alarmCode); `generations`
+  digabung ke entri state (`gen`) — tidak ada lagi property terpisah
+  yang bisa menyimpang.
+- Event ID kini `ALM-<dev-slug-24>-<code-slug-20>-<gen36>-<rand8>`
+  (+ komponen acak) → dua device dengan sensor senama TIDAK saling
+  menimpa edge detection dan tidak bertabrakan ID walau timestamp sama.
+- Bukti K10: DEV_A & DEV_B alarm sensor senama → 2 event berbeda,
+  generation independen (=1 keduanya), clear DEV_A tidak mengubah
+  event DEV_B (tetap RAISED).
+- Legacy `push-alarm/gas/Code.gs` (jalur migrasi, kini ber-banner
+  DEPRECATED) di-backport device-scoping + ID unik yang sama.
+
+### 2. [P1-B] Partial delivery menduplikasi push — TERTUTUP
+- `delivery.perSub[subId]='SENT'` — cursor per-subscription; retry
+  melewati subscriber yang sudah terkirim.
+- Bukti K10: 3 subscriber, tengah 503 → B1✓ B2✗ B3✓; setelah retry
+  hanya B2 yang menerima kiriman tambahan (B1 tetap 1x, B3 tetap 1x);
+  status akhir SENT.
+- Semantika resmi didokumentasikan: **at-least-once per subscriber**
+  (docs/PUSH_DELIVERY_SEMANTICS.md) — jendela duplikat dipersempit ke
+  subscriber in-flight saat eksekusi mati antara kirim dan merge.
+
+### 3. [P1-C] Event CLEARED tidak menutup event RAISED asal — TERTUTUP
+- Tepi turun kini MENULIS ULANG event asal: `state='CLEARED'`,
+  `clearedAt`, `resolvedBy=<rsvId>`; event RSV membawa
+  `resolvesEventId=<almId>`. Jalur emergency (EMG) sama (state
+  `PUSH_EMERGENCY_STATE` menyimpan eventId asal).
+- Bukti K10: lifecycle suhu + lifecycle emergency keduanya diverifikasi.
+
+### 4. [P1-D] Lock: nested tryLock + network I/O di dalam lock — TERTUTUP
+- Refactor 3 fase: (1) critical section PENDEK untuk deteksi tepi +
+  persist PENDING + claim-token; (2) Web Push network I/O DI LUAR lock;
+  (3) merge per-event di critical section pendek sendiri.
+  `pushRetryPending_()` tidak lagi dipanggil dari dalam lock ingest
+  (nested tryLock hilang); claim + TTL 90 dtk mencegah dua round
+  pengiriman bersamaan untuk event yang sama.
+- Bukti mekanis K10 (instrumentasi mock LockService): **0 fetch
+  jaringan selama lock dipegang**, **0 tryLock bersarang**, lock
+  ter-release seimbang, kontensi (forceBusy) → ingest 503 fail-closed
+  TANPA setengah-mutasi.
+
+### 5. [CAP] Kapasitas Script Properties — TERTUTUP (mekanis)
+- Layout baru: SATU property per event (`PUSH_EVT_<id>`) dan per
+  langganan (`PUSH_SUB_<subId>`) — array JSON tunggal (yang dapat
+  menabrak batas 9 KB/value GAS) dihapus.
+- Anggaran mekanis: `STORAGE_VALUE_LIMIT` 8.500 char/value,
+  `STORAGE_TOTAL_LIMIT` 450.000 char total, eviksi terminal-tertua-dulu,
+  penghitung jujur `PUSH_CAPACITY_DROPPED` dilaporkan PUSH_STATUS.
+- Bukti K10 dengan mock yang MENEGAKKAN batas nyata GAS: 205 event
+  worst-case + 50 langganan + state + token → **0 pelanggaran 9 KB,
+  0 pelanggaran 500 KB**, retensi ≤ 200 terjaga.
+- Bonus [QUOTA]: gerbang indeks PENDING membuat ingest tenang membaca
+  ≤ 40 property (dibuktikan) — aman untuk kuota harian multi-device.
+
+### 6. [P1-E] Cross-repo CI menguji PWA main, bukan SHA pasangan — TERTUTUP
+- `config/pwa-pin.txt` (commit bersama perubahan firmware) mem-PIN
+  revision PWA eksak; job cross-audit checkout `ref: <pin>` + verifikasi
+  SEGAR (pin harus ancestor dari PWA main — pin basi = FAIL).
+- `workflow_dispatch` input `pwa_ref` memungkinkan validasi PR PWA yang
+  belum merge (paired-PR validation) sebelum pin dinaikkan.
+- Pin awal: `f34d444b52cfe87e178a49574f353ce3c4bad11d` (PWA main saat
+  remediasi ini) — kombinasi FW-round3 × PWA f34d444 kini TERVERIFIKASI
+  oleh satu run CI yang sama (lihat bukti run di bawah).
+
+### 7. Deployed GAS source binding — TERTUTUP (rantai bukti)
+- Job CI baru `gas-source-bundle`: membangun bundle
+  PushService.gs+Code.gs+WebPushCore.gs dengan `PUSH_SOURCE_REVISION`
+  di-stamp = GITHUB_SHA + MANIFEST sha256, artefak immutable 90 hari.
+- `PUSH_STATUS` (terautentikasi) melaporkan `sourceRevision`;
+  `scripts/verify-gas-deployment.js` membandingkan live vs manifest.
+- Operator tetap menempel manual (tanpa clasp credentials di CI), tapi
+  kini ada alat verifikasi pasca-deploy yang mekanis.
+
+### 8. Coverage gap yang ditemukan self-audit: harness 181 asersi lama
+   hanya menguji LEGACY GAS — TERTUTUP
+- Kontrak baru **K10 (54 asersi)** menjalankan dispatcher CANONICAL
+  penuh (code.gs/Code.gs + PushService.gs) di vm dengan mock
+  Config/Devices sheet + CacheService — auth gate, fleet gate,
+  subscribe/unsubscribe/ACK/ingest/PUSH_TEST/PUSH_STATUS, semua skenario
+  P1 di atas, interleaving (merge tidak menimpa mutasi lain), dan
+  emergency lifecycle.
+
+### Status operasional yang TETAP terbuka (jujur, non-software)
+- Deployment GAS canonical + provisioning (physical step operator) —
+  sekarang didukung rantai verifikasi (gas-bundle + verify tool).
+- Firmware v1.9.3 flash + hardware acceptance T9–T13, INA-OTA rollback,
+  clock E2E T1–T6, Secure Boot/Flash Encryption proof.
+- Server-assisted mode (Redis) bila topology berubah dari
+  browser-configured.

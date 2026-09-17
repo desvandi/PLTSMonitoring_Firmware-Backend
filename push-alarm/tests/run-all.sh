@@ -12,7 +12,7 @@
 #   tests/smoke-test-pwa.js      (25 asersi PWA; butuh Playwright+Chromium;
 #       tiga fase A/B/C: kejujuran provisioning, provisioning via UI,
 #       render dashboard + p.493 localStorage/sessionStorage)
-#   tests/cross-audit-test.js    (181 asersi kontrak Tabel 11 K1-K9)
+#   tests/cross-audit-test.js    (235 asersi kontrak Tabel 11 K1-K10)
 #
 # Layout lama (4 repo monitoriot-*) tetap didukung lewat auto-deteksi.
 # Override: MONITORIOT_CHECKOUT, MONITORIOT_PWA_DIR, MONITORIOT_GAS_DIR,
@@ -61,17 +61,22 @@ if ! node -e "require.resolve('playwright')" >/dev/null 2>&1; then
 fi
 
 # Bangun checkout berisi tautan simbolik sesuai nama yang dibaca harness.
+# (Fallback cp -r untuk lingkungan yang melarang symlink, mis. sandbox.)
+link_or_copy() {
+  if ln -s "$1" "$2" 2>/dev/null; then return 0; fi
+  cp -r "$1" "$2"
+}
 rm -rf "$CHECKOUT"
 mkdir -p "$CHECKOUT"
-ln -s "$PWA_DIR" "$CHECKOUT/pwa-push-alarm"
-ln -s "$GAS_DIR" "$CHECKOUT/gas"
-ln -s "$FW_DIR" "$CHECKOUT/MonitorIoT_Firmware"
+link_or_copy "$PWA_DIR" "$CHECKOUT/pwa-push-alarm"
+link_or_copy "$GAS_DIR" "$CHECKOUT/gas"
+link_or_copy "$FW_DIR" "$CHECKOUT/MonitorIoT_Firmware"
 
 cleanup() { rm -rf "$CHECKOUT"; }
 trap cleanup EXIT
 
 echo "=============================================================="
-echo " SUITE REGRESI MONITORIOT (241 asersi)"
+echo " SUITE REGRESI MONITORIOT (295 asersi)"
 echo " PWA : $PWA_DIR"
 echo " GAS : $GAS_DIR"
 echo " FW  : $FW_DIR"
@@ -109,6 +114,6 @@ if [ $GAGAL -ne 0 ]; then
   echo "=============================================================="
   exit 1
 fi
-echo " HASIL: 3/3 SUITE LULUS (35 + 25 + 181 asersi)."
+echo " HASIL: 3/3 SUITE LULUS (35 + 25 + 235 asersi)."
 echo "=============================================================="
 exit 0

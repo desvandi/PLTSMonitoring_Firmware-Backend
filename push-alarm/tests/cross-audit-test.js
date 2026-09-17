@@ -91,6 +91,9 @@ const pushService = {
   requests: [],          // {url, headers, bodyBytes, payloadIsBlob}
   nextStatus: 201,
   strictEndpoints: false,
+  // [K10 round-3] status per-endpoint persisten — untuk skenario partial
+  // delivery (satu subscriber 503, lainnya 201) tanpa memengaruhi suite lama.
+  endpointStatus: {},
   setNextStatus(s) { this.nextStatus = s; },
   fetch(url, options) {
     options = options || {};
@@ -108,6 +111,7 @@ const pushService = {
     });
     let status = this.nextStatus;
     this.nextStatus = 201;
+    if (this.endpointStatus[url] !== undefined) status = this.endpointStatus[url];
     // Endpoint yang tidak dikenal browser = langganan mati -> 410.
     if (this.strictEndpoints && !endpointRegistry[url] && status === 201) status = 410;
     return {
@@ -186,6 +190,235 @@ function gasGet(action) {
 }
 function storedSubs() { return JSON.parse(gasProps.get('PUSH_SUBSCRIPTIONS') || '[]'); }
 function alarmLog() { return JSON.parse(gasProps.get('ALARM_LOG') || '[]'); }
+
+/* ======================= [K10 round-3] Runtime GAS CANONICAL =======================
+ * Auditor round-3 (2026-09-17): 181 asersi lama hanya menguji backend push
+ * LEGACY (push-alarm/gas/Code.gs) — sedangkan seluruh perbaikan P1 round-3
+ * (multi-device isolation, per-sub delivery cursor, lifecycle write-back,
+ * lock discipline, kapasitas Script Properties) hidup di backend CANONICAL
+ * (code.gs/Code.gs + code.gs/PushService.gs). Konteks ini menjalankan
+ * dispatcher canonical PENUH dengan mock yang MENEGAKKAN batas nyata GAS:
+ *   - PropertiesService: 9 KB/value dan 500 KB total — setProperty LEMPAR
+ *     bila dilanggar (test kapasitas jadi mekanis, bukan klaim).
+ *   - LockService terinstrumentasi: menghitung (a) fetch jaringan yang
+ *     terjadi selama lock dipegang (harus 0 — P1-D), (b) tryLock bersarang
+ *     (harus 0 — P1-D), (c) mode kontensi forceBusy (ingest harus 503
+ *     fail-closed tanpa setengah-mutasi).
+ *   - CacheService + SpreadsheetApp (Config/Devices sheet) untuk jalur
+ *     autentikasi canonical (token legacy + fleet gate). */
+
+const CANON_DIR = process.env.MONITORIOT_CANON_DIR ||
+  (fs.existsSync(path.join(ROOT, '..', 'code.gs', 'PushService.gs'))
+    ? path.join(ROOT, '..', 'code.gs') : null);
+
+const canonProps = new Map();
+const canonPropsStats = { setCalls: 0, getCalls: 0, overValueThrows: 0, totalThrows: 0 };
+const CANON_VALUE_LIMIT = 9 * 1024;     // batas nyata GAS: 9 KB per value
+const CANON_TOTAL_LIMIT = 500 * 1024;   // batas nyata GAS: 500 KB total
+const CanonPropertiesService = {
+  getScriptProperties() {
+    return {
+      getProperty(k) {
+        canonPropsStats.getCalls++;
+        return canonProps.has(k) ? canonProps.get(k) : null;
+      },
+      setProperty(k, v) {
+        canonPropsStats.setCalls++;
+        const val = String(v);
+        if (val.length > CANON_VALUE_LIMIT) {
+          canonPropsStats.overValueThrows++;
+          throw new Error('PropertiesService (mock penegak): value > 9KB — ' + k);
+        }
+        let total = val.length;
+        canonProps.forEach((vv, kk) => { if (kk !== k) total += String(vv).length; });
+        if (total > CANON_TOTAL_LIMIT) {
+          canonPropsStats.totalThrows++;
+          throw new Error('PropertiesService (mock penegak): total store > 500KB');
+        }
+        canonProps.set(k, val);
+      },
+      deleteProperty(k) { canonProps.delete(k); },
+      getProperties() {
+        const o = {};
+        canonProps.forEach((v, k) => { o[k] = v; });
+        return o;
+      }
+    };
+  }
+};
+
+const canonLock = {
+  held: 0,
+  fetchesUnderLock: 0,
+  nestedTryLock: 0,
+  forceBusy: false,
+  getScriptLock() {
+    const self = this;
+    return {
+      tryLock() {
+        if (self.forceBusy) return false;
+        if (self.held > 0) self.nestedTryLock++;
+        self.held++;
+        return true;
+      },
+      releaseLock() { self.held--; }
+    };
+  }
+};
+
+function canonMakeSheet(name, rows) {
+  const data = rows.map((r) => r.slice());
+  return {
+    getName: () => name,
+    getDataRange() { return { getValues: () => data.map((r) => r.slice()) }; },
+    getRange(row, col, numRows, numCols) {
+      return {
+        getValues() {
+          const out = [];
+          for (let r = row - 1; r < row - 1 + numRows && r < data.length; r++) {
+            const base = data[r] || [];
+            const line = [];
+            for (let c = col - 1; c < col - 1 + numCols; c++) {
+              line.push(base[c] !== undefined ? base[c] : '');
+            }
+            out.push(line);
+          }
+          return out;
+        },
+        setValues(vals) {
+          for (let r = 0; r < (vals || []).length; r++) {
+            const tr = row - 1 + r;
+            while (data.length <= tr) data.push([]);
+            for (let c = 0; c < vals[r].length; c++) {
+              data[tr][col - 1 + c] = vals[r][c];
+            }
+          }
+        }
+      };
+    },
+    getLastRow: () => data.length,
+    getLastColumn: () => data.reduce((m, r) => Math.max(m, r.length), 0),
+    appendRow(row) { data.push(row.slice()); },
+    setFrozenRows() {},
+    setColumnWidth() {},
+    clear() { data.length = 0; }
+  };
+}
+
+const CANON_AUTH_TOKEN = 'canon-auth-token-round3-2026-09';
+const CANON_ADMIN_TOKEN = 'canon-admin-token-round3-2026-09';
+const DEV_A = 'esp32-greenhouse-01';
+const DEV_B = 'esp32-greenhouse-02';
+
+const canonSheets = {
+  'Config': canonMakeSheet('Config', [
+    ['PARAMETER', 'VALUE'],
+    ['AUTH_TOKEN', CANON_AUTH_TOKEN],
+    ['ADMIN_TOKEN', CANON_ADMIN_TOKEN],
+    ['DEVICE_KEY', DEV_A],
+    ['TIMEZONE', 'Asia/Jakarta']
+  ]),
+  'Devices': canonMakeSheet('Devices', [
+    ['device_key', 'secret', 'label', 'last_nonce', 'last_ts', 'firmware_type'],
+    [DEV_A, 'secret-dev-a', 'Greenhouse 1', '', '', 'modular'],
+    [DEV_B, 'secret-dev-b', 'Greenhouse 2', '', '', 'modular']
+  ])
+};
+
+const canonCache = new Map();
+let canonCtx = null;
+function setupCanonCtx() {
+  if (!CANON_DIR) return false;
+  canonCtx = vm.createContext({
+    PropertiesService: CanonPropertiesService,
+    UrlFetchApp: {
+      fetch(u, o) {
+        // [P1-D] bukti mekanis: network I/O SELAMA lock dipegang = pelanggaran
+        if (canonLock.held > 0) canonLock.fetchesUnderLock++;
+        return pushService.fetch(u, o);
+      }
+    },
+    LockService: canonLock,
+    ScriptApp: { getService() { return { getUrl: () => GAS_URL }; } },
+    ContentService: {
+      MimeType: { JSON: 'JSON' },
+      createTextOutput(t) { return { _text: t, setMimeType() { return this; } }; }
+    },
+    Utilities: {
+      getUuid: () => crypto.randomUUID(),
+      computeHmacSha256Signature: (message, secret) =>
+        Array.from(crypto.createHmac('sha256', String(secret)).update(String(message)).digest()),
+      computeDigest: (algo, data) =>
+        Array.from(crypto.createHash('sha256').update(String(data)).digest()),
+      formatDate: (d) => new Date(d).toISOString(),
+      newBlob: (bytes, contentType) => ({
+        __blob: true, bytes: Array.from(bytes || []), contentType
+      }),
+      Charset: { UTF_8: 'UTF_8' },
+      DigestAlgorithm: { SHA_256: 'SHA_256' }
+    },
+    CacheService: {
+      getScriptCache() {
+        return {
+          get: (k) => (canonCache.has(k) ? canonCache.get(k) : null),
+          put: (k, v) => canonCache.set(k, String(v)),
+          remove: (k) => canonCache.delete(k)
+        };
+      }
+    },
+    SpreadsheetApp: {
+      getActiveSpreadsheet() {
+        return {
+          getSheetByName(n) { return canonSheets[n] || null; },
+          insertSheet(n) { canonSheets[n] = canonMakeSheet(n, []); return canonSheets[n]; }
+        };
+      },
+      getUi() { return { alert() {} }; }
+    },
+    Logger: { log() {} },
+    console: { log() {}, warn() {}, error() {} }
+  });
+  vm.runInContext(fs.readFileSync(path.join(GAS, GAS_CORE_FILE), 'utf8'),
+    canonCtx, { filename: 'canonical-WebPushCore.gs' });
+  vm.runInContext(fs.readFileSync(path.join(CANON_DIR, 'Code.gs'), 'utf8'),
+    canonCtx, { filename: 'canonical-Code.gs' });
+  vm.runInContext(fs.readFileSync(path.join(CANON_DIR, 'PushService.gs'), 'utf8'),
+    canonCtx, { filename: 'canonical-PushService.gs' });
+  canonProps.set('VAPID_PUBLIC_KEY', VAPID_PUB);
+  canonProps.set('VAPID_PRIVATE_KEY', VAPID_PRIV);
+  canonProps.set('PUSH_TOKENS', JSON.stringify([
+    { deviceId: DEV_A, token: 'push-token-dev-a-round3' },
+    { deviceId: DEV_B, token: 'push-token-dev-b-round3' }
+  ]));
+  return true;
+}
+
+function canonPost(obj) {
+  const out = canonCtx.doPost({ postData: { contents: JSON.stringify(obj) } });
+  return JSON.parse(out._text);
+}
+function canonIngest(deviceId, sensors, reportedAt) {
+  return canonPost({ action: 'PUSH_ALARM_INGEST', token: CANON_AUTH_TOKEN,
+    device_key: deviceId, data: { sensors, reportedAt } });
+}
+/** Langganan browser baru untuk device tertentu (lewat dispatcher canonical). */
+function canonMakeBrowserSub(deviceId, token, label) {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const auth = crypto.randomBytes(16);
+  const endpoint = 'https://push.test.local/canon/' + label + '/' +
+    crypto.randomBytes(8).toString('hex');
+  endpointRegistry[endpoint] = { priv: ecdh.getPrivateKey(), pub: ecdh.getPublicKey(), auth };
+  const res = canonPost({
+    action: 'PUSH_SUBSCRIBE',
+    device: { id: deviceId },
+    token: token,
+    endpoint: endpoint,
+    keys: { p256dh: b64url(ecdh.getPublicKey()), auth: b64url(auth) },
+    context: { lang: 'id-ID', tz: 'Asia/Jakarta', ua: 'K10-harness' }
+  });
+  return { res, endpoint };
+}
 
 /** Dekripsi body push persis seperti browser (RFC 8188/8291). */
 function decryptRequest(req) {
@@ -851,8 +1084,8 @@ async function main() {
     pushService.requests.length === pBefore + 1 && res.pushes.sent === 1);
   const tempEventId = res.triggered[0];
   const almPayload = decryptRequest(pushService.requests[pushService.requests.length - 1]);
-  check('K6', 'id kejadian = ALM-<sensor-slug>-<waktu>',
-    tempEventId.indexOf('ALM-suhu-greenhouse-1-') === 0);
+  check('K6', 'id kejadian = ALM-<device>-<sensor-slug>-<waktu> (P1-A)',
+    tempEventId.indexOf('ALM-' + DEVICE_ID + '-suhu-greenhouse-1-') === 0);
   check('K6', 'judul KRITIS + nama sensor', almPayload.title === 'KRITIS: Suhu Greenhouse 1');
   check('K6', 'severity critical dari firmware', almPayload.severity === 'critical');
   check('K6', 'status firmware menjadi body alarm',
@@ -875,7 +1108,7 @@ async function main() {
   // (e) sensor kedua ikut alarm -> hanya push untuk sensor baru
   res = gasPost(fwReport([S_TEMP(41.6, true), S_HUM(70, false), S_SOIL(22, true)], fwT()));
   check('K6', 'sensor kedua naik -> hanya 1 kejadian baru',
-    res.triggered.length === 1 && res.triggered[0].indexOf('ALM-kelembapan-tanah-') === 0);
+    res.triggered.length === 1 && res.triggered[0].indexOf('ALM-' + DEVICE_ID + '-kelembapan-tanah-') === 0);
   check('K6', 'push hanya untuk kejadian baru', pushService.requests.length === pBefore + 2);
   check('K6', 'snapshot memuat 2 alarm aktif', gasGet('snapshot').alarms.length === 2);
 
@@ -913,7 +1146,7 @@ async function main() {
     { name: 'Kelembapan Tanah', value: 50, unit: '%' }
   ], fwT()));
   check('K6', 'firmware lama (tanpa flag): GAS mengevaluasi ambang',
-    res.triggered.length === 1 && res.triggered[0].indexOf('ALM-suhu-greenhouse-1-') === 0);
+    res.triggered.length === 1 && res.triggered[0].indexOf('ALM-' + DEVICE_ID + '-suhu-greenhouse-1-') === 0);
   check('K6', 'evaluasi GAS: severity dari aturan (critical)',
     decryptRequest(pushService.requests[pushService.requests.length - 1]).severity === 'critical');
   res = gasPost(fwReport([
@@ -968,7 +1201,7 @@ async function main() {
   check('K3', 'push tanpa payload -> sw.js mengambil latestAlarm dari GAS',
     swNotifications.length === notifMark + 1 && nf.title === 'KRITIS: Suhu Greenhouse 1');
   check('K3', 'alarm fallback membawa data.alarmId untuk ACK',
-    nf.options.data.alarmId && nf.options.data.alarmId.indexOf('ALM-suhu-greenhouse-1-') === 0);
+    nf.options.data.alarmId && nf.options.data.alarmId.indexOf('ALM-' + DEVICE_ID + '-suhu-greenhouse-1-') === 0);
   // pulihkan
   gasPost(fwReport([S_TEMP(36, false), S_HUM(70, false), S_SOIL(50, false)], fwT()));
 
@@ -1294,11 +1527,257 @@ async function main() {
   check('K9', 'payload push membawa apiBase untuk ACK SW',
     lastPayload.apiBase === GAS_URL);
 
+  /* ---------------- K10: Canonical push contract (round-3 P1) ---------------- */
+  console.log('\n--- K10: Push contract CANONICAL (round-3 P1) ---');
+  if (!setupCanonCtx()) {
+    check('K10', 'sumber canonical (code.gs/) tersedia untuk diuji', false);
+  } else {
+    const S = (name, value, unit, alarm, severity, status) =>
+      ({ name, value, unit, alarm: !!alarm, severity: severity || 'info', status: status || '' });
+    const canonSubIdOf = (ep) =>
+      'S' + crypto.createHash('sha256').update(ep).digest('hex').slice(0, 16);
+    const canonFind = (id) => canonCtx.pushFindEvent_(id);
+    const canonSubs = () => canonCtx.pushSubsAll_();
+
+    // (a) dispatcher + auth gate canonical
+    let r10 = canonPost({ action: 'PUSH_ALARM_INGEST', data: { sensors: [S('Suhu', 41, 'C', true)] } });
+    check('K10', 'ingest canonical TANPA token ditolak 401', r10.code === 401);
+    r10 = canonPost({ action: 'PUSH_ALARM_INGEST', token: CANON_AUTH_TOKEN,
+      device_key: 'device-tak-terdaftar', data: { sensors: [S('Suhu', 41, 'C', true)] } });
+    check('K10', 'ingest device tak terdaftar ditolak 400 (fleet gate)', r10.code === 400);
+    r10 = canonPost({ action: 'PUSH_SUBSCRIBE', device: { id: DEV_A }, endpoint: 'https://x/', keys: { p256dh: 'a', auth: 'b' } });
+    check('K10', 'subscribe canonical tanpa push-token ditolak 401 (p.493)', r10.code === 401);
+
+    // (b) [P1-A] isolasi multi-device + [P1-C] lifecycle
+    const subA1 = canonMakeBrowserSub(DEV_A, 'push-token-dev-a-round3', 'a1');
+    check('K10', 'subscribe canonical DEV_A diterima (200)', subA1.res.code === 200);
+    const subB1 = canonMakeBrowserSub(DEV_B, 'push-token-dev-b-round3', 'b1');
+    const subB2 = canonMakeBrowserSub(DEV_B, 'push-token-dev-b-broken', 'b2');
+    check('K10', 'subscribe DEV_B dengan token SALAH ditolak 401', subB2.res.code === 401);
+    const subB2b = canonMakeBrowserSub(DEV_B, 'push-token-dev-b-round3', 'b2');
+    const subB3 = canonMakeBrowserSub(DEV_B, 'push-token-dev-b-round3', 'b3');
+    check('K10', '3 langganan aktif untuk DEV_B',
+      canonSubs().filter((s) => s.deviceId === DEV_B).length === 3);
+
+    const t1 = Date.now();
+    let ing = canonIngest(DEV_A, [S('Suhu Greenhouse', 41.2, 'C', true, 'critical', '41.2 C melebihi ambang')], t1);
+    check('K10', 'tepi naik DEV_A → 1 event', ing.code === 200 && ing.data.triggered.length === 1);
+    const idA = ing.data.triggered[0];
+    check('K10', 'event id device-scoped: ALM-<dev>-<sensor>-…',
+      idA.indexOf('ALM-' + DEV_A + '-suhu-greenhouse-') === 0);
+
+    ing = canonIngest(DEV_B, [S('Suhu Greenhouse', 42.7, 'C', true, 'critical', '42.7 C melebihi ambang')], t1 + 1000);
+    check('K10', '[P1-A] DEV_B alarm sensor SENAMA → event BARU dibuat (bukan tertelan state DEV_A)',
+      ing.code === 200 && ing.data.triggered.length === 1);
+    const idB = ing.data.triggered[0];
+    check('K10', '[P1-A] eventId DEV_A ≠ eventId DEV_B', idA !== idB);
+    check('K10', '[P1-A] generation keduanya = 1 (independen)',
+      canonFind(idA).generation === 1 && canonFind(idB).generation === 1);
+    check('K10', 'push DEV_A hanya ke langganan DEV_A (A1)',
+      pushService.requests.filter((q) => q.url === subA1.endpoint).length === 1 &&
+      pushService.requests.filter((q) => q.url === subB1.endpoint).length === 1);
+
+    ing = canonIngest(DEV_A, [S('Suhu Greenhouse', 38.0, 'C', false, 'info', 'pulih')], t1 + 2000);
+    check('K10', 'clear DEV_A → resolved = [event DEV_A]',
+      ing.data.resolved.length === 1 && ing.data.resolved[0] === idA);
+    const evA = canonFind(idA);
+    const rsvA = canonCtx.pushEvents_().filter((e) => e.resolvesEventId === idA)[0];
+    check('K10', '[P1-C] event RSV dibuat untuk event asal', !!rsvA);
+    check('K10', '[P1-C] event RAISED asal DEV_A ditulis CLEARED + clearedAt + resolvedBy',
+      evA.state === 'CLEARED' && evA.clearedAt !== null && evA.resolvedBy === rsvA.eventId);
+    check('K10', '[P1-C] event RSV membawa resolvesEventId',
+      rsvA.resolvesEventId === idA);
+    check('K10', '[P1-A] event DEV_B TETAP RAISED setelah clear DEV_A',
+      canonFind(idB).state === 'RAISED');
+
+    // (c) [P1-B] partial delivery — retry hanya ke yang gagal
+    pushService.endpointStatus[subB2b.endpoint] = 503;
+    ing = canonIngest(DEV_B, [S('Tegangan Baterai', 3.9, 'V', true, 'critical', 'undervoltage')], t1 + 3000);
+    const idC = ing.data.triggered[0];
+    const evC0 = canonFind(idC);
+    check('K10', 'partial: B1 terkirim, B2 gagal 503, B3 terkirim',
+      pushService.requests.filter((q) => q.url === subB1.endpoint).length === 2 &&
+      pushService.requests.filter((q) => q.url === subB2b.endpoint).length === 2 &&
+      pushService.requests.filter((q) => q.url === subB3.endpoint).length === 2);
+    check('K10', 'partial: status event PENDING + 2 marker SENT (B1,B3)',
+      evC0.delivery.status === 'PENDING' &&
+      Object.keys(evC0.delivery.perSub).length === 2 &&
+      evC0.delivery.perSub[canonSubIdOf(subB1.endpoint)] === 'SENT' &&
+      evC0.delivery.perSub[canonSubIdOf(subB3.endpoint)] === 'SENT');
+    delete pushService.endpointStatus[subB2b.endpoint];   // push service pulih
+    canonCtx.PUSH_CFG.OUTBOX_RETRY_BASE_MS = 0;           // backoff 0 → langsung due
+    const rr = canonCtx.pushRetryPending_();
+    check('K10', 'retry pass menemukan 1 event due', rr.ok === true && rr.retried === 1);
+    check('K10', '[P1-B] retry hanya menambah pengiriman ke B2 (B1/B3 TIDAK diduplikasi)',
+      pushService.requests.filter((q) => q.url === subB1.endpoint).length === 2 &&
+      pushService.requests.filter((q) => q.url === subB2b.endpoint).length === 3 &&
+      pushService.requests.filter((q) => q.url === subB3.endpoint).length === 2);
+    const evC1 = canonFind(idC);
+    check('K10', '[P1-B] setelah retry semua subscriber terkirim → status SENT',
+      evC1.delivery.status === 'SENT' &&
+      evC1.delivery.perSub[canonSubIdOf(subB2b.endpoint)] === 'SENT');
+    canonCtx.PUSH_CFG.OUTBOX_RETRY_BASE_MS = 60000;       // pulihkan backoff
+
+    // (d) [P1-D] kontensi lock → fail-closed 503, tanpa setengah-mutasi
+    const eventsBefore = canonCtx.pushEvents_().length;
+    canonLock.forceBusy = true;
+    ing = canonIngest(DEV_B, [S('Arus Beban', 19.5, 'A', true, 'warning', 'overload')], t1 + 4000);
+    check('K10', '[P1-D] lock diperebutkan → ingest 503 fail-closed', ing.code === 503);
+    check('K10', '[P1-D] tidak ada setengah-mutasi saat busy (jumlah event tetap)',
+      canonCtx.pushEvents_().length === eventsBefore);
+    canonLock.forceBusy = false;
+    ing = canonIngest(DEV_B, [S('Arus Beban', 19.5, 'A', true, 'warning', 'overload')], t1 + 4000);
+    check('K10', 'ingest ulang setelah kontensi sukses (1 event)',
+      ing.code === 200 && ing.data.triggered.length === 1);
+
+    // (e) interleaving — merge per-event tidak menimpa mutasi lain
+    pushService.endpointStatus[subB1.endpoint] = 503;
+    pushService.endpointStatus[subB2b.endpoint] = 503;
+    pushService.endpointStatus[subB3.endpoint] = 503;
+    ing = canonIngest(DEV_B, [S('Kelembapan Tanah', 12, '%', true, 'warning', 'kering')], t1 + 5000);
+    const idE1 = ing.data.triggered[0];
+    check('K10', 'event E1 (semua endpoint 503) → PENDING',
+      canonFind(idE1).delivery.status === 'PENDING');
+    delete pushService.endpointStatus[subB1.endpoint];
+    delete pushService.endpointStatus[subB2b.endpoint];
+    delete pushService.endpointStatus[subB3.endpoint];
+    ing = canonIngest(DEV_A, [S('Kelembapan Tanah', 12, '%', true, 'warning', 'kering')], t1 + 6000);
+    const idE2 = ing.data.triggered[0];   // alarm DEV_A lain — diproses selagi E1 pending
+    check('K10', 'event DEV_A lain (E2) tetap diproses normal saat E1 pending',
+      ing.code === 200 && idE2 !== undefined);
+    // merge terlambat E1 (interleaved) — TIDAK BOLEH menimpa E2
+    canonCtx.pushRecordDelivery_(idE1,
+      { sent: 1, failed: 0, removed: 0, perSub: { [canonSubIdOf(subB1.endpoint)]: 'SENT' } });
+    const e1after = canonFind(idE1);
+    const e2after = canonFind(idE2);
+    check('K10', 'interleaving: merge E1 tercatat (marker B1)',
+      e1after && e1after.delivery.perSub[canonSubIdOf(subB1.endpoint)] === 'SENT');
+    check('K10', 'interleaving: E2 tidak tertimpa merge E1 (masih ada, status konsisten)',
+      e2after !== null && e2after.eventId === idE2);
+    check('K10', 'interleaving: indeks PENDING tidak memuat event terminal',
+      canonCtx.pushPendingIdx_().indexOf(idE2) < 0);
+
+    // (f) [QUOTA] jalur tenang murah (gerbang indeks PENDING)
+    canonPropsStats.getCalls = 0; canonPropsStats.setCalls = 0;
+    ing = canonIngest(DEV_B, [S('Arus Beban', 19.6, 'A', true, 'warning', 'overload bertahan')], t1 + 7000);
+    check('K10', 'ingest level (tanpa tepi) diproses 200',
+      ing.code === 200 && ing.data.triggered.length === 0);
+    check('K10', '[QUOTA] jalur tenang ≤ 40 property-read', canonPropsStats.getCalls <= 40);
+    check('K10', '[QUOTA] jalur tenang ≤ 3 property-write', canonPropsStats.setCalls <= 3);
+
+
+    // (h) ACK canonical (p.482)
+    const ackTok = canonCtx.pushMakeAckToken_(idA);
+    r10 = canonPost({ action: 'PUSH_ACK', alarmId: idA, ackToken: ackTok });
+    check('K10', 'ACK dengan capability token valid → 200', r10.code === 200 && !!r10.data.acknowledgedAt);
+    const ackAt1 = r10.data.acknowledgedAt;
+    r10 = canonPost({ action: 'PUSH_ACK', alarmId: idA, ackToken: ackTok });
+    check('K10', 'ACK idempoten (acknowledgedAt tidak berubah)',
+      r10.code === 200 && r10.data.acknowledgedAt === ackAt1);
+    r10 = canonPost({ action: 'PUSH_ACK', alarmId: idA, ackToken: 'bogus-token' });
+    check('K10', 'ACK token salah → 401', r10.code === 401);
+    const ghostId = 'ALM-ghost-9999';
+    r10 = canonPost({ action: 'PUSH_ACK', alarmId: ghostId, ackToken: canonCtx.pushMakeAckToken_(ghostId) });
+    check('K10', 'ACK event tak dikenal → 404 (retensi outbox = jendela ACK)', r10.code === 404);
+
+    // (i) PUSH_TEST terautentikasi admin
+    r10 = canonPost({ action: 'PUSH_TEST', token: CANON_AUTH_TOKEN, device_key: DEV_A });
+    check('K10', 'PUSH_TEST tanpa admin_token → 401', r10.code === 401);
+    r10 = canonPost({ action: 'PUSH_TEST', token: CANON_AUTH_TOKEN, device_key: DEV_A,
+      data: { admin_token: CANON_ADMIN_TOKEN } });
+    check('K10', 'PUSH_TEST dengan admin_token → 200 + eventId TEST-',
+      r10.code === 200 && r10.data.eventId.indexOf('TEST-') === 0);
+
+    // (j) [P1-C] lifecycle emergency
+    canonCtx.pushEvaluateEmergency_({ emgState: 'TRIPPED', emgReason: 'uji-harness' }, DEV_A);
+    const emgEvents = canonCtx.pushEvents_().filter((e) => e.alarmCode === 'emergency');
+    const emgRaised = emgEvents.find((e) => e.state === 'RAISED');
+    check('K10', 'emergency TRIP → event EMG RAISED dibuat', !!emgRaised);
+    canonCtx.pushEvaluateEmergency_({ emgState: 'SAFE' }, DEV_A);
+    const emgRaisedAfter = canonFind(emgRaised.eventId);
+    const emgRsv = canonCtx.pushEvents_().filter((e) => e.alarmCode === 'emergency')
+      .find((e) => e.resolvesEventId === emgRaised.eventId);
+    check('K10', '[P1-C] emergency SAFE → event RAISED asal CLEARED + RSV resolvesEventId',
+      emgRaisedAfter.state === 'CLEARED' && !!emgRsv &&
+      emgRaisedAfter.resolvedBy === emgRsv.eventId);
+
+    // (k) endpoint mati → pruned
+    const subDead = canonMakeBrowserSub(DEV_A, 'push-token-dev-a-round3', 'dead');
+    pushService.endpointStatus[subDead.endpoint] = 410;
+    const subsBeforeDead = canonSubs().length;
+    ing = canonIngest(DEV_A, [S('Suhu Ruang', 55, 'C', true, 'critical', 'panas')], t1 + 9000);
+    check('K10', 'endpoint 410 → langganan mati dipruned',
+      canonSubs().length === subsBeforeDead - 1);
+    delete pushService.endpointStatus[subDead.endpoint];
+
+    // (l) PUSH_STATUS — observability round-3
+    r10 = canonPost({ action: 'PUSH_STATUS', token: CANON_AUTH_TOKEN, device_key: DEV_A });
+    check('K10', 'PUSH_STATUS melaporkan storage.bytesUsed + limit + capacityDropped',
+      r10.code === 200 && r10.data.storage.bytesUsed > 0 &&
+      r10.data.storage.totalLimit === canonCtx.PUSH_CFG.STORAGE_TOTAL_LIMIT);
+    check('K10', 'PUSH_STATUS melaporkan sourceRevision (binding sumber)',
+      typeof r10.data.sourceRevision === 'string' && r10.data.sourceRevision.length > 0);
+    check('K10', 'PUSH_STATUS menyatakan semantika at-least-once per subscriber',
+      String(r10.data.deliverySemantics).indexOf('at-least-once') >= 0);
+
+    // (g) [CAP] worst-case: 205 event maksimum + 50 langganan → muat
+    const capBody = 'x'.repeat(400);
+    canonCtx.pushWithLock_(function () {
+      for (let i = 0; i < 205; i++) {
+        canonCtx.pushAppendEvent_({
+          eventId: 'CAP-' + i,
+          deviceId: DEV_B,
+          alarmCode: 'cap-' + i,
+          generation: 1,
+          severity: 'warning',
+          raisedAt: new Date(t1 + 8000 + i).toISOString(),
+          clearedAt: null,
+          state: 'SENT-TERMINAL',
+          acknowledgedAt: null,
+          payload: { id: 'CAP-' + i, title: 'CAP', body: capBody, severity: 'warning',
+            tag: 'cap', url: './index.html', timestamp: t1 + i, requireInteraction: false },
+          delivery: { status: 'SENT', attempts: 1, lastAttemptAt: new Date().toISOString(),
+            sent: 1, failed: 0, removed: 0, perSub: {} }
+        });
+      }
+    }, 20000);
+    const capEvents = canonCtx.pushEvents_();
+    check('K10', '[CAP] retensi outbox terjaga ≤ 200 setelah 205 append', capEvents.length <= 200);
+    check('K10', '[CAP] event tertua (CAP-0) terevisi, termuda (CAP-204) ada',
+      capEvents.some((e) => e.eventId === 'CAP-204') && !capEvents.some((e) => e.eventId === 'CAP-0'));
+    const fiftySubs = [];
+    for (let i = 0; i < 50; i++) {
+      fiftySubs.push({
+        endpoint: 'https://push.test.local/capsub/' + i + '/' + crypto.randomBytes(6).toString('hex'),
+        subId: 'SC' + i,
+        keys: { p256dh: b64url(Buffer.alloc(65, 4)), auth: b64url(crypto.randomBytes(16)) },
+        deviceId: DEV_A,
+        context: { lang: 'id-ID' },
+        addedAt: new Date().toISOString(), lastSeenAt: new Date().toISOString()
+      });
+    }
+    canonCtx.pushWithLock_(function () { canonCtx.pushSaveSubsAll_(fiftySubs); }, 20000);
+    check('K10', '[CAP] 50 langganan tersimpan',
+      canonCtx.pushSubsAll_().length === 50);
+    let maxVal = 0, totalBytes = 0;
+    canonProps.forEach((v, k) => { maxVal = Math.max(maxVal, String(v).length); totalBytes += String(v).length + k.length; });
+    check('K10', '[CAP] SETIAP property value < 9 KB (batas GAS nyata)', maxVal < CANON_VALUE_LIMIT);
+    check('K10', '[CAP] total property store < 500 KB (batas GAS nyata)', totalBytes < CANON_TOTAL_LIMIT);
+    check('K10', '[CAP] mock penegak TIDAK pernah melempar (0 pelanggaran 9KB / 0 pelanggaran 500KB)',
+      canonPropsStats.overValueThrows === 0 && canonPropsStats.totalThrows === 0);
+
+    // (m) [P1-D] disiplin lock — bukti mekanis di akhir seluruh skenario
+    check('K10', '[P1-D] 0 network fetch di dalam Script Lock (seluruh skenario)',
+      canonLock.fetchesUnderLock === 0);
+    check('K10', '[P1-D] 0 tryLock bersarang (seluruh skenario)', canonLock.nestedTryLock === 0);
+    check('K10', '[P1-D] lock ter-release seimbang (held kembali 0)', canonLock.held === 0);
+  }
+
   /* ---------------- Ringkasan ---------------- */
   console.log('\n==============================================================');
   console.log(' RINGKASAN PER KONTRAK (Tabel 11)');
   console.log('==============================================================');
-  const order = ['K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9'];
+  const order = ['K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'K7', 'K8', 'K9', 'K10'];
   const names = {
     K1: 'Langganan (PWA-GAS)',
     K2: 'Penghapusan (PWA-GAS)',
@@ -1308,7 +1787,8 @@ async function main() {
     K6: 'Ambang alarm (FW-GAS)',
     K7: 'Kunci VAPID (GAS-PWA)',
     K8: 'Hardening produksi',
-    K9: 'Push hardening p.493/P0-3'
+    K9: 'Push hardening p.493/P0-3',
+    K10: 'Canonical push round-3 P1'
   };
   for (const k of order) {
     const t = tally[k] || { pass: 0, fail: 0 };

@@ -27,6 +27,8 @@ on:
       - 'scripts/**'
       - 'code.gs/**'
       - 'push-alarm/**'
+      - 'config/**'
+      - 'docs/**'
       - '.github/workflows/build-firmware.yml'
     tags:
       - 'v*'
@@ -38,6 +40,10 @@ on:
         description: "Manual build reason"
         required: false
         default: "manual"
+      pwa_ref:
+        description: "PWA revision (SHA/branch) untuk cross-audit — default: config/pwa-pin.txt"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -53,24 +59,65 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # [AUDIT P0-2/P0-3 2026-09-16] Push contract cross-audit — the 181-assertion
-  # harness (K1-K9: subscribe/unsubscribe/ACK/alarm edges/VAPID/outbox/
-  # PUSH_TOKENS/ownership/migration) runs REAL GAS + PWA code in a vm. It used
-  # to be a manual engineer step; now it is a permanent CI gate so a GAS or
-  # PWA push-layer change can never regress the cross-layer contract.
+  # [AUDIT P0-2/P0-3 2026-09-16 + P1-E ROUND-3 2026-09-17] Push contract
+  # cross-audit — the 235-assertion harness (K1-K10: subscribe/unsubscribe/
+  # ACK/alarm edges/VAPID/outbox/PUSH_TOKENS/ownership/migration + canonical
+  # round-3 battery: multi-device isolation, per-sub delivery cursor,
+  # lifecycle write-back, lock discipline, Script-Properties capacity)
+  # runs REAL GAS + PWA code in a vm. It used to be a manual engineer step;
+  # now it is a permanent CI gate so a GAS or PWA push-layer change can
+  # never regress the cross-layer contract.
+  #
+  # [P1-E] The PWA revision under test is now PINNED to the exact SHA in
+  # config/pwa-pin.txt (committed alongside the firmware changes that pair
+  # with it) instead of a floating `ref: main`. A PR that changes the push
+  # contract must bump the pin in the SAME PR so the pair (firmware SHA +
+  # PWA SHA) is validated atomically. workflow_dispatch input `pwa_ref`
+  # allows validating an unmerged PWA branch/SHA before pairing.
   # --------------------------------------------------------------------------
   push-contract-cross-audit:
-    name: Push contract cross-audit (K1-K9, 181 asersi)
+    name: Push contract cross-audit (K1-K10, 235 asersi, PWA pinned)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           path: firmware
+      - name: Resolve pinned PWA revision
+        id: pwaref
+        run: |
+          PIN_FILE="firmware/config/pwa-pin.txt"
+          if [ ! -f "$PIN_FILE" ]; then
+            echo "GAGAL: $PIN_FILE tidak ditemukan — pasang pin PWA revision (P1-E)."; exit 1
+          fi
+          PIN=$(tr -d '[:space:]' < "$PIN_FILE")
+          if [ -z "$PIN" ] || [ "${#PIN}" -lt 7 ]; then
+            echo "GAGAL: pin PWA kosong/invalid: '$PIN'"; exit 1
+          fi
+          OVERRIDE="${{ github.event.inputs.pwa_ref }}"
+          if [ -n "$OVERRIDE" ]; then
+            echo "Menggunakan override dispatch: $OVERRIDE (pin file: $PIN)"
+            echo "ref=$OVERRIDE" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$PIN" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
         with:
           repository: desvandi/PLTSMonitoring_PWA
           path: pwa
-          ref: main
+          ref: ${{ steps.pwaref.outputs.ref }}
+          fetch-depth: 0
+      - name: Verify pin freshness (pin must be ancestor of PWA main)
+        if: github.event.inputs.pwa_ref == ''
+        run: |
+          cd pwa
+          git fetch origin main --quiet
+          if git merge-base --is-ancestor "${{ steps.pwaref.outputs.ref }}" origin/main; then
+            echo "PIN SEGAR: ${{ steps.pwaref.outputs.ref }} adalah ancestor dari PWA main ($(git rev-parse origin/main --short))."
+          else
+            echo "GAGAL: pin PWA ${{ steps.pwaref.outputs.ref }} BUKAN ancestor dari PWA main."
+            echo "Perbarui config/pwa-pin.txt ke revision main terbaru (P1-E)."
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -80,7 +127,7 @@ jobs:
           ln -s "${GITHUB_WORKSPACE}/pwa/pwa-push-alarm" monitoriot-checkout/pwa-push-alarm
           ln -s "${GITHUB_WORKSPACE}/firmware/push-alarm/gas" monitoriot-checkout/gas
           ln -s "${GITHUB_WORKSPACE}/firmware/push-alarm/firmware/MonitorIoT_Firmware" monitoriot-checkout/MonitorIoT_Firmware
-      - name: Run cross-audit harness
+      - name: Run cross-audit harness (legacy + canonical)
         run: |
           cd firmware/push-alarm
           MONITORIOT_DL="${GITHUB_WORKSPACE}/monitoriot-checkout" node tests/cross-audit-test.js
@@ -114,6 +161,50 @@ jobs:
       # P0; these compile the actual decision structure under sanitizers.
       - name: Run native ASAN/UBSAN harnesses (audit round 6)
         run: bash scripts/native/run-native-tests.sh
+
+  # --------------------------------------------------------------------------
+  # [AUDIT ROUND-3 2026-09-17 — deployed GAS source binding] Build a STAMPED
+  # GAS source bundle (PushService.gs + Code.gs + WebPushCore.gs) whose
+  # PUSH_SOURCE_REVISION equals GITHUB_SHA. The operator deploys FROM this
+  # artifact; scripts/verify-gas-deployment.js then proves the live Apps
+  # Script reports the same revision. This closes the "manual paste = no
+  # deployment-chain proof" gap without requiring clasp credentials in CI.
+  # --------------------------------------------------------------------------
+  gas-source-bundle:
+    name: GAS source bundle (stamped + manifest)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: firmware
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build stamped bundle
+        run: |
+          cd firmware
+          bash scripts/make-gas-bundle.sh "${GITHUB_SHA}" dist/gas-bundle
+      - name: Upload bundle artifact (immutable evidence)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gas-bundle-${{ github.sha }}
+          path: firmware/dist/gas-bundle/
+          retention-days: 90
+      - name: Write bundle hash to job summary
+        run: |
+          cd firmware
+          {
+            echo '### GAS source bundle (round-3 source binding)'
+            echo ''
+            echo '- revision: `${{ github.sha }}`'
+            echo '- bundleSha256: `'"$(cat dist/gas-bundle/PushService.gs dist/gas-bundle/Code.gs dist/gas-bundle/WebPushCore.gs dist/gas-bundle/MANIFEST.json | sha256sum | cut -d' ' -f1)"'`'
+            echo ''
+            echo 'Verifikasi deployment live:'
+            echo '```bash'
+            echo 'node scripts/verify-gas-deployment.js --url <GAS-exec-URL> --token <AUTH_TOKEN> --manifest dist/gas-bundle/MANIFEST.json'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # --------------------------------------------------------------------------
   # Production build. Only on push-to-main or tag (not PR — production env

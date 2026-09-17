@@ -10,6 +10,17 @@
  * yang sama). Deployment BARU sebaiknya memakai canonical; file ini
  * dipertahankan untuk migrasi dan hardening deployment yang masih berjalan.
  *
+ * [DEPRECATED — AUDIT ROUND-3 2026-09-17] Komponen ini BEKU untuk
+ * production: perbaikan P1 round-3 (per-subscription delivery cursor,
+ * sharded Script-Properties storage + kapasitas mekanis, lock tanpa
+ * network I/O, lifecycle write-back) HANYA diimplementasikan di canonical
+ * code.gs/PushService.gs. Backport yang DITERAPKAN di sini hanyalah
+ * device-scoping state/ID (P1-A) supaya jalur migrasi multi-device tidak
+ * salah edge. Limitasi yang diketahui dan TIDAK diperbaiki di sini:
+ * penyimpanan array-tunggal (batas 9 KB/value GAS), delivery di dalam
+ * lock, retry tanpa per-sub cursor. Gunakan canonical untuk deployment
+ * production.
+ *
  * File ini identik dengan PushService.gs pada rilis paket - hanya nama
  * filenya mengikuti konvensi Apps Script (Code.gs). Pasangan file:
  * WebPushCore.gs (tempel sebagai file terpisah di proyek GAS). File ini
@@ -963,14 +974,20 @@ function handleIngest_(body) {
     /* ---- Fase 1: deteksi tepi per sensor (tanpa efek samping I/O) ---- */
     for (var i = 0; i < sensors.length; i++) {
       var s = sensors[i];
-      var prev = state[s.name]; // { alarm, since, eventId, severity }
+      /* [P1-A backport round-3] state & generation di-scope per device —
+       * dua device dengan sensor senama tidak saling mencemari tepi. */
+      var skey = deviceId + '::' + s.name;
+      var prev = state[skey]; // { alarm, since, eventId, severity }
       var prevAlarm = !!(prev && prev.alarm);
 
       if (s.alarm && !prevAlarm) {
         // Tepi naik: kejadian alarm BARU -> AlarmEvent durable.
-        generations[s.name] = (generations[s.name] || 0) + 1;
+        generations[skey] = (generations[skey] || 0) + 1;
         var alarm = normalizeAlarm_({
-          id: 'ALM-' + slugify_(s.name) + '-' + reportedAt.toString(36),
+          id: 'ALM-' + slugify_(deviceId).slice(0, 20) + '-' +
+            slugify_(s.name).slice(0, 20) + '-' +
+            reportedAt.toString(36) + '-' +
+            Utilities.getUuid().replace(/-/g, '').slice(0, 6),
           title: (s.severity === 'critical' ? 'KRITIS: ' : 'PERINGATAN: ') + s.name,
           body: s.status || (s.name + ' keluar batas aman (' +
             s.value + ' ' + s.unit + ')'),
@@ -982,13 +999,13 @@ function handleIngest_(body) {
         alarm.sensor = s.name;
         alarm.raisedAt = new Date(reportedAt).toISOString();
         triggered.push(alarm.id);
-        state[s.name] = { alarm: true, since: alarm.raisedAt,
+        state[skey] = { alarm: true, since: alarm.raisedAt,
           eventId: alarm.id, severity: s.severity };
         events.push({
           eventId: alarm.id,
           deviceId: deviceId,
           alarmCode: slugify_(s.name),
-          generation: generations[s.name],
+          generation: generations[skey],
           severity: s.severity,
           raisedAt: alarm.raisedAt,
           clearedAt: null,
@@ -1004,7 +1021,10 @@ function handleIngest_(body) {
         // Tepi turun: kejadian selesai (+ notifikasi pulih).
         resolved.push(prev.eventId);
         var rsv = normalizeAlarm_({
-          id: 'RSV-' + slugify_(s.name) + '-' + reportedAt.toString(36),
+          id: 'RSV-' + slugify_(deviceId).slice(0, 20) + '-' +
+            slugify_(s.name).slice(0, 20) + '-' +
+            reportedAt.toString(36) + '-' +
+            Utilities.getUuid().replace(/-/g, '').slice(0, 6),
           title: 'PULIH: ' + s.name,
           body: (s.status && s.status !== '-') ? s.status :
             (s.name + ' kembali normal (' + s.value + ' ' + s.unit + ')'),
@@ -1018,7 +1038,7 @@ function handleIngest_(body) {
           eventId: rsv.id,
           deviceId: deviceId,
           alarmCode: slugify_(s.name),
-          generation: generations[s.name] || 1,
+          generation: generations[skey] || 1,
           severity: 'info',
           raisedAt: new Date(reportedAt).toISOString(),
           clearedAt: new Date(reportedAt).toISOString(),
@@ -1029,7 +1049,7 @@ function handleIngest_(body) {
             sent: 0, failed: 0, removed: 0 }
         });
         toPush.push({ kind: 'resolve', eventId: rsv.id, resolves: prev.eventId });
-        state[s.name] = { alarm: false, since: null,
+        state[skey] = { alarm: false, since: null,
           eventId: prev.eventId, severity: 'info' };
         // Tutup entri ALM asal SEKARANG (durable-first): daftar alarm aktif
         // harus benar meski notifikasi pulih belum/gagal terkirim.
