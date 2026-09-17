@@ -99,7 +99,7 @@ const FILE_MAP = {
    * PWA di subfolder pwa-push-alarm/ repo Next.js; backend+firmware+
    * toolkit+tests di subfolder push-alarm/ repo firmware-code.gs.
    * gas/Code.gs = rename PushService.gs (bukan byte-sync; kesetaraan
-   * fungsional dibuktikan suite regresi 241 asersi yang MENJALANKAN kode). */
+   * fungsional dibuktikan suite regresi 295 asersi yang MENJALANKAN kode). */
   'plts_monitor_PWA_only': [
     ['pwa-push-alarm/index.html', ['dl', 'pwa-push-alarm/index.html']],
     ['pwa-push-alarm/manifest.json', ['dl', 'pwa-push-alarm/manifest.json']],
