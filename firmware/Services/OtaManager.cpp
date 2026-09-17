@@ -112,7 +112,7 @@ bool OtaManager::_validateCa() {
 // [AUDIT ROUND 4 / p.437] Fail-closed provisioning gate. Production builds
 // refuse OTA on unprovisioned flash (encryption OFF); every build refuses
 // when the anti-rollback ledger is inconsistent with the eFuse floor
-// (rollback evidence). See Services/SecurityPosture + docs/SECURE_PROVISIONING.md.
+// (rollback evidence). See Services/SecurityPosture.
 bool OtaManager::_validateProvisioning() {
   String whyNot;
   if (!Services::securityPosture.otaProvisioningOk(&whyNot)) {

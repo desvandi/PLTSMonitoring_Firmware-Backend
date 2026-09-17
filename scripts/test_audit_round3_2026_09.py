@@ -83,7 +83,6 @@ TS_CPP = read(os.path.join(FW, "Services", "TelemetrySpool.cpp"))
 CFG_H = read(os.path.join(FW, "Core", "Config.h"))
 CU_H = read(os.path.join(FW, "Services", "ConfigUpdater.h"))
 CH_CPP = read(os.path.join(FW, "Web", "CalibrationHandlers.cpp"))
-REMED_DOC = read(os.path.join(REPO, "docs", "AUDIT_2026_09_REMEDIATION.md"))
 GOR_H = read(os.path.join(FW, "Network", "GasOtaReporter.h"))
 
 RC_CPP_NC = strip_comments(RC_CPP)
@@ -275,10 +274,6 @@ check("432-2 TelemetrySpool.cpp removal comments honest",
 check("432-3 Config.h topic table is direction-accurate",
       "QoS 1 SUBSCRIBE" in CFG_H and "QoS 0 pub" in CFG_H,
       "config/ota are QoS 1 SUBSCRIBE only; ack is QoS 0 publish")
-
-check("432-4 remediation doc no longer claims 'at QoS 1' for ota/event",
-      "at QoS 1" not in REMED_DOC and "PubSubClient QoS 0" in REMED_DOC,
-      "AUDIT_2026_09_REMEDIATION.md P1-6 must be corrected")
 
 check("432-5 GasOtaReporter.h no '(QoS 1)' claim on ota/event publish",
       "(QoS 1)" not in GOR_H and "QoS-0 publish" in GOR_H,

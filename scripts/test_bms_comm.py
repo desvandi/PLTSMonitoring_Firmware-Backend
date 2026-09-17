@@ -12,7 +12,7 @@ These are LOGIC MIRRORS, like the repo's existing test_soc_calculation.py /
 test_voltage_calibration.py pattern: the C++ sources remain the shipping truth;
 this suite pins their semantics with concrete test vectors so any divergence
 fails loudly. Hardware-dependent paths (TWAI/UART/TCP) are covered by the
-bench checklist (docs/remediation-2026-08/12_BENCH_EXECUTION_CHECKLIST.md §G).
+bench checklist (§G).
 
 Run:  python3 scripts/test_bms_comm.py
 """

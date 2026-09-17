@@ -151,27 +151,20 @@ PLTSMonitoring_Firmware-Backend/
 │   ├── test_*.py / test_*.js    #   30+ test scripts (unit, property, contract, bench)
 │   └── ...
 │
-├── docs/
-│   ├── ARCHITECTURE.md          #   System architecture + relay subsystem (consolidated)
-│   ├── DEPLOYMENT.md            #   Branch protection, GPG signing, binary distribution
-│   ├── HARDWARE_ACCEPTANCE.md   #   All HW acceptance protocols (general + sensor + E-WAVE)
-│   ├── AUDIT_2026_09_REMEDIATION.md  # Audit findings (P0/P1/P2 ID namespace)
-│   ├── hardware-acceptance/     #   Version-specific HW acceptance templates + evidence
-│   │   ├── v1.8.0.md            #     General HW acceptance (21 sections incl relay)
+├── docs/                        #   Hanya data fungsional (dibaca skrip/CI)
+│   ├── hardware-revisions.json  #     Registry revisi hardware (verify_ota_evidence dkk.)
+│   ├── hardware-acceptance/     #   Evidence + template verifikasi (release gate P0-2)
 │   │   ├── v1.8.0.json          #     Filled-in evidence (verdict=PASS)
-│   │   ├── v1.9.2.md            #     INA219-specific HW acceptance (12 criteria)
-│   │   ├── v1.9.2.template.json #     Template for v1.9.2
-│   │   ├── v1.9.3.md            #     INA219 HW acceptance for the v1.9.3 release line
-│   │   └── v1.9.3.template.json #     Template for v1.9.3 (REL-03: SHA byte-exact evidence)
-│   ├── ota-physical-test/       #   OTA physical test protocol (16 criteria)
-│   │   ├── v1.8.0.md
-│   │   └── v1.8.0.template.json
-│   └── wiring/                  #   Wiring diagrams (DC, AC, emergency relay)
+│   │   ├── v1.8.0.template.json #     Template v1.8.0
+│   │   ├── v1.9.2.template.json #     Template v1.9.2
+│   │   └── v1.9.3.template.json #     Template v1.9.3 (REL-03: SHA byte-exact evidence)
+│   └── ota-physical-test/       #   Template uji fisik OTA (verify_ota_evidence)
+│       ├── v1.8.0.template.json
+│       └── v1.9.3.template.json
 │
 ├── .github/workflows/
 │   └── build-firmware.yml       #   CI: test → build → sign → gate → tag-verify → hw-verify → release
 │
-├── Panduan_Deploy_Production_MonitorIoT.pdf  # Legacy deploy guide (Edisi 4)
 └── README.md                    # File ini
 ```
 
@@ -707,7 +700,7 @@ node scripts/test_gas_contract.js
 - **Reproducible build (REL-03/REL-04 CLOSED)** — `FIRMWARE_BUILD_DATE` tidak lagi `__DATE__`/`__TIME__` (wall-clock); kini diturunkan dari `SOURCE_DATE_EPOCH` (timestamp commit HEAD git) via `firmware/scripts/set_build_date.py`. Dua build dari source yang sama = SHA-256 identik.
 - **CI job `reproducible-build`** — build 2× (modular production + generic) dari clean tree, compare SHA; `release-publish` kini mewajibkan job ini (release tak bisa dipublish tanpa bukti determinisme).
 - **buildDate semantics** — `/api/version` `buildDate` kini melaporkan tanggal SOURCE commit (identitas provenance), bukan wall-clock kompilasi.
-- **HW acceptance v1.9.3 protocol** — `docs/hardware-acceptance/v1.9.3.md` + template (12 kriteria sama dengan v1.9.2; evidence `firmwareSha256` kini byte-exact vs released binary).
+- **HW acceptance v1.9.3 protocol** — template `docs/hardware-acceptance/v1.9.3.template.json` (12 kriteria sama dengan v1.9.2; evidence `firmwareSha256` kini byte-exact vs released binary).
 - **Version parity** — 1.9.3 di modular (Config.h) + generic (plts_firmware_v1.ino + manifest.json) + mirror PWA (`public/firmware/manifest.json`).
 - Tidak ada perubahan measurement chain — INA219 PGA 0x0FFF/0x17FF, hysteresis 90A/100A, voltage divider 190k/10k, pga_mode telemetry: semuanya identik dengan v1.9.2.
 

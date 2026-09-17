@@ -7,7 +7,7 @@
 //   - The acceptance engineer, during per-device provisioning: every field
 //     here is the EVIDENCE that flash encryption / secure boot / the eFuse
 //     anti-rollback floor are actually provisioned on THIS physical unit
-//     (docs/SECURE_PROVISIONING.md).
+//     (secure-provisioning runbook, Gate A/B).
 //   - scripts/verify_flashed_image.py --device-url, which fetches this
 //     endpoint and compares runningImage.sha256 against the signed release
 //     manifest (release.json) — "proof that the flashed binary is the

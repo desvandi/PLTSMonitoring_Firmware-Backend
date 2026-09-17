@@ -383,7 +383,7 @@ void setup() {
     Services::alarms.raise(Core::AlarmCode::SECURITY_PROVISIONING,
                  Core::AlarmSeverity::Critical,
                  "Production firmware on UNENCRYPTED flash — run Gate A "
-                 "provisioning (docs/SECURE_PROVISIONING.md); OTA refused");
+                 "provisioning (Gate A, espefuse); OTA refused");
   }
 #endif
   Services::ota.begin();

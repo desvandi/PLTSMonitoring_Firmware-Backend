@@ -43,8 +43,8 @@
  *
  * Semantika delivery: AT-LEAST-ONCE per subscriber (bukan exactly-once).
  * Jendela duplikat dibatasi hanya pada subscriber yang sedang in-flight
- * saat eksekusi GAS mati di antara kirim dan merge status — lihat
- * docs/PUSH_DELIVERY_SEMANTICS.md.
+ * saat eksekusi GAS mati di antara kirim dan merge status (kontrak
+ * at-least-once dengan kursor per-subscriber).
  *
  * PASANGAN WAJIB: tempel juga WebPushCore.gs (dari push-alarm/gas/) ke
  * proyek Apps Script yang sama — berisi kripto Web Push (P-256, AES-GCM).

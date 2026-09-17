@@ -113,9 +113,6 @@ const FILE_MAP = {
     ['pwa-push-alarm/icons/badge-72.png', ['dl', 'pwa-push-alarm/icons/badge-72.png']],
     ['pwa-push-alarm/icons/maskable-512.png', ['dl', 'pwa-push-alarm/icons/maskable-512.png']],
     ['pwa-push-alarm/tools/verify-deployment.js', ['dl', 'tools/verify-deployment.js']],
-    /* Panduan deploy PDF di AKAR repo (struktur ramping 2026-09-01):
-     * salinan identik di kedua repositori - dicek byte-per-byte. */
-    ['Panduan_Deploy_Production_MonitorIoT.pdf', ['dl', 'Panduan_Deploy_Production_MonitorIoT.pdf']],
   ],
   'plts_monitor_firmware-code.gs-etc': [
     ['push-alarm/gas/WebPushCore.gs', ['dl', 'gas/webpush-core.js']],
@@ -129,7 +126,6 @@ const FILE_MAP = {
     ['push-alarm/tests/test-webpush-core.js', ['ws', 'test-webpush-core.js']],
     ['push-alarm/tests/smoke-test-pwa.js', ['ws', 'smoke-test-pwa.js']],
     ['push-alarm/tests/cross-audit-test.js', ['ws', 'cross-audit-test.js']],
-    ['Panduan_Deploy_Production_MonitorIoT.pdf', ['dl', 'Panduan_Deploy_Production_MonitorIoT.pdf']],
   ],
 };
 
