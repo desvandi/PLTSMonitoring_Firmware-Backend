@@ -22,6 +22,7 @@
 //     (begin/scan) or the telemetry task (spool/replay) — never both.
 // =============================================================================
 #include "TelemetrySpool.h"
+#include "LogService.h"          // [GATE-7b] degraded-capacity WARNING goes to the activity log
 #include "../Core/Common.h"
 #include "../Utils/Crc.h"
 #include "../Utils/Crypto.h"
