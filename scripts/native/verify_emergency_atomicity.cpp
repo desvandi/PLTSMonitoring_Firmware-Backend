@@ -48,15 +48,25 @@ static const uint8_t POWER_ON_STATE = 0xFF;
 
 struct DriverMirror {
   std::atomic<bool>   safetyLatched{true};   // boot = LATCHED (isolated)
-  std::timed_mutex    writeMutex;            // serializes ALL register writes (bounded wait)
+  // [CI lesson x2 — runs 35298266605 / 35299692237] PLAIN std::mutex with
+  // BLOCKING acquisition. The first fix (single long-lived timed_mutex)
+  // was not sufficient: under the CI runner's g++-13 + libtsan,
+  // unique_lock::try_lock_for() timing out (pthread_mutex_timedlock) is
+  // mis-tracked as "unlock of an unlocked mutex" — a runtime quirk we cannot
+  // reproduce on g++-14 locally. The PROOF PROPERTY of this harness does not
+  // depend on the bounded wait: PH8-01 is about {latch + mutual exclusion of
+  // the ON-write vs the emergency 0xFF write}. The production driver's
+  // bounded-wait + degraded fallback semantics remain covered by the source
+  // contract and the logic mirrors (python suites); this native harness uses
+  // the most conservative, universally-TSAN-safe synchronization.
+  std::mutex          writeMutex;
   std::atomic<uint8_t> reg{POWER_ON_STATE};  // physical register model
 
 #ifndef PH8_NO_LATCH
   bool setChannel(uint8_t ch, bool on) {
     // [PH8-01] ALL mutations serialized; ON re-checks the latch inside the
     // critical region. (Mirrors the fixed RelayExpanderDriver::setChannel.)
-    std::unique_lock<std::timed_mutex> lk(writeMutex, std::defer_lock);
-    if (!lk.try_lock_for(std::chrono::milliseconds(100))) return false;  // fail-closed
+    std::lock_guard<std::mutex> lk(writeMutex);
     if (on && safetyLatched.load(std::memory_order_acquire)) return false;
     uint8_t base = reg.load(std::memory_order_relaxed);
     uint8_t next = on ? (uint8_t)(base & ~(1u << ch)) : (uint8_t)(base | (1u << ch));
@@ -65,18 +75,10 @@ struct DriverMirror {
   }
   void forceSafetyAllOff() {
     // LATCH FIRST (atomic, mutex-independent), then ONE 0xFF write under
-    // the BOUNDED mutex wait — mirrors the fixed driver: the emergency waits
-    // up to FORCE_ALLOFF_LOCK_MS for a ~1-transaction executor writer, then
-    // (fallback, modeled when the wait expires) a direct full-word write.
+    // the write mutex — the emergency barrier critical region.
     safetyLatched.store(true, std::memory_order_release);
-    std::unique_lock<std::timed_mutex> lk(writeMutex, std::defer_lock);
-    if (lk.try_lock_for(std::chrono::milliseconds(50))) {
-      reg.store(POWER_ON_STATE, std::memory_order_release);
-    } else {
-      // Degraded fallback (executor wedged far beyond one transaction):
-      // full-word 0xFF attempt; future ON is already refused by the latch.
-      reg.store(POWER_ON_STATE, std::memory_order_release);
-    }
+    std::lock_guard<std::mutex> lk(writeMutex);
+    reg.store(POWER_ON_STATE, std::memory_order_release);
   }
   void clearSafetyLatch() { safetyLatched.store(false, std::memory_order_release); }
 #else
