@@ -225,7 +225,7 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
         " — replaying original ACK", 0);
     if (previousAck.length() > 0) {
       String ackTopic = mqttTransport.getDeviceTopic("ack");
-      mqttTransport.publish(ackTopic.c_str(), previousAck.c_str(),
+      mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), previousAck.c_str(),
                              previousAck.length(), false);
     } else {
       // No stored ACK — synthesize a generic DUPLICATE ack.
@@ -279,7 +279,7 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   // Publish ACK
   {
     String ackTopic = mqttTransport.getDeviceTopic("ack");
-    mqttTransport.publish(ackTopic.c_str(), ackJson.c_str(),
+    mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), ackJson.c_str(),
                            ackJson.length(), false);
   }
 
@@ -590,7 +590,7 @@ void MqttConfigReceiver::_publishAck(const char* transactionId, bool ok,
     serializeJson(ack, ackJson);
   }
   String ackTopic = mqttTransport.getDeviceTopic("ack");
-  mqttTransport.publish(ackTopic.c_str(), ackJson.c_str(),
+  mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), ackJson.c_str(),
                         ackJson.length(), false);
 }
 

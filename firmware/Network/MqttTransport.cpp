@@ -49,6 +49,19 @@ void MqttTransport::begin() {
   _client.setBufferSize(Core::MQTT_BUFFER_SIZE);
   _client.setCallback(mqttCbWrapper);
 
+  // [GATE-5 / F4-05 REMEDIATION 2026-09 — TIMEOUT BUDGET vs WATCHDOG]
+  // audit Phase 4 F4-05: PubSubClient's DEFAULT MQTT_SOCKET_TIMEOUT is 15 s
+  // while the task watchdog budget is 10 s — a blackholed broker could stall
+  // networkTask inside _reconnect() PAST the TWDT window and force WDT
+  // resets (a monitoring-transport failure became a device reboot). Involved
+  // invariant, now explicit:
+  //     MQTT socket timeout (5 s)  <  TLS handshake timeout (5 s)  <  TWDT (10 s)
+  // One connect attempt can never block the task beyond the watchdog budget;
+  // backoff (with jitter, see _reconnect) spaces the ATTEMPTS, it does not
+  // lengthen any single one.
+  _client.setSocketTimeout(5);
+  _tls.setHandshakeTimeout(5);
+
   // [FW-02] TLS trust: load the broker root CA when provided.
   // PRODUCTION_BUILD refuses to compile without MQTT_ROOT_CA (Config.h
   // #error guard). DEVELOPMENT_BUILD may explicitly opt out — the bypass is
@@ -82,22 +95,49 @@ void MqttTransport::tick() {
   _client.loop();
 }
 
-bool MqttTransport::publish(const char* topic, const char* payload, size_t len,
-                            bool retained, uint8_t qos) {
+// [GATE-5 / F3 + F4-04 REMEDIATION 2026-09 — HONEST QoS API]
+// Audit Phase 1 F3 / Phase 4 F4-04 / Phase 3 P3-S1-03: PubSubClient 2.8
+// outbound publish() is ALWAYS QoS 0 (TCP write accepted ≠ broker PUBACK),
+// yet the old API surface accepted a `qos` argument — an engineer could
+// reasonably read publish(..., qos=1) as a delivery guarantee it never had.
+// The CANONICAL name now states the actual semantic:
+//
+//   publishBestEffortQoS0() — fire-and-forget; true == socket write
+//       accepted, NOT broker-accepted. Durability for critical events comes
+//       from the TelemetrySpool + GAS (device_key, sequence) dedup pipeline,
+//       not from this transport.
+//
+//   publishGuaranteedQoS1() — DOES NOT EXIST on this transport. Any code that
+//       needs broker-confirmed QoS 1 (command ACK path hardening) requires the
+//       espMqttClient migration (documented open limitation — never silently
+//       claimed here). Callers must not treat any publish() result as a
+//       PUBACK-equivalent.
+//
+// The legacy publish(topic, payload, len, retained, qos) signature remains
+// as a deprecated alias so existing call sites keep compiling during
+// migration; every in-tree caller now uses publishBestEffortQoS0().
+bool MqttTransport::publishBestEffortQoS0(const char* topic, const char* payload,
+                                           size_t len, bool retained) {
   if (!_client.connected()) { _publishFailCount++; return false; }
   // LIBRARY LIMITATION (documented in 07_FAILURE_RECOVERY_MODEL.md): the
   // upstream knolleary/PubSubClient 2.8 supports QoS selection only on
   // SUBSCRIBE; publish() is always QoS 0 (fire-and-forget with TCP-level
-  // delivery). The qos parameter is kept for API stability: qos>=1 requests
-  // best-available delivery (socket write confirmed) — NOT a broker PUBACK.
-  // Consequence: spooled records are removed after a confirmed socket write,
-  // which is the strongest delivery evidence this transport can produce.
-  // Migration path to broker-acknowledged QoS 1: espMqttClient (tracked as a
-  // documented open limitation, NOT silently claimed as QoS 1).
-  (void)qos;
+  // delivery). Consequence: spooled records are removed after a confirmed
+  // socket write, which is the strongest delivery evidence this transport
+  // can produce. Migration path to broker-acknowledged QoS 1: espMqttClient
+  // (tracked as a documented open limitation, NOT silently claimed as QoS 1).
   bool ok = _client.publish(topic, (const uint8_t*)payload, (unsigned int)len, retained);
   if (!ok) _publishFailCount++;
   return ok;
+}
+
+// DEPRECATED ALIAS — kept ONLY for out-of-tree compatibility. The `qos`
+// argument is explicitly ignored (it was always ignored by the library);
+// in-tree code must call publishBestEffortQoS0(). Remove after migration.
+bool MqttTransport::publish(const char* topic, const char* payload, size_t len,
+                            bool retained, uint8_t qos) {
+  (void)qos;
+  return publishBestEffortQoS0(topic, payload, len, retained);
 }
 
 bool MqttTransport::subscribe(const char* topic, uint8_t qos) {
@@ -156,7 +196,16 @@ const char* MqttTransport::getStateStr() const {
 
 void MqttTransport::_reconnect() {
   unsigned long now = millis();
-  if (now - _lastReconnectMs < _reconnectDelayMs) return;   // backoff window
+  // [GATE-5 / P7-S2-01 REMEDIATION 2026-09 — FULL JITTER]
+  // audit Phase 7 P7-S2-01: the OLD backoff was deterministic (5→10→20→40→60 s)
+  // — a fleet of N devices booting/recovering together retried on a nearly
+  // IDENTICAL schedule, producing a synchronized reconnect storm against the
+  // broker right after any shared outage. AWS-style full jitter now applies:
+  // the exponential value is the CAP; the actual wait for the NEXT attempt is
+  // drawn uniformly from [MIN, cap] — fleet retry times spread across the
+  // window instead of concentrating on one timestamp. The cap keeps growing
+  // on consecutive failures; a successful connect resets everything.
+  if (now - _lastReconnectMs < _reconnectWaitMs) return;   // jittered window
   _lastReconnectMs = now;
   _state = MqttConnState::Connecting;
 
@@ -179,6 +228,7 @@ void MqttTransport::_reconnect() {
   if (ok) {
     _reconnectCount++;
     _reconnectDelayMs = Core::MQTT_RECONNECT_MIN_MS;
+    _reconnectWaitMs = Core::MQTT_RECONNECT_MIN_MS;
     _state = MqttConnState::Connected;
     Services::Log.append(Core::LogType::Custom, "MQTT connected (TLS)", 0);
 
@@ -195,12 +245,16 @@ void MqttTransport::_reconnect() {
                            "MQTT connected but subscriptions INCOMPLETE", 0);
       // Stay in Connected — not Online — and force a fast retry cycle.
       _reconnectDelayMs = Core::MQTT_RECONNECT_MIN_MS;
+      _reconnectWaitMs = Core::MQTT_RECONNECT_MIN_MS;
     }
   } else {
     _state = MqttConnState::Disconnected;
     _reconnectDelayMs = _reconnectDelayMs * 2;
     if (_reconnectDelayMs > Core::MQTT_RECONNECT_MAX_MS)
       _reconnectDelayMs = Core::MQTT_RECONNECT_MAX_MS;
+    // [P7-S2-01] FULL JITTER — wait drawn uniformly from [MIN, cap].
+    _reconnectWaitMs = (uint16_t)random(Core::MQTT_RECONNECT_MIN_MS,
+                                        _reconnectDelayMs + 1);
   }
 }
 

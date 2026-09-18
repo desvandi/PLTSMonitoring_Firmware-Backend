@@ -48,7 +48,7 @@ bool MqttTelemetryPublisher::_spoolPublishTrampoline(uint8_t recordType,
   const char* suffix =
     (recordType == (uint8_t)Services::SpoolRecordType::CriticalEvent) ? "log" : "status";
   String topic = mqttTransport.getDeviceTopic(suffix);
-  return mqttTransport.publish(topic.c_str(), payload, len, false, 0);
+  return mqttTransport.publishBestEffortQoS0(topic.c_str(), payload, len, false);
 }
 
 void MqttTelemetryPublisher::begin() {
@@ -64,7 +64,7 @@ bool MqttTelemetryPublisher::publishStatus(const char* json, size_t len) {
   if (!json || len == 0) return false;
   if (!mqttTransport.isFullyOperational()) { _publishFailCount++; return false; }
   String topic = mqttTransport.getDeviceTopic("status");
-  bool ok = mqttTransport.publish(topic.c_str(), json, len, false, 0);
+  bool ok = mqttTransport.publishBestEffortQoS0(topic.c_str(), json, len, false);
   if (ok) _publishedCount++; else _publishFailCount++;
   return ok;
 }
@@ -84,7 +84,7 @@ void MqttTelemetryPublisher::publishCriticalEvent(const char* type, const char* 
   // guarantee, with GAS-side dedup on sequence absorbing the duplicates.
   if (mqttTransport.isFullyOperational()) {
     String topic = mqttTransport.getDeviceTopic("log");
-    mqttTransport.publish(topic.c_str(), payload, len, false, 0);
+    mqttTransport.publishBestEffortQoS0(topic.c_str(), payload, len, false);
   }
   (void)type;
 }
@@ -157,7 +157,7 @@ void MqttTelemetryPublisher::publishOtaLifecycle(const char* jobId,
   String topic = mqttTransport.getDeviceTopic("ota/event");
   bool ok = false;
   if (mqttTransport.isFullyOperational()) {
-    ok = mqttTransport.publish(topic.c_str(), json.c_str(), json.length(), false, 0);
+    ok = mqttTransport.publishBestEffortQoS0(topic.c_str(), json.c_str(), json.length(), false);
   }
   if (ok) {
     _publishedCount++;
