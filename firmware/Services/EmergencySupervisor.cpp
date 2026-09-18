@@ -98,6 +98,18 @@ void EmergencySupervisor::tick() {
     if (_lockStarveCycles >= EMG_LOCK_STARVE_LIMIT && !_lockStarveEscalated) {
       _lockStarveEscalated = true;
       _lockStarveEvents++;
+#if PLTS_ENABLE_RELAYS
+      // [GATE-1 / PH8-02 REMEDIATION 2026-09] audit Phase 8 S1: the old
+      // escalation de-energized ONLY the E-WAVE GPIO; the PCF8574 relay bank
+      // stayed in its previous state until the supervisor could re-acquire
+      // its mutex (possibly never, if the holder is deadlocked). The relay
+      // bank is forced OFF through the DRIVER-LEVEL barrier NOW:
+      // forceSafetyAllOff() needs NO RelayController state, NO queue, NO
+      // journal, NO network, and NOT this supervisor's mutex — it latches the
+      // safety gate atomically and drives the whole bank OFF in ONE 0xFF
+      // transaction. Every ON-direction write is refused until an operator ARM.
+      Drivers::relayExpander.forceSafetyAllOff();
+#endif
       if (Drivers::emergencyRelay.isEnergized()) {
         Drivers::emergencyRelay.setEnergized(false);   // ISOLATED — fail-safe NOW
         Services::Log.append(Core::LogType::Info,
@@ -203,6 +215,13 @@ void EmergencySupervisor::_arm(const char* source) {
   _reason   = "";
   _tripAtMs = 0;
   Drivers::emergencyRelay.setEnergized(true);    // RUN (energize kontaktor path)
+#if PLTS_ENABLE_RELAYS
+  // [GATE-1 / PH8-01] The operator ARM is the ONLY path that restores the
+  // relay-bank ON authority. It runs AFTER the crash-chain / sensor / E-stop
+  // gates in applyCommand("ARM") — never from a command queue, never directly
+  // from the network.
+  Services::relaysController.clearEmergencyLatch();
+#endif
   _queueEventUnlocked("ARMED", String("operator ARM (") + source + ") — relay energized");
   Services::alarms.clear(Core::AlarmCode::EMERGENCY_TRIP);
   Services::Log.append(Core::LogType::Info, String("EMERGENCY_ARMED source=") + source);
@@ -417,6 +436,42 @@ String EmergencySupervisor::applyCommand(const String& commandId,
     if (cfg.isNull() || !cfg.is<JsonObject>()) {
       messageOut = "missing config object";
     } else {
+      // [GATE-1 / PH8-04 REMEDIATION 2026-09 — SAFETY CONFIG LOCKDOWN]
+      // audit Phase 8 S1: sensorFailPolicy / estopEnabled / relayPin /
+      // estopPin are COMMISSIONED SAFETY CONFIGURATION, not runtime knobs.
+      // The OLD shape accepted them from any remote CONFIG command — an
+      // operator with valid credentials could set sensorFailPolicy=0
+      // (fail-open!) and a subsequent sensor loss would NOT trip the system.
+      // In PRODUCTION these four fields are IMMUTABLE over the remote path:
+      // changes require local service mode + physical authorization (per the
+      // audit's safety-configuration lifecycle). Development/staging builds
+      // keep the override for bench work — compile-time, never remote.
+#ifdef PRODUCTION_BUILD
+      {
+        const bool asksRly  = cfg.containsKey("relayPin") &&
+                              (int)clampEmgInt(cfg["relayPin"] | (long)-1, 12, 39, (long)Core::cfgEmgRelayPin) != (int)Core::cfgEmgRelayPin;
+        const bool asksEPin = cfg.containsKey("estopPin") &&
+                              (int)clampEmgInt(cfg["estopPin"] | (long)-99, -1, 39, (long)Core::cfgEmgEstopPin) != (int)Core::cfgEmgEstopPin;
+        const bool asksEEn  = cfg.containsKey("estopEnabled") &&
+                              (uint8_t)clampEmgInt(cfg["estopEnabled"] | (long)-1, 0, 1, (long)Core::cfgEmgEstopEnabled) != Core::cfgEmgEstopEnabled;
+        const bool asksSfp  = cfg.containsKey("sensorFailPolicy") &&
+                              (uint8_t)clampEmgInt(cfg["sensorFailPolicy"] | (long)-1, 0, 1, (long)Core::cfgEmgSensorFailPolicy) != Core::cfgEmgSensorFailPolicy;
+        if (asksRly || asksEPin || asksEEn || asksSfp) {
+          _queueEventUnlocked("CONFIG_REFUSED",
+              "PRODUCTION safety-config lockdown: relayPin/estopPin/estopEnabled/"
+              "sensorFailPolicy are immutable over remote CONFIG (local service mode required)");
+          Services::Log.append(Core::LogType::Custom,
+              "EMG CONFIG REFUSED (production lockdown): commissioned safety fields "
+              "relayPin/estopPin/estopEnabled/sensorFailPolicy cannot change remotely", 0);
+          result = "REFUSED";
+          messageOut = "production build: relayPin/estopPin/estopEnabled/sensorFailPolicy "
+                       "are commissioned safety configuration — local service mode required";
+          xSemaphoreGive(_mutex);
+          publishStatus();
+          return result;
+        }
+      }
+#endif
       // [audit p.491] Pre-commit snapshot — a failed NVS write must roll the
       // emergency trigger thresholds back to the previous values. These are
       // SAFETY POLICY (arm/trip boundaries); the operator must never believe

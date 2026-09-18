@@ -230,8 +230,11 @@ static void handleRelayCommand() {
   }
 
   // Freshness gate
+  // [GATE-1 / PH8-03] Energizing relay commands (on/pulse) pass the STRICT
+  // flag: an unusable clock REJECTS (CLOCK_INVALID) instead of bypassing.
   String expiryErr;
-  if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr)) {
+  const bool energizing = (action == "on" || action == "pulse");
+  if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr, energizing)) {
     sendError(400, expiryErr.c_str());
     return;
   }
@@ -352,9 +355,11 @@ static void handleAllOff() {
     }
   }
 
-  // [P1-6] Freshness gate — same as per-channel commands
+  // [P1-6] Freshness gate — same as per-channel commands.
+  // [GATE-1 / PH8-03] all_off is SAFE-DIRECTION (de-energize) → non-strict,
+  // clock loss does not block a safe-direction command (audit exception).
   String expiryErr;
-  if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr)) {
+  if (Services::CommandCanonicalizer::isCommandExpired(cmdDoc, expiryErr, false)) {
     sendError(400, expiryErr.c_str());
     return;
   }

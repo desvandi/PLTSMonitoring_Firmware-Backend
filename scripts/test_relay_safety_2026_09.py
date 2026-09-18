@@ -270,9 +270,20 @@ check("maxOnTime cancels a pending pulse (maxOnTime > pulse expiry)",
       "cancelled by maxOnTime FORCE OFF" in maxon_body)
 check("maxOnTime FORCE OFF bypasses minOnTime (no _evaluateSafety call)",
       "_evaluateSafety" not in maxon_body)
-check("emergencyAllOff bypasses minOnTime (direct safe-direction write)",
-      "_evaluateSafety" not in emergency_body and
-      "_applyChannelState(ch, false, Core::RelaySource::Safety)" in emergency_body)
+# [GATE-1 / PH8-01 2026-09] emergencyAllOff was rebuilt: the physical OFF is
+# now driven by the driver-level ATOMIC BARRIER (forceSafetyAllOff: latch +
+# single 0xFF write) BEFORE any per-channel bookkeeping — the audit Phase 8
+# S0 remediation. The minOnTime bypass is unchanged (no _evaluateSafety in
+# the emergency path); the per-channel direct safe-direction write was
+# replaced by the stronger single-transaction barrier + state reconciliation.
+check("emergencyAllOff bypasses minOnTime (no _evaluateSafety call)",
+      "_evaluateSafety" not in emergency_body)
+check("[PH8-01] emergencyAllOff leads with the driver atomic barrier",
+      "forceSafetyAllOff()" in emergency_body and
+      emergency_body.find("forceSafetyAllOff()") < emergency_body.find("_safetyGeneration++"))
+check("[PH8-01] emergency path performs bank-wide OFF + state reconciliation",
+      "bankWriteOk" in emergency_body and
+      "Core::RelayStateConfidence::Fault" in emergency_body)
 check("pulse auto-OFF defers to minOnTime (deferred, never dropped)",
       re.search(r"minOnTimeSec > 0 && onDuration < _config\[ch\]\.minOnTimeSec"
                 r"[^}]*offAtMs = _state\[ch\]\.onSinceMs",

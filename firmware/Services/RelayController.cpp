@@ -287,6 +287,15 @@ RelayCommandResult RelayController::applyCommand(
 
   // Handle "on" command
   if (command == "on") {
+    // [GATE-1 / PH8-01] Safety-latch gate — the emergency epoch is active
+    // (boot / trip / DISARM hold / starvation escalation). ON is refused
+    // with an honest Blocked result; the driver re-checks atomically as the
+    // final barrier, this is the honest-messaging layer.
+    if (Drivers::relayExpander.safetyLatched()) {
+      messageOut = "SAFETY_LATCHED — emergency epoch active; operator ARM required before ON";
+      return RelayCommandResult::Blocked;
+    }
+
     // Safety evaluation
     SafetyDecision sd = _evaluateSafety(channel, true);
     if (sd == SafetyDecision::InhibitMinOff) {
@@ -345,6 +354,12 @@ RelayCommandResult RelayController::applyCommand(
     if (pulseDurationMs == 0 || pulseDurationMs > 60000) {
       messageOut = "Invalid pulse duration (1-60000 ms)";
       return RelayCommandResult::Rejected;
+    }
+
+    // [GATE-1 / PH8-01] Safety-latch gate — identical contract to "on".
+    if (Drivers::relayExpander.safetyLatched()) {
+      messageOut = "SAFETY_LATCHED — emergency epoch active; operator ARM required before PULSE";
+      return RelayCommandResult::Blocked;
     }
 
     // Same safety + interlock checks as "on"
@@ -408,8 +423,24 @@ RelayCommandResult RelayController::applyCommand(
 // - NOT blocked by minOnTime (safety hierarchy, audit p.378).
 // - Bumps the safety generation → every command still queued from BEFORE the
 //   emergency is re-validated at execution and BLOCKED (audit p.366-369).
+//
+// [GATE-1 / PH8-01 REMEDIATION 2026-09 — ATOMIC EMERGENCY BARRIER]
+// STEP 1 is now Drivers::relayExpander.forceSafetyAllOff(): the driver-level
+// safety latch is set ATOMICALLY (refusing every in-flight and future
+// ON-direction write at the driver boundary) and the bank is driven OFF in
+// ONE 0xFF transaction — single write = whole bank, no per-channel window.
+// The generation bump + software-state reconciliation below remain as the
+// accounting layer ON TOP of the physical barrier; they are no longer the
+// only line of defense against the preempt race documented in audit Phase 8
+// S0 (relayTask generation-check PASS → preempt → emergencyAllOff completes →
+// resumed relayTask writes ON).
 void RelayController::emergencyAllOff() {
-  // Invalidate pending normal commands — they belong to a dead safety epoch.
+  // --- 1. PHYSICAL BARRIER FIRST (atomic, driver-level) --------------------
+  // Latch + single 0xFF transaction. Independent of RelayController state,
+  // queue, journal, and this controller's callers' locks.
+  Drivers::relayExpander.forceSafetyAllOff();
+
+  // --- 2. Invalidate pending normal commands (logical epoch) --------------
   _safetyGeneration++;
 
   if (!_driverAvailable) {
@@ -423,25 +454,35 @@ void RelayController::emergencyAllOff() {
 
   AllOffResult result;
   result.requested = Core::RELAY_CHANNEL_COUNT;
+  const bool bankWriteOk = !Drivers::relayExpander.isShadowUnknown();
   for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
     if (_pulses[ch].active) {
       _annotatePulseOutcome(ch, "cancelled by E-WAVE emergency cascade");
     }
     _pulses[ch].active = false;  // cancel pending pulses first
 
-    // Attempt OFF regardless of reportedState (audit p.364).
-    _applyChannelState(ch, false, Core::RelaySource::Safety);
-
-    if (_state[ch].fault) {
-      // _applyChannelState could not verify the write — outcome unknown
-      // (the write may or may not have reached the expander).
-      result.unknown++;
-      result.detail += "CH" + String(ch) + ":UNKNOWN ";
-    } else if (!_state[ch].reportedState) {
+    // Software-state reconciliation AFTER the single 0xFF barrier write.
+    // [GATE-1/PH8-01] The physical OFF is already driven by
+    // forceSafetyAllOff() — this loop reconciles the controller's per-channel
+    // bookkeeping to that physical fact. The shadow-unknown flag (set by the
+    // barrier write failing) classifies every channel as UNKNOWN; a verified
+    // barrier write classifies every channel as OFF.
+    _state[ch].desiredState = false;
+    if (bankWriteOk) {
+      _state[ch].reportedState = false;
+      _state[ch].onSinceMs = 0;
+      _state[ch].fault = false;
+      _state[ch].confidence = Core::RelayStateConfidence::SoftwareOnly;
+      _state[ch].source = Core::RelaySource::Safety;
+      _state[ch].stateSequence++;
+      _state[ch].lastChangedAtMs = millis();
       result.success++;
     } else {
-      result.failed++;
-      result.detail += "CH" + String(ch) + ":STILL_ON ";
+      // Barrier write outcome unknown — physical state NOT verifiable.
+      _state[ch].fault = true;
+      _state[ch].confidence = Core::RelayStateConfidence::Fault;
+      result.unknown++;
+      result.detail += "CH" + String(ch) + ":UNKNOWN ";
     }
   }
 
@@ -453,6 +494,16 @@ void RelayController::emergencyAllOff() {
              "RELAY: E-WAVE cascade — all channels OFF attempted (" +
              String(result.success) + " ok, " + String(result.unknown) + " unknown, safetyGen=" +
              String(_safetyGeneration) + ")", 0);
+}
+
+// [GATE-1 / PH8-01] Called ONLY from EmergencySupervisor::_arm() — the
+// explicit operator ARM path, after the crash-chain / sensor / E-stop gates
+// pass. Restores the relay ON authority by clearing the driver-level safety
+// latch. No queue, no command, and no network path may reach this.
+void RelayController::clearEmergencyLatch() {
+  Drivers::relayExpander.clearSafetyLatch();
+  Services::Log.append(Core::LogType::Custom,
+      "RELAY: emergency latch cleared by operator ARM — ON authority restored", 0);
 }
 
 bool RelayController::acknowledgeSafetyAlarm(uint8_t channel) {
@@ -536,9 +587,24 @@ void RelayController::processCommandQueue() {
     // proves it can STILL safely execute NOW.
 
     // 1. Freshness re-check — the command may have expired while queued.
-    if (cmd.expiresAt > 0) {
+    //    [GATE-1 / PH8-03 REMEDIATION 2026-09 — CLOCK FAIL-CLOSED]
+    //    audit Phase 8 S1: the OLD shape was `if (now != 0 && expired)` — a
+    //    dead clock silently BYPASSED expiry enforcement and an energizing
+    //    queued command could execute long after its window. Now:
+    //      * ON-direction (energizing) + unusable clock → REJECTED
+    //        (CLOCK_INVALID) — an actuator mutation whose freshness cannot
+    //        be evaluated must not actuate.
+    //      * OFF-direction (safe) commands remain executable with or without
+    //        a clock (audit exception: OFF/DISARM/EMERGENCY always safe).
+    const bool energizing = cmd.desiredState;
+    if (cmd.expiresAt > 0 || energizing) {
       uint32_t now = (uint32_t)::time(nullptr);
-      if (now != 0 && cmd.expiresAt < now) {
+      if (energizing && now == 0) {
+        _recordTransactionResult(cmd, RelayTerminalResult::Rejected,
+                                 "CLOCK_INVALID — cannot evaluate freshness of an energizing command");
+        continue;
+      }
+      if (cmd.expiresAt > 0 && now != 0 && cmd.expiresAt < now) {
         _recordTransactionResult(cmd, RelayTerminalResult::Rejected,
                                  "command expired while queued");
         continue;

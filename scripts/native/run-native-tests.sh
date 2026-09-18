@@ -149,6 +149,54 @@ rm -f verify_alarm_blob_atomicity verify_emg_safety_gate verify_anomaly_quality_
       vsd_tsan vsd_asan vsd_unlocked vsd_unlocked.log
 
 # ============================================================================
+# [GATE-1 / PH8-01 + PH8-02 — 2026-09] verify_emergency_atomicity — the
+# emergency-cascade vs in-flight relay-ON race (audit Phase 8 S0).
+# Treatment (TSAN + ASAN/UBSAN) must be clean AND violation-free; the
+# negative control (-DPH8_NO_LATCH = pre-remediation shape) MUST trip
+# (post-emergency ON resurrections and/or TSAN reports) — a clean negative
+# control would mean the harness cannot detect the S0 race class.
+# ============================================================================
+echo "=== verify_emergency_atomicity (TREATMENT, ThreadSanitizer) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -pthread -o vea_tsan verify_emergency_atomicity.cpp; then
+  echo "COMPILE FAIL: verify_emergency_atomicity (tsan)"; fails=$((fails+1))
+else
+  if ! ./vea_tsan > vea_tsan.log 2>&1; then
+    fails=$((fails+1)); echo "TREATMENT FAILED — tail of vea_tsan.log:"; tail -40 vea_tsan.log
+  else
+    if grep -q "WARNING: ThreadSanitizer" vea_tsan.log; then
+      fails=$((fails+1)); echo "TREATMENT FAILED: TSAN data races in the safety barrier itself"; grep -m3 "WARNING: ThreadSanitizer" vea_tsan.log
+    fi
+  fi
+fi
+
+echo "=== verify_emergency_atomicity (TREATMENT, ASAN+UBSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=address,undefined -pthread -o vea_asan verify_emergency_atomicity.cpp; then
+  echo "COMPILE FAIL: verify_emergency_atomicity (asan)"; fails=$((fails+1))
+else
+  if ! ./vea_asan > vea_asan.log 2>&1; then
+    fails=$((fails+1)); echo "TREATMENT FAILED — tail of vea_asan.log:"; tail -40 vea_asan.log
+  fi
+fi
+
+echo "=== verify_emergency_atomicity (NEGATIVE CONTROL, PRE-PH8 SHAPE under TSAN) ==="
+if ! g++ -std=c++17 -g -fsanitize=thread -DPH8_NO_LATCH -pthread -o vea_nc verify_emergency_atomicity.cpp; then
+  echo "COMPILE FAIL: verify_emergency_atomicity (negative control)"; fails=$((fails+1))
+else
+  if ./vea_nc > vea_nc.log 2>&1; then
+    echo "NEGATIVE CONTROL FAILED: pre-PH8 shape ran clean — the harness cannot detect the S0 race class"
+    fails=$((fails+1))
+  else
+    if grep -q "WARNING: ThreadSanitizer" vea_nc.log || grep -q "NEGATIVE CONTROL TRIPPED" vea_nc.log; then
+      echo "NEGATIVE CONTROL OK: pre-PH8 shape detected ($(grep -c 'WARNING: ThreadSanitizer' vea_nc.log) TSAN report(s) + sentinel) — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE: investigate vea_nc.log"
+      fails=$((fails+1))
+    fi
+  fi
+fi
+rm -f vea_tsan vea_asan vea_nc vea_tsan.log vea_asan.log vea_nc.log
+
+# ============================================================================
 # [AUDIT 2026-09 ROUND 10 / p.472-p.475] verify_service_lock_concurrency —
 # the fail-open family in LogService / TransactionJournal /
 # BatteryCommManager / AuthManager. Treatment (TSAN + ASAN/UBSAN) must be

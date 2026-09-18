@@ -1101,6 +1101,31 @@ void emgApplyCommand(const String& commandId, const String& command,
       emgAck(commandId, "REJECTED", "missing config object");
       return;
     }
+    // [GATE-1 / PH8-04 REMEDIATION 2026-09 — SAFETY CONFIG LOCKDOWN]
+    // Parity with the modular tree: sensorFailPolicy / estopEnabled /
+    // relayPin / estopPin are COMMISSIONED SAFETY CONFIGURATION, not runtime
+    // knobs — a remote CONFIG must not be able to disable the fail-closed
+    // sensor policy or move safety pins on a field-deployed device.
+    // Bench builds may opt back in with -DGENERIC_ALLOW_UNSAFE_SAFETY_CONFIG
+    // (the audit's ALLOW_UNSAFE_SAFETY_CONFIG pattern — never default-on).
+#ifndef GENERIC_ALLOW_UNSAFE_SAFETY_CONFIG
+    {
+      int rpC = cfg["relayPin"] | -1;   if (rpC == (int)config.emg.relayPin)   rpC = -1;
+      int epC = cfg["estopPin"] | -99;  if (epC == (int)config.emg.estopPin)  epC = -99;
+      int eeC = cfg["estopEnabled"] | -1; if (eeC == (int)config.emg.estopEnabled) eeC = -1;
+      int spC = cfg["sensorFailPolicy"] | -1; if (spC == (int)config.emg.sensorFailPolicy) spC = -1;
+      const bool asksLocked = (rpC >= 12) || (epC != -99) || (eeC >= 0) || (spC >= 0);
+      if (asksLocked) {
+        Serial.println("[EMG] CONFIG REFUSED (safety lockdown): relayPin/estopPin/estopEnabled/sensorFailPolicy immutable remotely");
+        emgAck(commandId, "REFUSED",
+               "safety-config lockdown: relayPin/estopPin/estopEnabled/sensorFailPolicy "
+               "are commissioned safety configuration (local service mode required)");
+        emgQueueEvent("CONFIG_REFUSED",
+                      "safety-config lockdown refused remote mutation of commissioned fields");
+        return;
+      }
+    }
+#endif
     float v;
     v = cfg["vbatLowV"]      | NAN; if (isfinite(v) && v >= 30 && v <= 60)  config.emg.vbatLowV = v;
     v = cfg["vbatLowHystV"]  | NAN; if (isfinite(v) && v >= 0.1f && v <= 5)  config.emg.vbatLowHystV = v;

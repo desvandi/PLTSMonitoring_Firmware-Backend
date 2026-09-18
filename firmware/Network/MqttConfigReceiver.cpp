@@ -132,9 +132,14 @@ void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_
   // ingress (REST + MQTT) enforces identical freshness semantics — see
   // CommandCanonicalizer::isCommandExpired + TransactionJournal.h for the
   // full retention contract.
+  // [GATE-1 / PH8-03] Energizing relay commands (on/pulse) pass the STRICT
+  // flag: an unusable clock REJECTS the command (CLOCK_INVALID) instead of
+  // silently bypassing freshness. Safe-direction (off/all_off) and config
+  // commands keep the legacy semantics.
   {
+    const bool energizing = (type == "relay") && (action == "on" || action == "pulse");
     String expiryErr;
-    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr)) {
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, expiryErr, energizing)) {
       _publishAck(tid.c_str(), false, "REJECTED", expiryErr);
       _rejected++;
       return;

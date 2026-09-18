@@ -31,9 +31,31 @@ bool EmergencyRelayDriver::begin() {
 }
 
 void EmergencyRelayDriver::applyPins(uint8_t relayPin, int8_t estopPin, bool estopEnabled) {
+  // [GATE-1 / PH8-08 REMEDIATION 2026-09 — PIN CHANGE SAFETY GATE]
+  // audit Phase 8 S2: the OLD shape copied the CURRENT energized state onto
+  // the NEW GPIO ("no glitch" convenience) — a remote CONFIG while RUN could
+  // silently MOVE a live energized output to a different pin (unknown wiring
+  // consequence). In PRODUCTION, a pin mapping change while ENERGIZED is
+  // REFUSED: pin re-mapping is a commissioning action that requires the
+  // system to be ISOLATED first (Emergency state), then re-verified by
+  // self-test + explicit operator ARM. Development/staging keep the legacy
+  // behavior for bench iteration.
+#ifdef PRODUCTION_BUILD
+  const bool pinChanges = (relayPin != _relayPin) || (estopPin != _estopPin) ||
+                          (estopEnabled != _estopEnabled);
+  if (pinChanges && _energized) {
+    Services::Log.append(Core::LogType::ConfigurationChanged,
+        String("EMERGENCY_PINS_REFUSED relay=") + relayPin + " estop=" + estopPin +
+        " — cannot re-map safety pins while ENERGIZED (isolate + local service required)");
+    _pinsRefused = true;
+    return;
+  }
+#endif
+  _pinsRefused = false;
   // A pin change on an energized system is a wiring-level event: re-drive the
   // CURRENT state on the new pin first, then re-init the sense line. The relay
   // must never glitch through ISOLATED because the operator moved a pin.
+  // (Dev/staging path + production path when already ISOLATED.)
   bool wasEnergized = _energized;
   _relayPin = relayPin;
   _estopPin = estopPin;
