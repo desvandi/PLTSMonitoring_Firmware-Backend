@@ -52,8 +52,26 @@ void MqttConfigReceiver::begin() {
 }
 
 void MqttConfigReceiver::handle(const char* topic, const uint8_t* payload, size_t len) {
-  (void)topic;  // topic is always plts/<deviceId>/config — already ACL'd by broker
   _received++;
+
+  // --- 0. [GATE-3 / S1-02 REMEDIATION 2026-09] EXACT DEVICE-TOPIC BINDING ----
+  // Second layer (the router already exact-matches): this handler processes
+  // ONLY plts/<THIS deviceId>/config — byte-for-byte. Audit Phase 10 S1-02 /
+  // Phase 3 P3-S1-04: the broker ACL is the PRIMARY authorization, but a
+  // misconfigured ACL, wildcard permission, or over-broad credential must
+  // never be enough to mutate THIS device with a foreign-device command.
+  // Foreign topic → security log + reject, no parse, no mutation, no ACK.
+  {
+    const String expected = mqttTransport.getDeviceTopic("config");
+    if (topic == nullptr || !String(topic).equals(expected)) {
+      _rejected++;
+      Services::Log.append(Core::LogType::Custom,
+          "MQTT SECURITY: config command on FOREIGN topic rejected: " +
+          String(topic ? topic : "(null)") + " (expected " + expected + ")", 0);
+      mqttTransport.countForeignTopic();
+      return;
+    }
+  }
 
   // --- 1. Deserialize + schema-validate envelope --------------------------------
   // Body must be valid JSON ≤ HTTP_MAX_BODY_SIZE (defense-in-depth even on MQTT).

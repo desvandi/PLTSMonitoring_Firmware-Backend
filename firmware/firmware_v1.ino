@@ -401,19 +401,38 @@ void setup() {
 
   // Install message router — fans out inbound messages by topic suffix.
   // (MqttTransport calls _msgCb for every received message; we route by suffix.)
+  // [GATE-3 / S1-02 + F4-09 REMEDIATION 2026-09 — EXACT DEVICE-TOPIC BINDING]
+  // The OLD router dispatched by SUFFIX ONLY: plts/<OTHER-DEVICE>/config was
+  // routed into this device's command receivers, which then trusted the
+  // broker ACL entirely ((void)topic). Audit Phase 10 S1-02 / Phase 4 F4-09:
+  // a misconfigured ACL, an over-broad credential, or a changed rule would
+  // let a foreign-device command mutate THIS device. The router now demands
+  // an EXACT byte-for-byte match against the canonical device topics
+  // (plts/<THIS deviceId>/config|ota) BEFORE dispatch; anything else is a
+  // security event (logged, counted, never executed). Broker ACL remains the
+  // PRIMARY authorization — this is the device-side defense-in-depth layer.
   Network::mqttTransport.setMessageCallback(
     [](const char* topic, const uint8_t* payload, size_t len) {
-      String t(topic);
-      // Topic format: plts/<deviceId>/<suffix>
-      int lastSlash = t.lastIndexOf('/');
-      if (lastSlash < 0) return;
-      String suffix = t.substring(lastSlash + 1);
-      if (suffix == "config") {
+      (void)payload; (void)len;
+      const String expectedConfig = Network::mqttTransport.getDeviceTopic("config");
+      const String expectedOta    = Network::mqttTransport.getDeviceTopic("ota");
+      const String t(topic);
+      if (t.equals(expectedConfig)) {
         Network::mqttConfigReceiver.handle(topic, payload, len);
-      } else if (suffix == "ota") {
-        Network::mqttOtaHandler.handle(topic, payload, len);
+        return;
       }
-      // Other suffixes (status/log/ack/online) are publish-only — ignore.
+      if (t.equals(expectedOta)) {
+        Network::mqttOtaHandler.handle(topic, payload, len);
+        return;
+      }
+      // Foreign/wildcard/suffix-spoofed topic — reject at ingress.
+      // [audit S1-02] never mutate, never ACK, log the security event.
+      Services::Log.append(Core::LogType::Custom,
+          "MQTT SECURITY: topic rejected (not this device's canonical topic): " +
+          t, 0);
+      Network::mqttTransport.countForeignTopic();
+      // Other suffixes (status/log/ack/online on THIS device) are
+      // publish-only — silently ignored as before.
     }
   );
 

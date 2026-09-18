@@ -70,6 +70,13 @@ public:
   uint8_t  subscriptionCount() const { return _subCount; }
   bool     subscriptionsVerified() const { return _subsVerified; }
 
+  // [GATE-3 / S1-02] Foreign-topic ingress counter — incremented by the router
+  // whenever a message arrives on a topic that is NOT this device's canonical
+  // command topic. Non-zero = broker ACL drift or credential over-reach — an
+  // operator-visible security signal (surfaced through diagnostics).
+  uint32_t foreignTopicCount() const { return _foreignTopicCount; }
+  void     countForeignTopic() { _foreignTopicCount++; }
+
 private:
   WiFiClientSecure _tls;
   mutable PubSubClient _client;
@@ -88,6 +95,7 @@ private:
 
   uint32_t _reconnectCount = 0;
   uint32_t _publishFailCount = 0;
+  uint32_t _foreignTopicCount = 0;   // [GATE-3 / S1-02] non-canonical ingress
 
   void _reconnect();
   bool _resubscribeAll();
