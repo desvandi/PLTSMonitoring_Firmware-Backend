@@ -334,6 +334,15 @@ void ConfigStore::loadBatteryConfig() {
   Core::cfgFullChargeCurrentThreshold  = p.getFloat("endA",  Core::FULL_CHARGE_CURRENT_THRESHOLD_A);
   Core::cfgFullChargePersistenceSec    = p.getULong("persistS", Core::FULL_CHARGE_PERSISTENCE_SEC);
   Core::cfgTelemetryIntervalSec        = p.getUShort("telS", Core::cfgTelemetryIntervalSec);
+  // [GATE-7b / P7-S1-02] offline telemetry retention target (s). Stored
+  // uint32; default = build flag TARGET_OFFLINE_RETENTION_SEC (never 0).
+  Core::cfgOfflineRetentionSec         = p.getULong("retS", Core::SPOOL_JOURNAL_TARGET_RETENTION_SEC);
+  if (Core::cfgOfflineRetentionSec < Core::SPOOL_RETENTION_MIN_SEC ||
+      Core::cfgOfflineRetentionSec > Core::SPOOL_RETENTION_MAX_SEC) {
+    Services::Log.append(Core::LogType::Custom,
+        "NVS battery config corrupt: retS out of [60,86400] — default applied", 0);
+    Core::cfgOfflineRetentionSec = Core::SPOOL_JOURNAL_TARGET_RETENTION_SEC;
+  }
   // v1.6.0 — BMS/inverter comm config
   Core::cfgBmsPollIntervalMs           = p.getULong("bmsPoll", Core::BMS_POLL_INTERVAL_MS);
   if (Core::cfgBmsPollIntervalMs < 1000 || Core::cfgBmsPollIntervalMs > 600000) {
@@ -413,6 +422,8 @@ bool ConfigStore::saveBatteryConfig() {
   ok &= p.putFloat("endA",  Core::cfgFullChargeCurrentThreshold) == sizeof(float);
   ok &= p.putULong("persistS", Core::cfgFullChargePersistenceSec) == sizeof(uint32_t);
   ok &= p.putUShort("telS", Core::cfgTelemetryIntervalSec) == sizeof(uint16_t);
+  // [GATE-7b / P7-S1-02] offline retention target (s).
+  ok &= p.putULong("retS", Core::cfgOfflineRetentionSec) == sizeof(uint32_t);
   // v1.6.0 — BMS/inverter comm config
   ok &= p.putULong("bmsPoll", Core::cfgBmsPollIntervalMs) == sizeof(uint32_t);
   ok &= p.putString("bmsProto", Core::cfgBmsProtocol) == strlen(Core::cfgBmsProtocol);

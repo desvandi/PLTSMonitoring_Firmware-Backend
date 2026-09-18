@@ -47,6 +47,21 @@ void handleGet() {
   // [AUDIT 2026-09 ROUND 5 / p.437] Regular-ring reboot persistence evidence.
   doc["spoolFsRestored"] = Services::telemetrySpool.fsRestoredCount();
   doc["spoolFsWriteFailures"] = Services::telemetrySpool.fsWriteFailures();
+  // [GATE-7b / P7-S1-02] Journal capacity honesty — "never silently claim
+  // more retention than physically available". targetSec is the CONFIGURED
+  // aspiration (runtime config offlineRetentionSec / build flag);
+  // effectiveSec is what the actual LittleFS partition holds (capacity
+  // records × telemetry interval); budgetBytes is the boot-derived journal
+  // budget; degraded=true means the target exceeds the physical capacity —
+  // retention is capacity-bound, visible, never silently overclaimed.
+  doc["spoolJournalTargetSec"] = Services::telemetrySpool.journalTargetSec();
+  doc["spoolJournalEffectiveSec"] = Services::telemetrySpool.journalEffectiveSec();
+  doc["spoolJournalCapacityRecords"] = Services::telemetrySpool.journalCapacityRecords();
+  doc["spoolJournalBudgetBytes"] = Services::telemetrySpool.journalBudgetBytes();
+  doc["spoolJournalDegraded"] = Services::telemetrySpool.journalDegraded();
+  doc["spoolJournalSegments"] = Services::telemetrySpool.journalSegments();
+  doc["spoolJournalEvictions"] = Services::telemetrySpool.journalEvictions();
+  doc["spoolJournalWatermark"] = Services::telemetrySpool.journalWatermark();
   // [AUDIT 2026-09 ROUND 5 / p.439/p.440/p.451/p.452] Persistence-failure and
   // registry-saturation observability — the auditor's core asks: failures must
   // be countable, never silently assumed successful.

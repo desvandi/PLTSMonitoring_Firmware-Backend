@@ -21,7 +21,7 @@ false-green gate. Both directions are proven here:
     N8  version mismatch (evidence for a different release)
 
   SOURCE-SHAPE — the CI step exists, is version-gated (>1.9.3), and the
-  template carries all 21 checks + honest observed fields.
+  template carries all 22 checks + honest observed fields.
 
 Run: python3 scripts/test_gate9_qualification_2026_09.py  (exit 0 = PASS)
 """
@@ -66,8 +66,8 @@ SHA = "b" * 64
 
 print("[S] Source-shape")
 tpl = json.loads(TEMPLATE.read_text())
-check("S1 template memuat 21 check (11 legacy + 10 gate)",
-      len(tpl["checks"]) == 21)
+check("S1 template memuat 22 check (11 legacy + 11 gate, termasuk GATE-7b journal)",
+      len(tpl["checks"]) == 22 and "telemetryJournalRetention" in tpl["checks"])
 check("S2 template verdict PENDING (bukti diisi fisik, bukan pra-PASS)",
       tpl["verdict"] == "PENDING")
 check("S3 semua check template PENDING (tidak ada pra-PASS senyap)",

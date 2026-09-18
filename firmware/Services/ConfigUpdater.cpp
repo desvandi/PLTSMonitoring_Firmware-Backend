@@ -6,6 +6,7 @@
 #include "../Core/Config.h"
 #include "../Storage/ConfigStore.h"
 #include "../Services/LogService.h"
+#include "../Services/TelemetrySpool.h"   // [GATE-7b] live retention target re-apply
 #include <cmath>
 #include <cstring>
 
@@ -28,6 +29,8 @@ ConfigUpdater::Result ConfigUpdater::applyUpdate(JsonDocument& doc) {
   float fullChargeI = Core::cfgFullChargeCurrentThreshold;
   uint32_t fullChargePersist = Core::cfgFullChargePersistenceSec;
   uint16_t telemetryInterval = Core::cfgTelemetryIntervalSec;
+  // [GATE-7b / P7-S1-02] offline retention target (s) — clamp [60,86400].
+  uint32_t offlineRetention = Core::cfgOfflineRetentionSec;
 
   bool hasBatteryField = false;
 
@@ -70,6 +73,13 @@ ConfigUpdater::Result ConfigUpdater::applyUpdate(JsonDocument& doc) {
     uint16_t v = doc["telemetryIntervalSec"] | 0U;
     if (v < 1 || v > 60) { res.message = "telemetryIntervalSec out of range [1,60]"; return res; }
     telemetryInterval = v; hasBatteryField = true;
+  }
+  if (doc.containsKey("offlineRetentionSec")) {
+    uint32_t v = doc["offlineRetentionSec"] | 0U;
+    if (v < Core::SPOOL_RETENTION_MIN_SEC || v > Core::SPOOL_RETENTION_MAX_SEC) {
+      res.message = "offlineRetentionSec out of range [60,86400]"; return res;
+    }
+    offlineRetention = v; hasBatteryField = true;
   }
 
   // Cross-field invariant evaluated on the CANDIDATE (audit p.278): a request
@@ -272,6 +282,12 @@ ConfigUpdater::Result ConfigUpdater::applyUpdate(JsonDocument& doc) {
   Core::cfgFullChargeCurrentThreshold = fullChargeI;
   Core::cfgFullChargePersistenceSec = fullChargePersist;
   Core::cfgTelemetryIntervalSec = telemetryInterval;
+  Core::cfgOfflineRetentionSec = offlineRetention;
+  // [GATE-7b / P7-S1-02] Live re-apply: the journal's physical capacity is
+  // boot-derived and immutable at runtime — only the target moves, and the
+  // journal re-reports the honest degraded verdict against the new target.
+  Services::telemetrySpool.setTargetRetentionSec(Core::cfgOfflineRetentionSec,
+                                                  (uint16_t)Core::cfgTelemetryIntervalSec);
   if (hasDeviceName) strncpy(Core::deviceName, deviceNameBuf, sizeof(Core::deviceName) - 1);
   if (hasTimezone)   strncpy(Core::cfgTimezone, timezoneBuf, sizeof(Core::cfgTimezone) - 1);
 

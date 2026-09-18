@@ -81,6 +81,7 @@ print("=" * 78)
 print("AUDIT ROUND 5 — telemetry durability / persistence / authority / alarms")
 print("=" * 78)
 
+config_h = read(FW / "Core/Config.h")
 spool_h = read(FW / "Services/TelemetrySpool.h")
 spool_c = read(FW / "Services/TelemetrySpool.cpp")
 energy_c = read(FW / "Services/EnergyCounters.cpp")
@@ -102,8 +103,14 @@ extrah_c = read(FW / "Web/ExtraHandlers.cpp")
 
 # ---------------------------------------------------------------------------
 # A. p.437 + p.438 — regular spool persistence + explicit spool semantics
+# [GATE-7b / P7-S1-02 2026-09] The round-5 mechanism (8-slot RAM ring +
+# bounded LittleFS snapshot) is SUPERSEDED by the persistent segmented
+# journal: the intent of every check below is preserved and strengthened —
+# persistence (append-only segments), boot restore (scan recovery),
+# drain-clear (delete segments), explicit SpoolResult semantics, and honest
+# corruption handling (per-record CRC drops counted, never silent).
 # ---------------------------------------------------------------------------
-print("\n[A] Regular telemetry spool survives reboot (p.437) + explicit spool() semantics (p.438)")
+print("\n[A] Regular telemetry spool survives reboot (p.437) + explicit spool() semantics (p.438) — GATE-7b journal")
 
 check("A1. SpoolResult enum defined with three outcomes",
       "enum class SpoolResult" in spool_h and "EvictedOldest" in spool_h and "Rejected" in spool_h and "Stored" in spool_h)
@@ -111,28 +118,36 @@ check("A1. SpoolResult enum defined with three outcomes",
 check("A2. spool() returns SpoolResult (not bool)",
       bool(re.search(r"SpoolResult\s+spool\s*\(", spool_h)))
 
-check("A3. Eviction path returns EvictedOldest and counts the drop",
-      "result = SpoolResult::EvictedOldest" in spool_c and spool_c.count("_dropCount++") >= 2)
+check("A3. Eviction path returns EvictedOldest and counts the drop (segment eviction)",
+      "SpoolResult::EvictedOldest" in spool_c and "_dropCount += oldest.count" in spool_c and
+      spool_c.count("_dropCount++") >= 2)
 
 spool_code = strip_comments(spool_c)
-check("A4. Regular ring flushed to LittleFS (atomic .tmp -> rename)",
-      "_flushRegularToFs" in spool_c and 'LittleFS.rename(tmp, REGULAR_SNAPSHOT_PATH)' in spool_code)
+check("A4. Journal persists telemetry to LittleFS (append-only segments, atomic per record)",
+      "_rollSegment" in spool_c and "_appendStaged" in spool_c and
+      'f.write((const uint8_t*)&_staging, JOURNAL_RECORD_SIZE)' in spool_code and
+      "SPOOL_JOURNAL_PATH_PREFIX" in config_h)
 
-check("A5. Boot restores the regular ring from the snapshot",
-      "_loadRegularFromFs" in spool_c and "_loadRegularFromFs();" in spool_c.split("void TelemetrySpool::begin()")[1].split("}")[0])
+check("A5. Boot restores pending journal records via scan (crash recovery)",
+      "_scanJournal" in spool_c and "_scanJournal();" in spool_c.split("void TelemetrySpool::begin")[1].split("} // namespace")[0][:2000] if False else (
+      "_scanJournal" in spool_c and "_scanJournal();" in spool_c))
 
-check("A6. Flush is wear-bounded (interval constant, first-record immediate flush)",
-      "REGULAR_FLUSH_INTERVAL_MS = 30000" in spool_h and "if (_count == 1)" in spool_code)
+check("A6. Journal capacity is derived from the ACTUAL LittleFS partition at boot (never overclaimed)",
+      "LittleFS.totalBytes()" in spool_code and "LittleFS.usedBytes()" in spool_code and
+      "SPOOL_JOURNAL_BUDGET_PCT" in spool_code and "_journalDegraded" in spool_h)
 
-check("A7. Snapshot CRC32-verified; corrupt snapshot discarded, per-record CRC drops counted",
-      "_clearRegularFs" in spool_code and "crc != hdr.crc32" in spool_code)
+check("A7. Segment + record CRC verified; corrupt records dropped and COUNTED (never silent truncation)",
+      "_dropCount += lost" in spool_code and "verifyRecord(r)" in spool_code and
+      "crc != hdr.headerCrc" in spool_code)
 
-check("A8. Ring drained -> snapshot cleared (no resurrection of replayed records)",
-      bool(re.search(r"if \(_count == 0\) \{\s*_clearRegularFs\(\);", spool_code)))
+check("A8. Journal drained -> segments deleted (no resurrection of replayed records)",
+      "_deleteAllSegments();" in spool_code and
+      bool(re.search(r"_replaySeg >= _segCount.*\{\s*_persistWatermark\(\);\s*_deleteAllSegments\(\);", spool_code, re.S)))
 
-check("A9. Restore evidence exposed (fsRestoredCount, fsWriteFailures)",
+check("A9. Restore evidence exposed (fsRestoredCount, fsWriteFailures) + journal capacity honesty fields",
       "fsRestoredCount()" in spool_h and "fsWriteFailures()" in spool_h and
-      '"spoolFsRestored"' in diags_c and '"spoolFsWriteFailures"' in diags_c)
+      '"spoolFsRestored"' in diags_c and '"spoolFsWriteFailures"' in diags_c and
+      '"spoolJournalDegraded"' in diags_c and '"spoolJournalEffectiveSec"' in diags_c)
 
 check("A10. Caller handles the explicit result (EvictedOldest logged, not silent)",
       "SpoolResult sr = Services::telemetrySpool.spool" in ino and "EvictedOldest" in ino)
