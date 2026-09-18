@@ -179,8 +179,18 @@ static void phaseB() {
   std::atomic<long> violations{0};   // ON bits present after an emergency
   std::atomic<long> blockedByGen{0}, blockedByLatch{0}, applied{0};
 
+  // [CI lesson — run 35298266605] ONE ControllerMirror for the whole phase:
+  // its writeMutex is constructed ONCE and outlives every epoch, exactly like
+  // the production driver (RelayExpanderDriver's _safetyWriteMutex is created
+  // in begin() and never destroyed). Re-constructing the mirror inside the
+  // loop reused the same stack slot for 200 consecutive std::timed_mutex
+  // lifetimes; TSAN on g++-13 mis-tracks stack-reused mutex lifetimes and
+  // reported "unlock of an unlocked mutex" false positives (2 warnings; all
+  // functional assertions passed, violations=0). State is now RESET per
+  // epoch instead of reconstructed.
+  ControllerMirror c;
+
   for (int round = 0; round < 200; round++) {
-    ControllerMirror c;
     c.drv.clearSafetyLatch();                  // RUN
     c.drv.reg.store(POWER_ON_STATE);
 
