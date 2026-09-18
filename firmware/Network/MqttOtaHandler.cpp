@@ -26,8 +26,26 @@ void MqttOtaHandler::begin() {
 }
 
 void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t len) {
-  (void)topic;  // topic is always plts/<deviceId>/ota
   _received++;
+
+  // --- 0. [GATE-3 / S1-02 REMEDIATION 2026-09] EXACT DEVICE-TOPIC BINDING ----
+  // Second layer (the router already exact-matches): this handler processes
+  // ONLY plts/<THIS deviceId>/ota — byte-for-byte. Audit Phase 10 S1-02 /
+  // Phase 4 F4-06: the broker ACL is the PRIMARY authorization, but a
+  // misconfigured ACL, wildcard permission, or over-broad credential must
+  // never be enough to flash THIS device with a foreign-device OTA command.
+  // Foreign topic → security log + reject, no parse, no mutation, no ACK.
+  {
+    const String expected = mqttTransport.getDeviceTopic("ota");
+    if (topic == nullptr || !String(topic).equals(expected)) {
+      _rejected++;
+      Services::Log.append(Core::LogType::Custom,
+          "MQTT SECURITY: OTA command on FOREIGN topic rejected: " +
+          String(topic ? topic : "(null)") + " (expected " + expected + ")", 0);
+      mqttTransport.countForeignTopic();
+      return;
+    }
+  }
 
   // --- 1. Deserialize -----------------------------------------------------------
   if (len == 0 || len > Core::HTTP_MAX_BODY_SIZE) {
@@ -162,7 +180,46 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     return;
   }
 
-  // --- 6. NEW — dispatch to OtaManager -----------------------------------------
+  // --- 6. NEW — DURABLE RESERVATION BEFORE the OTA side effect ----------------
+  // [GATE-4 / S1-03 + F4-06 REMEDIATION 2026-09 — TRANSACTION ORDERING]
+  // audit Phase 10 S1-03 / Phase 4 F4-06: the OLD shape ran
+  //   decide() -> beginDownload() -> storeTransaction()   (return ignored)
+  // — the OTA download/flash side effect STARTED before the transaction was
+  // durable, and a journal write failure was silently swallowed. A crash in
+  // that window left an active OTA job with NO durable record; a retry was
+  // re-DECIDED as NEW and could re-flash.
+  //
+  // New ordering (audit's REQUIRED shape):
+  //   decide NEW
+  //     -> reserveTransaction (durable, MUST succeed)
+  //     -> only then beginDownload() / beginManifestCheck()
+  //     -> updateAck with the terminal command-settlement outcome.
+  // Reservation failure → DURABILITY_FAILURE ack, OTA NOT started, honest
+  // retry with the SAME transactionId is safe (idempotent).
+  String reservedAckJson;
+  {
+    JsonDocument resAck;
+    resAck["transactionId"] = canon.transactionId;
+    resAck["requestId"] = canon.requestId;
+    resAck["ok"] = true;
+    resAck["code"] = "RESERVED";
+    resAck["phase"] = "RESERVED";   // durable reservation — job not yet started
+    resAck["message"] = "OTA transaction reserved (durable) — starting job";
+    resAck["source"] = "mqtt";
+    resAck["appliedAt"] = (uint32_t)::time(nullptr);
+    serializeJson(resAck, reservedAckJson);
+  }
+  if (!Services::journal.storeTransaction(canon.transactionId,
+                                          canon.commandHash, reservedAckJson)) {
+    _rejected++;
+    _publishAck(canon.transactionId.c_str(), false, "DURABILITY_FAILURE",
+                "OTA transaction could not be made durable — job NOT started, "
+                "retry with the SAME transactionId is safe");
+    Services::Log.append(Core::LogType::OtaFailed,
+        "MQTT OTA REFUSED: durable reservation failed tid=" + canon.transactionId, -1);
+    return;
+  }
+
   // Accept both "version" (legacy) and "fwVersion" (canonical) for firmware ver.
   const char* fwVersion = doc["fwVersion"] | "";
   if (fwVersion[0] == '\0') fwVersion = doc["version"] | "";  // legacy fallback
@@ -227,12 +284,16 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     }
   }
 
-  // --- 7. Store transaction + publish ACK -------------------------------------
-  // [P2-2 REMEDIATION 2026-09] ACK state semantics made EXPLICIT:
+  // --- 7. Terminal settlement — update the DURABLE record (never overwrite
+  // identity) + publish ACK. [GATE-4 / S1-03] The journal entry was RESERVED
+  // before the side effect; updateAck() evolves it to the terminal phase
+  // (ACCEPTED/REJECTED). commandHash identity is immutable in the journal, so
+  // an idempotent retry still replays the FINAL ack, never the reservation.
+  // ACK state semantics made EXPLICIT (P2-2):
   //   "phase": "ACCEPTED"  — the OTA JOB was accepted and the download was
   //                          STARTED. It does NOT mean the image flashed.
   //   "phase": "REJECTED"  — the job was refused (policy/validation failure).
-  // The FINAL outcome is reported out-of-band via OTA_STATUS events:
+  // The FINAL flash outcome is reported out-of-band via OTA_STATUS events:
   //   DOWNLOAD_FAILED | VERIFICATION_FAILED | ROLLBACK | ACTIVATED
   // A command-sender that treats ACK as "flashed" is misreading the contract
   // — the ACK is a transport-level settle for the journal (idempotent
@@ -241,6 +302,7 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
   {
     JsonDocument ack;
     ack["transactionId"] = canon.transactionId;
+    ack["requestId"] = canon.requestId;
     ack["ok"] = ok;
     ack["code"] = ok ? "ACCEPTED" : "REJECTED";
     ack["phase"] = ok ? "ACCEPTED" : "REJECTED";   // job-level, not flash-level
@@ -250,8 +312,16 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     serializeJson(ack, ackJson);
   }
 
-  Services::journal.storeTransaction(canon.transactionId,
-                                      canon.commandHash, ackJson);
+  // [GATE-4 / S1-03] updateAck return checked: a failed terminal update is
+  // OBSERVED (log + counter) — the durable RESERVED record remains the
+  // truth (a later retry replays it), and the command still settles on the
+  // wire. Never silently swallow a journal failure again.
+  if (!Services::journal.updateAck(canon.transactionId,
+                                    canon.commandHash, ackJson)) {
+    Services::Log.append(Core::LogType::OtaFailed,
+        "MQTT OTA: terminal journal update FAILED (reserved record stands) tid=" +
+        canon.transactionId, -1);
+  }
 
   {
     String ackTopic = mqttTransport.getDeviceTopic("ack");
