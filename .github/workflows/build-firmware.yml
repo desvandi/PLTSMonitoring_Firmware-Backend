@@ -780,6 +780,28 @@ jobs:
               --release-json ci-artifacts/modular/release.json
           fi
 
+      # [GATE-9 / PH8-06 2026-09] Gate-remediation HIL qualification —
+      # mandatory for releases whose source CONTAINS the gate remediations
+      # (version > 1.9.3). The 21-check matrix (11 legacy safety + 10 gate)
+      # closes the Phase 10 gap: since v1.9.2 the chain only enforced the
+      # INA219 measurement schema, so the PH8 safety matrix was required by
+      # NO release gate. Evidence file: docs/hardware-acceptance/v{ver}-gate.json
+      # (template: gate-qualification.template.json; procedure:
+      # HIL-PROCEDURE.md). Missing/incomplete evidence = release BLOCKED.
+      - name: Verify gate-remediation qualification (versions > 1.9.3)
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION="${TAG#v}"
+          NEEDS_GATE=$(python3 -c "print(1 if tuple(map(int,'$VERSION'.split('.')))>(1,9,3) else 0)")
+          if [ "$NEEDS_GATE" = "1" ]; then
+            python3 scripts/verify_gate_qualification.py \
+              --version "$VERSION" \
+              --source-commit "$GITHUB_SHA" \
+              --release-json ci-artifacts/modular/release.json
+          else
+            echo "Versi $VERSION <= 1.9.3 — matriks kualifikasi gate belum ada pada source ini (N/A, bukan skip senyap dari bukti yang diwajibkan)."
+          fi
+
   # --------------------------------------------------------------------------
   # [Audit 9 P0-C/D] Immutable release publisher.
   # ONLY runs after: release-gate PASS + tag-signature PASS + hardware-acceptance PASS

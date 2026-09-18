@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "version": "1.9.4",
+  "gitCommit": "<SOURCE-COMMIT-yang-dibangun-dan-diuji-40hex>",
+  "firmwareSha256": "<sha256-firmware.bin-yang-di-flash-64hex>",
+  "verdict": "PENDING",
+  "testEngineer": "<nama test engineer>",
+  "reviewer": "<nama reviewer>",
+  "releaseManager": "<nama release manager>",
+  "testDate": "YYYY-MM-DD",
+  "hardwareSerial": "PLTS-ESP32-XXX",
+  "hardwareIdentity": "<identitas perangkat produksi>",
+  "broker": "<url broker MQTT uji + tier>",
+  "checks": {
+    "boot": "PENDING",
+    "sensors": "PENDING",
+    "alarms": "PENDING",
+    "otaRest": "PENDING",
+    "otaMqtt": "PENDING",
+    "rollback": "PENDING",
+    "emergencyRelay": "PENDING",
+    "configPersistence": "PENDING",
+    "security": "PENDING",
+    "soak24h": "PENDING",
+    "factoryReset": "PENDING",
+    "emergencyAtomicity": "PENDING",
+    "watchdogStarvationBank": "PENDING",
+    "clockInvalidReject": "PENDING",
+    "safetyConfigLockdown": "PENDING",
+    "commLossFailSafe": "PENDING",
+    "pinChangeRefused": "PENDING",
+    "mqttTopicBinding": "PENDING",
+    "otaDurableReservation": "PENDING",
+    "qosTimeoutBudget": "PENDING",
+    "staleCommandBlocked": "PENDING"
+  },
+  "observed": {
+    "bootTimeSec": null,
+    "relayAllOffBoot": null,
+    "powerCycleCount": 0,
+    "watchdogResetCount": 0,
+    "brownoutResetCount": 0,
+    "i2cFailureRecovery": null,
+    "ewaveCascadeLatencyMs": null,
+    "estopEventLogged": null,
+    "sensorLossPolicy": null,
+    "emergencyDuringRelayCommand": null,
+    "reconnectStormSurvived": null,
+    "emergencyAtomicity": {
+      "tripsDuringOnBurst": 0,
+      "postTripOnRefused": null,
+      "armRequiredToReenable": null,
+      "violationCount": 0
+    },
+    "clockInvalidReject": {
+      "energizingRejected": null,
+      "safeDirectionAllowed": null
+    },
+    "safetyConfigLockdown": {
+      "sensorFailPolicyRefused": null,
+      "estopEnabledRefused": null,
+      "relayPinRefused": null
+    },
+    "commLossFailSafe": {
+      "channelsProvisioned": "CH0-CH7 policy=OFF default",
+      "wifiOffTrippedPerPolicy": null,
+      "mqttOffTrippedPerPolicy": null,
+      "gasUnavailableTrippedPerPolicy": null,
+      "operatorCommandExtendsLease": null,
+      "restoreNoAutoReenergize": null,
+      "staleCommandAfterReconnectBlocked": null,
+      "holdSafeWarnedOnce": null
+    },
+    "pinChangeRefused": {
+      "relayPinChangeWhileEnergized": null,
+      "physicalStateUnchanged": null
+    },
+    "mqttTopicBinding": {
+      "foreignTopicRejected": null,
+      "foreignTopicCountIncremented": null,
+      "ownTopicAccepted": null
+    },
+    "otaDurableReservation": {
+      "partialFailureRecordPersisted": null,
+      "recoveryPathVerified": null,
+      "reservationBeforeDownload": null
+    },
+    "qosTimeoutBudget": {
+      "honestQosReported": null,
+      "timeoutBudgetObserved": null,
+      "reconnectJitterObserved": null
+    },
+    "soak": {
+      "durationHours": 0,
+      "minFreeHeapKB": null,
+      "heapCollapseObserved": null,
+      "stackCriticalCrossed": null,
+      "resetCount": 0,
+      "alarmChurnCount": 0
+    }
+  },
+  "notes": "Isi SETIAP nilai dari pengukuran fisik nyata. Nilai rekaan = pelanggaran disiplin anti-false-closure (lihat HIL-PROCEDURE.md)."
+}
