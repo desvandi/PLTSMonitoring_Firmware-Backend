@@ -1462,6 +1462,19 @@ void networkTask(void* pv) {
       // GAS advisor — hourly HMAC POST + on-demand fetch
       AI::advisor.tick();
     }
+
+    // [GATE-1b / PH8-05] Feed remote command-authority health to the relay
+    // fail-safe supervisor. Authority == MQTT FULLY operational (connected &&
+    // subscriptions verified) — the only remote normal-command path. WiFi
+    // down ⇒ MQTT down ⇒ authority lost; this line runs OUTSIDE the WiFi
+    // guard so a WiFi outage is reported as authority loss immediately, not
+    // left at a stale healthy value. Per-channel fail-safe policies then
+    // apply after each channel's command lease (RelayController::tick).
+#if PLTS_ENABLE_RELAYS
+    Services::relaysController.setCommandAuthority(
+        WiFi.status() == WL_CONNECTED && Network::mqttTransport.isFullyOperational());
+#endif
+
     Services::health.recordHeartbeat(Core::TaskId::Mqtt);
 
     Services::timeManager.tick();

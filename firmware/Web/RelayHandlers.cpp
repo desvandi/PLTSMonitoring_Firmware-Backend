@@ -57,6 +57,9 @@ static void handleGetRelays() {
   Services::relaysController.serializeStatus(arr);
   doc["available"] = Services::relaysController.isAvailable();
   doc["channelCount"] = Services::relaysController.getChannelCount();
+  // [GATE-1b / PH8-05] command-authority fail-safe visibility
+  doc["commandAuthorityLost"] = Services::relaysController.isCommandAuthorityLost();
+  doc["commandAuthorityLostSinceMs"] = Services::relaysController.commandAuthorityLostSinceMs();
 
   String out;
   serializeJson(doc, out);

@@ -599,6 +599,13 @@ static constexpr uint32_t RELAY_DEFAULT_MIN_ON_TIME_SEC     = 0;     // no minim
 static constexpr uint32_t RELAY_DEFAULT_MIN_OFF_TIME_SEC    = 0;     // no minimum
 static constexpr uint32_t RELAY_DEFAULT_MIN_SWITCH_INTERVAL_SEC = 0; // no anti-chatter
 
+// [GATE-1b / PH8-05 2026-09] Default command lease — how long an ON output
+// may persist after remote command authority (MQTT fully operational) is
+// lost, before the per-channel fail-safe policy applies. 0 = immediate.
+// Operator presence evidence (any executed on/off/pulse/all_off command,
+// incl. local REST during an outage) re-extends the lease.
+static constexpr uint32_t RELAY_DEFAULT_COMMAND_LEASE_SEC   = 900;   // 15 minutes
+
 // Relay task timing
 static constexpr uint32_t RELAY_TICK_MS = 200;   // 5 Hz tick
 static constexpr uint8_t  RELAY_MAX_NAME_LEN = 24;

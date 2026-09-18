@@ -617,6 +617,7 @@ enum class RelaySource : uint8_t {
   Schedule,    // RTC-based schedule (future)
   Automation,  // remote automation rule (future)
   Safety,      // safety supervisor (maxOnTime FORCE OFF, etc.)
+  CommLoss,    // [GATE-1b / PH8-05] comm-loss fail-safe FORCE OFF (lease expiry)
   System,      // system (E-WAVE cascade, boot policy)
 };
 
@@ -627,6 +628,7 @@ inline const char* relaySourceToStr(RelaySource s) {
     case RelaySource::Schedule:   return "SCHEDULE";
     case RelaySource::Automation: return "AUTOMATION";
     case RelaySource::Safety:     return "SAFETY";
+    case RelaySource::CommLoss:   return "COMM_LOSS";
     case RelaySource::System:     return "SYSTEM";
   }
   return "UNKNOWN";
