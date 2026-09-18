@@ -95,8 +95,35 @@
 #if PLTS_ENABLE_RELAYS
 #include "../Drivers/RelayExpanderDriver.h"
 #include <ArduinoJson.h>
+#include <atomic>
 
 namespace Services {
+
+// [GATE-1b / PH8-05 2026-09] Per-channel fail-safe policy on communication
+// loss (audit Phase 8, PH8-05 "Required change"). The distinction matters:
+// comm loss is NOT a global kill-switch — "MQTT disconnected → semua relay
+// OFF" would turn a monitoring failure into a control failure. Instead:
+//   communication loss → remote command authority lost → local safety
+//   supervisor tetap aktif → output mengikuti per-channel fail-safe policy
+//   (setelah command lease kedaluwarsa; aktivitas operator memperpanjang).
+//
+// Production default = OFF for every channel without a hazard
+// classification. HOLD_SAFE may ONLY be provisioned for a channel whose
+// hardware acceptance + risk assessment documents HOLD as the genuinely
+// safe state — production builds refuse to provision it without an
+// explicit commissioning build flag (see setChannelConfig guard).
+enum class RelayFailSafePolicy : uint8_t {
+  Off = 0,        // FORCE OFF when the command lease expires under comm loss
+  HoldSafe = 1,   // hold last state — hazard-classified channels ONLY
+};
+
+inline const char* relayFailSafePolicyToStr(RelayFailSafePolicy p) {
+  switch (p) {
+    case RelayFailSafePolicy::Off:       return "OFF";
+    case RelayFailSafePolicy::HoldSafe:  return "HOLD_SAFE";
+  }
+  return "UNKNOWN";
+}
 
 // Per-channel relay state (runtime, RAM only — recomputed on boot)
 struct RelayChannelState {
@@ -111,6 +138,9 @@ struct RelayChannelState {
   uint32_t onSinceMs = 0;             // millis() when turned ON (0 = not ON)
   bool maxOnTimeForced = false;        // FORCE OFF active
   bool fault = false;
+  // [GATE-1b / PH8-05] comm-loss fail-safe bookkeeping (executor context)
+  bool commLossForced = false;         // fail-safe FORCE OFF active (this episode)
+  uint32_t lastCommandAtMs = 0;        // operator-presence evidence (lease base)
 };
 
 // Per-channel configuration (persistent, NVS)
@@ -122,6 +152,10 @@ struct RelayChannelConfig {
   uint32_t minSwitchIntervalSec = Core::RELAY_DEFAULT_MIN_SWITCH_INTERVAL_SEC;
   bool enabled = true;                 // channel is usable
   uint8_t interlockGroup = 0;          // 0 = no interlock; 1-4 = group ID
+  // [GATE-1b / PH8-05] fail-safe policy + command lease (provisioned, NOT a
+  // runtime command — audit p.434: relay config has no runtime ingress)
+  RelayFailSafePolicy commLossPolicy = RelayFailSafePolicy::Off; // default: unclassified → OFF
+  uint32_t commandLeaseSec = Core::RELAY_DEFAULT_COMMAND_LEASE_SEC;   // 0 = immediate
 };
 
 // Interlock group definition
@@ -270,7 +304,30 @@ public:
   uint8_t getChannelCount() const { return Core::RELAY_CHANNEL_COUNT; }
 
   /// Set channel config (from REST/MQTT config command). Saves to NVS.
+  /// [GATE-1b / PH8-05] Defense-in-depth guard: in PRODUCTION builds
+  /// HOLD_SAFE is refused without the explicit commissioning flag
+  /// (-DPLTS_ALLOW_HOLD_SAFE — requires documented hazard classification);
+  /// unclassified channels stay on the fail-closed OFF policy. Config is a
+  /// PROVISIONING path (no runtime ingress — audit p.434), which already
+  /// keeps remote CONFIG from touching it; this guard closes the remaining
+  /// local/provisioning surface.
   bool setChannelConfig(uint8_t ch, const RelayChannelConfig& cfg);
+
+  /// [GATE-1b / PH8-05] Feed remote command-authority health from the
+  /// network context (networkTask): authority == MQTT fully operational
+  /// (connected && subscriptions verified) — the ONLY remote normal-command
+  /// path; WiFi down ⇒ MQTT down ⇒ authority lost. Thread-safe (atomic).
+  /// NOT a global kill-switch: the per-channel policy applies only after the
+  /// channel's command lease expires, and the local safety supervisor
+  /// (EmergencySupervisor) remains fully independent and active.
+  void setCommandAuthority(bool healthy);
+
+  /// [GATE-1b / PH8-05] Current command-authority state (atomic read).
+  bool isCommandAuthorityLost() const { return _authorityLost.load(std::memory_order_relaxed); }
+
+  /// [GATE-1b / PH8-05] millis() when the current loss episode started
+  /// (0 = authority healthy / no episode). Latched in the executor context.
+  uint32_t commandAuthorityLostSinceMs() const { return _authorityLostSinceMs; }
 
   /// Serialize relay status into a JSON array for telemetry.
   void serializeStatus(JsonArray& arr) const;
@@ -286,6 +343,16 @@ private:
   // commands snapshot the generation at enqueue; a mismatch at execution
   // time BLOCKS the command as stale (no post-emergency reactivation).
   uint32_t _safetyGeneration = 0;
+
+  // [GATE-1b / PH8-05] Command-authority supervision. _authorityLost is
+  // written from the networkTask context (setCommandAuthority) and read in
+  // the relayTask executor context; the episode timestamp and all per-
+  // channel fail-safe state are latched/mutated ONLY inside tick() (single
+  // writer) — no cross-core RMW on these.
+  std::atomic<bool> _authorityLost{false};
+  uint32_t _authorityLostSinceMs = 0;  // 0 = healthy; latched in tick()
+  bool _commLossEpisodeLogged = false;            // one-shot episode log
+  bool _holdSafeWarned[Core::RELAY_CHANNEL_COUNT] = {false};
 
   // [P1-8 + audit p.403] Pulse tracking — one slot per channel (deterministic,
   // no overflow). Each entry carries the identity of the transaction that
@@ -331,6 +398,18 @@ private:
 
   /// Check maxOnTime for all channels — FORCE OFF if exceeded
   void _checkMaxOnTime();
+
+  /// [GATE-1b / PH8-05] Communication-loss fail-safe supervision — runs in
+  /// tick() AFTER _checkMaxOnTime and BEFORE the command queue (safety
+  /// matrix: comm-loss FORCE OFF outranks normal commands; it is a safety
+  /// grade action that bypasses minOnTime, exactly like maxOnTime FORCE
+  /// OFF). Per-channel: policy OFF → FORCE OFF at lease expiry (lease base
+  /// = episode start, extended by command activity); policy HOLD_SAFE →
+  /// hold + one-shot WARNING per episode. On authority restore: honest
+  /// COMM_RESTORED log, NO automatic re-energize (commLossForced channels
+  /// stay OFF until a NEW explicit command — audit "reconnect → tidak ada
+  /// automatic stale command").
+  void _checkCommLossFailSafe();
 
   /// Process pending pulses (turn OFF after duration)
   void _processPulses();

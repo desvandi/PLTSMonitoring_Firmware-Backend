@@ -68,6 +68,10 @@ void RelayController::begin() {
     _state[ch].reportedState = false;
     _state[ch].physicalState = false;
     _state[ch].confidence = Core::RelayStateConfidence::Unknown;
+    // [GATE-1b / PH8-05] fresh episode bookkeeping at boot
+    _state[ch].commLossForced = false;
+    _state[ch].lastCommandAtMs = 0;
+    _holdSafeWarned[ch] = false;
     _state[ch].source = Core::RelaySource::Off;
     _state[ch].stateSequence = 0;
     _state[ch].lastChangedAtMs = 0;
@@ -80,6 +84,10 @@ void RelayController::begin() {
       _state[ch].maxOnTimeForced = true;  // stay forced OFF
     }
   }
+  // [GATE-1b / PH8-05] No loss episode at boot; the networkTask feed latches
+  // the first episode once MQTT is observed unhealthy.
+  _authorityLostSinceMs = 0;
+  _commLossEpisodeLogged = false;
 
   Serial.printf("[RELAY] Controller initialized — %d channels, driver %s\n",
                 Core::RELAY_CHANNEL_COUNT,
@@ -134,6 +142,12 @@ void RelayController::tick() {
   //    This closes the previous one-tick (≤200 ms) window in which a normal
   //    ON could execute before the safety supervisor had refreshed the flag.
   _checkMaxOnTime();
+
+  // 1b. [GATE-1b / PH8-05] COMM-LOSS FAIL-SAFE — same safety-before-queue
+  //     contract as maxOnTime: the lease deadline is applied BEFORE queued
+  //     commands are drained, so an ON dequeued this tick is judged against
+  //     an already-forced channel.
+  _checkCommLossFailSafe();
 
   // 2. Process queued commands — single-threaded mutation authority.
   //    Safety + interlock are re-evaluated inside applyCommand immediately
@@ -327,6 +341,11 @@ RelayCommandResult RelayController::applyCommand(
       return RelayCommandResult::Failed;
     }
     messageOut = "Channel " + String(channel) + " ON";
+    // [GATE-1b / PH8-05] Executed operator command = lease-presence evidence
+    // (extends the comm-loss lease base for this channel) and clears the
+    // fail-safe marker — the new state is the operator's explicit intent.
+    _state[channel].lastCommandAtMs = millis();
+    _state[channel].commLossForced = false;
     return RelayCommandResult::Applied;
   }
 
@@ -346,6 +365,9 @@ RelayCommandResult RelayController::applyCommand(
       return RelayCommandResult::Failed;
     }
     messageOut = "Channel " + String(channel) + " OFF";
+    // [GATE-1b / PH8-05] Executed operator command = lease-presence evidence.
+    _state[channel].lastCommandAtMs = millis();
+    _state[channel].commLossForced = false;
     return RelayCommandResult::Applied;
   }
 
@@ -409,6 +431,9 @@ RelayCommandResult RelayController::applyCommand(
     _pulses[channel].active = true;
 
     messageOut = "Channel " + String(channel) + " PULSE " + String(pulseDurationMs) + "ms";
+    // [GATE-1b / PH8-05] Executed operator command = lease-presence evidence.
+    _state[channel].lastCommandAtMs = millis();
+    _state[channel].commLossForced = false;
     return RelayCommandResult::Applied;
   }
 
@@ -540,7 +565,26 @@ bool RelayController::clearSafetyLockout(uint8_t channel) {
 
 bool RelayController::setChannelConfig(uint8_t ch, const RelayChannelConfig& cfg) {
   if (!_validChannel(ch)) return false;
-  _config[ch] = cfg;
+  RelayChannelConfig c = cfg;
+  // [GATE-1b / PH8-05] Fail-safe policy commissioning guard. Relay config
+  // has NO runtime ingress (audit p.434 — provisioning only), so this is
+  // the single choke point for local/provisioning writes. Production builds
+  // refuse HOLD_SAFE unless the operator explicitly opted in at BUILD time
+  // with -DPLTS_ALLOW_HOLD_SAFE, which requires the channel's hazard
+  // classification to be documented in hardware acceptance. Unclassified
+  // channels stay on the fail-closed OFF policy.
+#if defined(PRODUCTION_BUILD) && !defined(PLTS_ALLOW_HOLD_SAFE)
+  if (c.commLossPolicy == RelayFailSafePolicy::HoldSafe) {
+    Services::Log.append(Core::LogType::Custom,
+        "RELAY CONFIG REFUSED (production): commLossPolicy=HOLD_SAFE for CH" +
+        String(ch) + " requires documented hazard classification "
+        "(build flag PLTS_ALLOW_HOLD_SAFE + hardware acceptance sign-off)", 0);
+    return false;
+  }
+#endif
+  // Lease sanity bound (0 = immediate is legal; nonsense-large is not)
+  if (c.commandLeaseSec > 86400) c.commandLeaseSec = 86400;
+  _config[ch] = c;
   _saveConfig();
   return true;
 }
@@ -561,6 +605,107 @@ void RelayController::serializeStatus(JsonArray& arr) const {
     o["lastChangedAt"] = _state[ch].lastChangedAtMs;
     o["maxOnTimeForced"] = _state[ch].maxOnTimeForced;
     o["stateSequence"] = _state[ch].stateSequence;  // [audit p.293] readback authority
+    // [GATE-1b / PH8-05] fail-safe visibility (additive, monitoring-only)
+    o["commLossPolicy"] = relayFailSafePolicyToStr(_config[ch].commLossPolicy);
+    o["commandLeaseSec"] = _config[ch].commandLeaseSec;
+    o["commLossForced"] = _state[ch].commLossForced;
+  }
+}
+
+// ============================================================================
+// [GATE-1b / PH8-05] COMMAND-AUTHORITY FAIL-SAFE SUPERVISION
+// ============================================================================
+
+void RelayController::setCommandAuthority(bool healthy) {
+  // Network context (networkTask, core 1) — relaxed store is sufficient:
+  // the executor latches the episode timestamp itself in tick(), and all
+  // per-channel fail-safe state is single-writer (relayTask).
+  _authorityLost.store(!healthy, std::memory_order_relaxed);
+}
+
+void RelayController::_checkCommLossFailSafe() {
+  const uint32_t now = millis();
+  const bool lost = _authorityLost.load(std::memory_order_relaxed);
+
+  if (lost) {
+    // ---- episode latch (executor context — single writer) ----
+    if (_authorityLostSinceMs == 0) {
+      _authorityLostSinceMs = now;
+      _commLossEpisodeLogged = false;
+      for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+        _holdSafeWarned[ch] = false;
+      }
+    }
+    if (!_commLossEpisodeLogged) {
+      _commLossEpisodeLogged = true;
+      Services::Log.append(Core::LogType::Custom,
+          "RELAY: remote command authority LOST — per-channel fail-safe policies "
+          "armed (command lease countdown per channel)", 0);
+    }
+
+    for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+      if (!_config[ch].enabled) continue;
+      if (!_state[ch].reportedState) continue;        // OFF is already the safe-by-default state
+      if (_state[ch].commLossForced) continue;        // already tripped this episode
+
+      if (_config[ch].commLossPolicy == RelayFailSafePolicy::Off) {
+        // Lease base = episode start, extended by any command executed for
+        // this channel DURING the episode (local REST = operator presence).
+        uint32_t base = _authorityLostSinceMs;
+        if (_state[ch].lastCommandAtMs > base) base = _state[ch].lastCommandAtMs;
+        const uint32_t leaseMs = _config[ch].commandLeaseSec * 1000UL;
+        // leaseSec 0 = immediate fail-safe (fail-closed convention — the
+        // OPPOSITE of maxOnTime's 0=unlimited, because a fail-safe timer
+        // must never default to "hold forever").
+        if ((now - base) >= leaseMs) {
+          // FORCE OFF — safety grade: bypasses minOnTime exactly like
+          // maxOnTime FORCE OFF (audit p.409 matrix); pending pulse is
+          // cancelled so the two timers never race.
+          if (_pulses[ch].active) {
+            _annotatePulseOutcome(ch, "cancelled by comm-loss fail-safe FORCE OFF");
+            _pulses[ch].active = false;
+          }
+          _applyChannelState(ch, false, Core::RelaySource::CommLoss);
+          _state[ch].commLossForced = true;
+          const uint32_t heldFor = (now - base) / 1000;
+          String msg = "RELAY: CH" + String(ch) +
+                       " command lease expired under comm loss (held " +
+                       String(heldFor) + "s, lease " +
+                       String(_config[ch].commandLeaseSec) + "s) — fail-safe FORCE OFF";
+          Services::Log.append(Core::LogType::Custom, msg, 0);
+          Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
+                      Core::AlarmSeverity::Critical, msg.c_str());
+        }
+      } else {
+        // HOLD_SAFE — hold last state (hazard-classified channel). Honest
+        // one-shot WARNING per episode; the hold is visible, not silent.
+        if (!_holdSafeWarned[ch]) {
+          _holdSafeWarned[ch] = true;
+          String msg = "RELAY: CH" + String(ch) +
+                       " holding ON under comm loss (HOLD_SAFE policy — hazard-classified channel)";
+          Services::Log.append(Core::LogType::Custom, msg, 0);
+          Services::alarms.raise(Core::AlarmCode::RELAY_FAULT,
+                      Core::AlarmSeverity::Warning, msg.c_str());
+        }
+      }
+    }
+  } else if (_authorityLostSinceMs != 0) {
+    // ---- authority restored: honest transition, NO automatic re-energize.
+    // commLossForced channels remain OFF until a NEW explicit command
+    // arrives through the (re-validated) queue — freshness + safety-
+    // generation guards remain fully in force, so nothing replays stale.
+    const uint32_t episodeLen = (now - _authorityLostSinceMs) / 1000;
+    Services::Log.append(Core::LogType::Custom,
+        "RELAY: remote command authority RESTORED after " + String(episodeLen) +
+        "s — fail-safe channels stay OFF until a NEW command (no auto-replay)", 0);
+    _authorityLostSinceMs = 0;
+    _commLossEpisodeLogged = false;
+    for (uint8_t ch = 0; ch < Core::RELAY_CHANNEL_COUNT; ch++) {
+      _holdSafeWarned[ch] = false;   // next episode re-arms the one-shot warnings
+      // NOTE: commLossForced is intentionally NOT cleared here — it stays
+      // true as honest visibility ("this channel is OFF because of a
+      // fail-safe trip") until a new command executes for the channel.
+    }
   }
 }
 
@@ -945,6 +1090,19 @@ void RelayController::_loadConfig() {
     _config[ch].minSwitchIntervalSec = p.getULong((prefix + "minInt").c_str(), Core::RELAY_DEFAULT_MIN_SWITCH_INTERVAL_SEC);
     _config[ch].enabled = p.getBool((prefix + "en").c_str(), true);
     _config[ch].interlockGroup = p.getUChar((prefix + "ilk").c_str(), 0);
+    // [GATE-1b / PH8-05] fail-safe policy + command lease (keys absent in
+    // legacy NVS → fail-closed defaults: policy OFF, lease 900s)
+    _config[ch].commLossPolicy = static_cast<RelayFailSafePolicy>(
+        p.getUChar((prefix + "fsP").c_str(), static_cast<uint8_t>(RelayFailSafePolicy::Off)));
+    _config[ch].commandLeaseSec = p.getULong((prefix + "lease").c_str(),
+                                             Core::RELAY_DEFAULT_COMMAND_LEASE_SEC);
+    // Policy value sanity — refuse NVS-corrupt HOLD_SAFE from provisioning
+    // channels that were never hazard-classified (fail-closed).
+    if (static_cast<uint8_t>(_config[ch].commLossPolicy) >
+        static_cast<uint8_t>(RelayFailSafePolicy::HoldSafe)) {
+      _config[ch].commLossPolicy = RelayFailSafePolicy::Off;
+    }
+    if (_config[ch].commandLeaseSec > 86400) _config[ch].commandLeaseSec = 86400;
   }
 
   // Load PCF8574 address
@@ -1014,6 +1172,9 @@ void RelayController::_saveConfig() {
     p.putULong((prefix + "minInt").c_str(), _config[ch].minSwitchIntervalSec);
     p.putBool((prefix + "en").c_str(), _config[ch].enabled);
     p.putUChar((prefix + "ilk").c_str(), _config[ch].interlockGroup);
+    // [GATE-1b / PH8-05] fail-safe policy + command lease
+    p.putUChar((prefix + "fsP").c_str(), static_cast<uint8_t>(_config[ch].commLossPolicy));
+    p.putULong((prefix + "lease").c_str(), _config[ch].commandLeaseSec);
   }
 
   p.putUChar("i2c_addr", _pcf8574Address);
@@ -1082,6 +1243,9 @@ AllOffResult RelayController::allOffWithResult() {
     }
     _pulses[ch].active = false;  // cancel any pending pulse for this channel
     _applyChannelState(ch, false, Core::RelaySource::Manual);
+    // [GATE-1b / PH8-05] Executed operator command = lease-presence evidence.
+    _state[ch].lastCommandAtMs = millis();
+    _state[ch].commLossForced = false;
 
     if (_state[ch].fault) {
       // The write outcome is unverified — count separately from hard failures
