@@ -79,9 +79,26 @@ jobs:
     name: Push contract cross-audit (K1-K10, 235 asersi, PWA pinned)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: firmware
+
+      # [GATE-8 / S2-01 2026-09] Immutable action pinning policy — audit Phase 6
+      # S2-01 / Phase 10 S2-01: every `uses:` must reference a 40-hex commit
+      # SHA. A mutable tag (@vN) lets a compromised upstream tag silently
+      # change the code CI executes. This step FAILS the workflow if any
+      # mutable action ref is (re)introduced.
+      - name: Action pinning policy (S2-01)
+        run: |
+          BAD=$(grep -rnE "^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]#]+" firmware/.github/workflows/ | grep -vE "[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]@]+@[0-9a-f]{40}([[:space:]]|$)" || true)
+          if [ -n "$BAD" ]; then
+            echo "MUTABLE ACTION REF(S) FOUND — pin to a 40-char commit SHA:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "OK: all workflow actions are pinned to immutable commit SHAs"
+
       - name: Resolve pinned PWA revision
         id: pwaref
         run: |
@@ -100,7 +117,8 @@ jobs:
           else
             echo "ref=$PIN" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/checkout@v4
+      - # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: desvandi/PLTSMonitoring_PWA
           path: pwa
@@ -118,7 +136,8 @@ jobs:
             echo "Perbarui config/pwa-pin.txt ke revision main terbaru (P1-E)."
             exit 1
           fi
-      - uses: actions/setup-node@v4
+      - # actions/setup-node v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
       - name: Assemble checkout layout expected by the harness
@@ -175,10 +194,12 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           path: firmware
-      - uses: actions/setup-node@v4
+      - # actions/setup-node v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
       - name: Build stamped bundle
@@ -186,7 +207,8 @@ jobs:
           cd firmware
           bash scripts/make-gas-bundle.sh "${GITHUB_SHA}" dist/gas-bundle
       - name: Upload bundle artifact (immutable evidence)
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: gas-bundle-${{ github.sha }}
           path: firmware/dist/gas-bundle/
