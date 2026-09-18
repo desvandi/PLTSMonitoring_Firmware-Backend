@@ -17,7 +17,7 @@ Validates docs/hardware-acceptance/v{version}-gate.json:
   4. gitCommit == the SOURCE commit (release.json.gitCommit)
   5. firmwareSha256 == release.json.firmwareSha256
   6. verdict == "PASS"
-  7. ALL 21 checks == "PASS" — 11 legacy safety checks (v1.8.0 protocol:
+  7. ALL 22 checks == "PASS" — 11 legacy safety checks (v1.8.0 protocol:
      boot/sensors/alarms/otaRest/otaMqtt/rollback/emergencyRelay/
      configPersistence/security/soak24h/factoryReset) + 10 gate checks
      (emergencyAtomicity, watchdogStarvationBank, clockInvalidReject,
@@ -77,6 +77,9 @@ GATE_CHECKS = [
     "qosTimeoutBudget",
     # [audit PH8-06 matrix] expired/stale command after reconnect blocked
     "staleCommandBlocked",
+    # [GATE-7b] P7-S1-02: journal retention honest capacity + outage
+    # drain + power-cycle crash recovery + bounded mid-drain duplicates
+    "telemetryJournalRetention",
 ]
 
 REQUIRED_CHECKS = LEGACY_CHECKS + GATE_CHECKS

@@ -442,6 +442,46 @@ static constexpr uint8_t  SPOOL_RAM_SIZE          = 16;
 static constexpr uint8_t  SPOOL_NVS_CRITICAL_SIZE = 8;
 static constexpr uint8_t  MAX_REPLAY_PER_SEC     = 2;
 
+// [GATE-7b / P7-S1-02 2026-09] PERSISTENT TELEMETRY JOURNAL (store-and-forward).
+// Replaces the 8-slot RAM ring (~40 s of telemetry) with a size-configurable
+// append-only segmented journal on LittleFS. The target retention is BOTH a
+// build parameter (override with -DTARGET_OFFLINE_RETENTION_SEC=<sec>) and a
+// runtime parameter (config field "offlineRetentionSec", NVS "plts_batt"/
+// "retS", REST + MQTT config.update, clamp [60, 86400]). PHYSICAL capacity is
+// always derived from the actual LittleFS partition at boot (60% budget cap,
+// honoring current usage) — the effective retention is reported honestly and
+// the device flags journalDegraded instead of silently claiming the target
+// (audit P7-S1-02 requirement).
+//
+// Default 600 s = 120 records ≈ 309 KB — deliberately achievable inside the
+// 60% × 768 KB LittleFS budget of the current partition table, so the default
+// configuration is NOT degraded. Larger targets (1 h–24 h per the audit's
+// sizing table: 6 h ≈ 9.5 MB at 2.2 KB/record) require larger flash and are
+// reported as degraded (honest) on hardware that cannot hold them.
+#ifndef TARGET_OFFLINE_RETENTION_SEC
+#define TARGET_OFFLINE_RETENTION_SEC 600
+#endif
+static constexpr uint32_t SPOOL_JOURNAL_TARGET_RETENTION_SEC  = TARGET_OFFLINE_RETENTION_SEC;
+// Runtime "offlineRetentionSec" validation window (ConfigUpdater + ConfigStore
+// sanitize — all three surfaces must stay consistent).
+static constexpr uint32_t SPOOL_RETENTION_MIN_SEC             = 60;
+static constexpr uint32_t SPOOL_RETENTION_MAX_SEC             = 86400;
+// Journal budget: at most 60% of the LittleFS partition AND never more than
+// the bytes actually free at boot (activity/audit logs + config/calibration
+// keep the rest; LogService rotates at 80% total usage).
+static constexpr uint8_t  SPOOL_JOURNAL_BUDGET_PCT            = 60;
+// Segment geometry: append-only files of 32 packed records (~82.4 KB each).
+// Eviction granularity = one segment (32 records) — coarse enough to amortize
+// file overhead, fine enough that the retention window is not halved.
+static constexpr uint16_t SPOOL_JOURNAL_SEGMENT_RECORDS       = 32;
+static constexpr uint8_t  SPOOL_JOURNAL_MAX_SEGMENTS          = 16;  // hard cap (512 records / ~1.3 MB)
+// At-least-once replay watermark: persisted to NVS every 16 confirmed socket
+// writes + at full drain. Crash mid-drain re-replays ≤ 16 records — GAS
+// sequence dedup absorbs the bounded duplicates.
+static constexpr uint16_t SPOOL_JOURNAL_WATERMARK_EVERY       = 16;
+// Segment filename pattern: /spoolj_<a..p>.bin (letter = segment slot).
+static constexpr const char* SPOOL_JOURNAL_PATH_PREFIX        = "/spoolj_";
+
 // Transaction journal (brief §42)
 // [FW-27 REMEDIATION 2026-08] 64 slots × ~1.2 KB ≈ 76 KB cannot fit the old
 // 20 KB NVS partition — putBytes would start failing once full and command

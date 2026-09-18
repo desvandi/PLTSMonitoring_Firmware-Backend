@@ -33,6 +33,10 @@ void handleGetConfig() {
   doc["fullChargeCurrentThreshold"] = Core::cfgFullChargeCurrentThreshold;
   doc["fullChargePersistenceSec"] = Core::cfgFullChargePersistenceSec;
   doc["telemetryIntervalSec"] = Core::cfgTelemetryIntervalSec;
+  // [GATE-7b / P7-S1-02] offline telemetry retention target (s). The
+  // journal's effective (capacity-derived) retention is on /api/diagnostics
+  // — this field is the CONFIGURED target, not a durability claim.
+  doc["offlineRetentionSec"] = Core::cfgOfflineRetentionSec;
   // v1.6.0 — BMS/inverter comm configuration
   doc["bmsProtocol"] = Core::cfgBmsProtocol;
   doc["bmsPollIntervalMs"] = Core::cfgBmsPollIntervalMs;

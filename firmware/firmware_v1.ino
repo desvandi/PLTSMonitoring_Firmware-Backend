@@ -158,6 +158,11 @@ namespace Core {
   float    cfgFullChargeCurrentThreshold  = FULL_CHARGE_CURRENT_THRESHOLD_A;
   uint32_t cfgFullChargePersistenceSec    = FULL_CHARGE_PERSISTENCE_SEC;
   uint32_t cfgTelemetryIntervalSec        = TELEMETRY_INTERVAL_MS / 1000;
+  // [GATE-7b / P7-S1-02] offline telemetry retention target (s). Build
+  // default from Core/Config.h (-DTARGET_OFFLINE_RETENTION_SEC overridable);
+  // NVS "plts_batt"/"retS" overrides it at load (ConfigStore, clamp
+  // [60,86400]); REST/MQTT config.update mutates it live (ConfigUpdater).
+  uint32_t cfgOfflineRetentionSec         = SPOOL_JOURNAL_TARGET_RETENTION_SEC;
   // v1.6.0 — BMS/inverter comm config (persisted in NVS "plts_batt")
   uint32_t cfgBmsPollIntervalMs          = BMS_POLL_INTERVAL_MS;
   char     cfgBmsProtocol[16]            = "auto";   // BMS_PROTOCOL_DEFAULT
@@ -357,7 +362,12 @@ void setup() {
 #endif
 
   // Spool & Services::journal
-  Services::telemetrySpool.begin();
+  // [GATE-7b / P7-S1-02] begin(targetSec, intervalSec): the journal derives
+  // its PHYSICAL capacity from the LittleFS partition and reports the
+  // honest effective retention vs the configured target (loadBatteryConfig
+  // above has already populated cfgOfflineRetentionSec/cfgTelemetryIntervalSec).
+  Services::telemetrySpool.begin(Core::cfgOfflineRetentionSec,
+                                  (uint16_t)Core::cfgTelemetryIntervalSec);
   Services::journal.begin();
   // Services::canonicalizer doesn't have begin() — it's stateless
   // Services::journal.begin() already called above
@@ -1426,8 +1436,9 @@ void publishTelemetry() {
     if (sr == Services::SpoolResult::EvictedOldest && !evictLogged) {
       evictLogged = true;
       Services::Log.append(Core::LogType::StorageError,
-          String("Telemetry spool ring FULL — oldest buffered record evicted "
-                 "(dropCount=") + Services::telemetrySpool.dropCount() + ")", -1);
+          String("Telemetry journal FULL — oldest segment evicted (dropCount=") +
+          Services::telemetrySpool.dropCount() + ", evictions=" +
+          Services::telemetrySpool.journalEvictions() + ")", -1);
     } else if (sr == Services::SpoolResult::Stored) {
       evictLogged = false;
     }

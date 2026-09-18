@@ -32,7 +32,8 @@
     "mqttTopicBinding": "PENDING",
     "otaDurableReservation": "PENDING",
     "qosTimeoutBudget": "PENDING",
-    "staleCommandBlocked": "PENDING"
+    "staleCommandBlocked": "PENDING",
+    "telemetryJournalRetention": "PENDING"
   },
   "observed": {
     "bootTimeSec": null,
@@ -97,6 +98,15 @@
       "stackCriticalCrossed": null,
       "resetCount": 0,
       "alarmChurnCount": 0
+    },
+    "telemetryJournalRetention": {
+      "journalDegradedReported": null,
+      "outageWindowGaps": null,
+      "powerCycleMidOutageResumed": null,
+      "midDrainCrashDuplicatesMax": null,
+      "evictionDropsCounted": null,
+      "restoredCount": null,
+      "watermarkSeq": null
     }
   },
   "notes": "Isi SETIAP nilai dari pengukuran fisik nyata. Nilai rekaan = pelanggaran disiplin anti-false-closure (lihat HIL-PROCEDURE.md)."

@@ -99,6 +99,14 @@ extern float    cfgIdleCurrentThreshold;
 extern float    cfgFullChargeCurrentThreshold;
 extern uint32_t cfgFullChargePersistenceSec;
 extern uint32_t cfgTelemetryIntervalSec;
+// [GATE-7b / P7-S1-02 2026-09] Offline telemetry retention target (s).
+// Build default Core::SPOOL_JOURNAL_TARGET_RETENTION_SEC; persisted in NVS
+// "plts_batt"/"retS" (Storage::ConfigStore::load/saveBatteryConfig);
+// mutated via REST /api/config + MQTT config.update (CommandCanonicalizer
+// whitelist + ConfigUpdater clamp [60,86400]). The PHYSICAL journal capacity
+// is always boot-derived from the LittleFS partition — this value only sets
+// the target the diagnostics compare against (journalDegraded if short).
+extern uint32_t cfgOfflineRetentionSec;
 extern uint32_t cfgBmsPollIntervalMs;      // v1.6.0 BMS polling period
 extern char     cfgBmsProtocol[16];        // "auto"|"none"|protocol id
 extern uint8_t  cfgBmsModbusSlaveId;       // Modbus RTU/TCP unit id
@@ -247,6 +255,8 @@ struct DeviceConfig {
   float    fullChargeCurrentThreshold;
   uint32_t fullChargePersistenceSec;
   uint32_t telemetryIntervalSec;
+  // [GATE-7b / P7-S1-02] offline retention target (s) — see cfgOfflineRetentionSec.
+  uint32_t offlineRetentionSec;
 };
 
 // ===========================================================================
@@ -370,7 +380,10 @@ struct SystemStatus {
     bool     mqttConnected;
     bool     ntpSynced;
     bool     storageOk;
-    uint8_t  spoolSize;
+    // [GATE-7b / P7-S1-02] widened uint8 → uint16: the persistent journal
+    // holds up to 512 records (MAX_SEGMENTS 16 × 32) — uint8 would wrap at 256
+    // and silently under-report a large backlog.
+    uint16_t spoolSize;
     // [AUDIT 2026-09 ROUND 5 / p.442] Dropped-telemetry counter IN the
     // envelope — together with sequence gaps this lets the backend
     // distinguish "device didn't send" from "spool overflow dropped a

@@ -125,6 +125,33 @@ REFUSED; state fisik tidak berpindah ke GPIO baru.
    seragam), laporan QoS jujur (QoS 0/1 sesuai kontrak, tidak
    mengklaim delivery yang tidak dibuktikan).
 
+## M. Telemetry journal retention + crash recovery (`checks.telemetryJournalRetention`, P7-S1-02 / GATE-7b)
+
+1. **Kapasitas jujur**: boot dengan target `offlineRetentionSec` >
+   kapasitas fisik → `spoolJournalDegraded=true` di
+   `/api/diagnostics`, baris WARNING di log, `spoolJournalEffectiveSec`
+   < target — device TIDAK pernah mengklaim retensi yang tidak tersedia.
+2. **Outage window** (retensi terkonfigurasi, mis. 600 s default):
+   putus broker selama 1×, 2×, dan penuh window; setelah pemulihan,
+   drain `spoolSize` → 0, **`sequence gaps == 0`** untuk semua record
+   dalam window retensi (verifikasi di sisi GAS/dedup), replay
+   berurutan oldest-first.
+3. **Power-cycle di tengah outage** (regresi audit): putus broker,
+   biarkan ≥ 60 s telemetry ter-buffer, **putus daya** ESP32, nyalakan
+   lagi (broker masih mati) → journal **resume tanpa**: korupsi
+   duplikat (record torn dihitung `spoolDrops`, bukan muncul dua
+   kali), regresi sequence (urutan tetap naik), truncation senyap
+   (`spoolDrops` mencatat setiap record yang hilang), false EMPTY
+   (`spoolFsRestored` > 0 selama record valid tersisa).
+4. **Crash mid-drain**: pulihkan broker sampai ~½ backlog ter-replay,
+   putus daya → setelah boot, replay melanjutkan dari watermark;
+   duplikat yang di-replay ≤ 16 record (`SPOOL_JOURNAL_WATERMARK_EVERY`)
+   dan terserap dedup GAS (at-least-once, bukan korupsi).
+5. **Batas eviksi**: biarkan outage melewati kapasitas penuh →
+   `spoolJournalEvictions` naik, `EvictedOldest` ter-log, `spoolDrops`
+   konsisten = jumlah record yang dievict (data loss jujur pada batas
+   kapasitas, terlihat, tidak senyap).
+
 ## L. Soak 24–72 jam (`checks.soak24h`, observed.soak*)
 
 Jalankan dengan beban campuran: telemetry 5s + reconnect storm terjadwal

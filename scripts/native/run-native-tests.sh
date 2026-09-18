@@ -256,6 +256,46 @@ else
   fi
 fi
 
+
+echo "=== verify_spool_journal_recovery (TREATMENT, ASAN+UBSAN) ==="
+# [GATE-7b / P7-S1-02 2026-09] Persistent segmented telemetry journal —
+# proves the audit regression criteria (power-cycle mid-outage resume
+# without duplicate corruption / sequence regression / silent truncation /
+# false EMPTY; torn-tail honest drop counting; mid-drain crash duplicates
+# bounded by the replay watermark; whole-segment capacity eviction).
+# Single-writer logic — no TSAN phase needed (no cross-thread surface).
+if ! g++ -std=c++17 -g -fsanitize=address,undefined -o vsjr verify_spool_journal_recovery.cpp; then
+  echo "COMPILE FAIL: verify_spool_journal_recovery"; fails=$((fails+1))
+else
+  workdir=$(mktemp -d)
+  if ! ./vsjr "$workdir"; then fails=$((fails+1)); fi
+  rm -rf "$workdir"
+fi
+
+echo "=== verify_spool_journal_recovery (NEGATIVE CONTROL, -DNO_WATERMARK) ==="
+# Disabling watermark persistence makes a mid-drain crash re-replay MORE
+# than WATERMARK_EVERY records — the duplicates bound MUST trip. A clean
+# exit would mean the harness is blind to the at-least-once bound.
+if ! g++ -std=c++17 -g -fsanitize=address,undefined -DNO_WATERMARK -o vsjr_nc verify_spool_journal_recovery.cpp; then
+  echo "COMPILE FAIL: verify_spool_journal_recovery (negative control)"; fails=$((fails+1))
+else
+  workdir=$(mktemp -d)
+  if ./vsjr_nc "$workdir" > vsjr_nc.log 2>&1; then
+    echo "NEGATIVE CONTROL FAILED: no-watermark journal ran clean — the harness cannot detect the duplicates bound"
+    fails=$((fails+1))
+  else
+    if grep -q "duplicates after crash bounded" vsjr_nc.log && grep -q "TRIP" vsjr_nc.log; then
+      echo "NEGATIVE CONTROL OK: watermark-less resume re-replayed past the bound (TRIP) — harness sensitivity proven"
+    else
+      echo "NEGATIVE CONTROL INCONCLUSIVE: investigate vsjr_nc.log"
+      fails=$((fails+1))
+    fi
+  fi
+  rm -rf "$workdir"
+fi
+
+rm -f vsjr vsjr_nc vsjr_nc.log
+
 rm -f vsc_tsan vsc_asan vsc_unlocked vsc_unlocked.log vsc_failopen vsc_failopen.log vsc_tsan.log vsc_asan.log
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL NATIVE HARNESS GREEN"; else echo "$fails harness(es) FAILED"; exit 1; fi

@@ -25,6 +25,10 @@ static const CommandDef COMMAND_REGISTRY[] = {
     {"batteryCapacityAh","batteryNominalV","fullVoltage","lowVoltage",
      "idleCurrentThreshold","fullChargeCurrentThreshold",
      "fullChargePersistenceSec","telemetryIntervalSec",
+     // [GATE-7b / P7-S1-02] offline telemetry retention target (s) —
+     // REST handlePostConfig + MqttConfigReceiver parity (same clamp window
+     // as ConfigUpdater [60,86400]).
+     "offlineRetentionSec",
      "deviceName","timezone",
      // v1.6.0 BMS comm fields — REST handlePostConfig + MqttConfigReceiver
      // both apply these; the whitelist omission made every REST/MQTT config
