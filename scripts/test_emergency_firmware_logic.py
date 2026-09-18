@@ -533,7 +533,12 @@ check("E11a sensorFailPolicy in EmergencyConfig struct",
 check("E11b sensorFailPolicy parsed from persisted config (loadConfig)",
       ino.count('emg["sensorFailPolicy"] | -1') == 1)
 check("E11c sensorFailPolicy parsed from operator CONFIG command",
-      ino.count('cfg["sensorFailPolicy"]') == 1)
+      ino.count('cfg["sensorFailPolicy"]') >= 1)
+# [GATE-1 / PH8-04 2026-09] the parse path is now guarded by the safety-config
+# lockdown (remote mutation of commissioned fields refused by default).
+check("E11c-b [PH8-04] operator CONFIG lockdown guard present",
+      "GENERIC_ALLOW_UNSAFE_SAFETY_CONFIG" in ino and
+      "safety-config lockdown" in ino)
 check("E11d sensorFailPolicy persisted in saveConfig()",
       'emg["sensorFailPolicy"] = config.emg.sensorFailPolicy;' in ino)
 

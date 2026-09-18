@@ -93,9 +93,13 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
   // --- 2b. [P2-1 REMEDIATION 2026-09] Freshness gate (RETENTION CONTRACT) ------
   // An expired OTA command can be neither applied nor safely deduplicated
   // once its journal ring slot is gone (see TransactionJournal.h).
+  // [GATE-1 / PH8-03] ota.start is an ENERGIZING mutation (it flashes the
+  // running image) — the STRICT flag applies: an unusable clock REJECTS the
+  // command (CLOCK_INVALID) instead of silently bypassing freshness.
   {
     String errOut;
-    if (Services::CommandCanonicalizer::isCommandExpired(doc, errOut)) {
+    const bool energizing = (action == "start");
+    if (Services::CommandCanonicalizer::isCommandExpired(doc, errOut, energizing)) {
       _publishAck(tid.c_str(), false, "REJECTED", errOut);
       _rejected++;
       return;

@@ -58,6 +58,11 @@ public:
   // change can never silently toggle the relay.
   void applyPins(uint8_t relayPin, int8_t estopPin, bool estopEnabled);
 
+  /// [GATE-1 / PH8-08] True when the LAST applyPins() was refused because a
+  /// production build cannot re-map safety pins while ENERGIZED. Cleared on
+  /// the next accepted applyPins().
+  bool pinsRefused() const { return _pinsRefused; }
+
   // Relay control. energized=true -> RUN (GPIO LOW), false -> ISOLATED (HIGH).
   void setEnergized(bool energized);
   bool isEnergized() const { return _energized; }
@@ -82,6 +87,7 @@ private:
   bool    _estopEnabled = true;
   bool    _energized   = false;      // boot state: ISOLATED (fail-safe)
   bool    _available   = false;
+  bool    _pinsRefused = false;      // [GATE-1 / PH8-08] last applyPins refused (production)
 };
 
 extern EmergencyRelayDriver emergencyRelay;

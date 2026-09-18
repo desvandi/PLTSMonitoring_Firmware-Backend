@@ -152,17 +152,58 @@ bool CommandCanonicalizer::validateProtocolVersion(int version, String& errOut) 
 }
 
 // [P2-1 REMEDIATION 2026-09] — shared freshness gate (REST + MQTT parity).
-// expiresAt is unix-seconds, optional per envelope. Rejection requires BOTH
-// a non-zero expiresAt AND a usable device clock: a device without RTC sync
-// cannot evaluate freshness and must fail-open on THIS check only (the
-// journal + HMAC auth remain in force); this mirrors the pre-existing
-// MqttConfigReceiver semantics so both ingresses behave identically.
-bool CommandCanonicalizer::isCommandExpired(JsonDocument& doc, String& errOut) {
-  if (!doc.containsKey("expiresAt")) return false;
+// expiresAt is unix-seconds, optional per envelope.
+//
+// [GATE-1 / PH8-03 REMEDIATION 2026-09 — CLOCK FAIL-CLOSED FOR ACTUATORS]
+// audit Phase 8 S1: the OLD shape returned false ("not expired") when the
+// device clock was unusable — freshness enforcement silently FAILED OPEN.
+// A stale actuator-ON command could then execute with no way to evaluate
+// its window. The `actuatorEnergizing` flag closes that hole:
+//   * actuatorEnergizing=true (relay on/pulse, ota.start, ARM): no usable
+//     clock → EXPIRED (reject, CLOCK_INVALID). An energizing mutation whose
+//     freshness cannot be evaluated must not actuate.
+//   * actuatorEnergizing=false (config/calibration/off/DISARM/read paths):
+//     legacy semantics retained — a device without RTC sync cannot evaluate
+//     freshness and fails open on THIS check only (journal + HMAC auth remain
+//     in force). OFF/DISARM/EMERGENCY are the audit's safe-direction
+//     exception: they may execute with or without a clock.
+bool CommandCanonicalizer::isCommandExpired(JsonDocument& doc, String& errOut,
+                                             bool actuatorEnergizing) {
+  if (!doc.containsKey("expiresAt")) {
+    if (actuatorEnergizing) {
+      // Energizing mutation with NO freshness claim at all — the envelope
+      // gate (validateCommandEnvelope) will reject it separately; here the
+      // clock still decides (a valid clock cannot rescue a missing claim).
+      uint32_t now = (uint32_t)::time(nullptr);
+      if (now == 0) {
+        errOut = "CLOCK_INVALID — cannot evaluate freshness of an energizing command";
+        return true;
+      }
+    }
+    return false;
+  }
   uint32_t expiresAt = doc["expiresAt"] | 0U;
-  if (expiresAt == 0) return false;
+  if (expiresAt == 0) {
+    if (actuatorEnergizing) {
+      uint32_t now = (uint32_t)::time(nullptr);
+      if (now == 0) {
+        errOut = "CLOCK_INVALID — cannot evaluate freshness of an energizing command";
+        return true;
+      }
+    }
+    return false;
+  }
   uint32_t now = (uint32_t)::time(nullptr);
-  if (now == 0) return false;   // no clock — cannot enforce freshness
+  if (now == 0) {
+    if (actuatorEnergizing) {
+      // [PH8-03] Fail-CLOSED for actuator mutations: reject rather than
+      // bypass. Safe-direction commands (off/all_off/DISARM) pass
+      // actuatorEnergizing=false and keep the legacy path.
+      errOut = "CLOCK_INVALID — cannot evaluate freshness of an energizing command";
+      return true;
+    }
+    return false;   // no clock — cannot enforce freshness (non-actuator)
+  }
   if (expiresAt < now) {
     errOut = "command expired (issuedAt/expiresAt in the past)";
     return true;

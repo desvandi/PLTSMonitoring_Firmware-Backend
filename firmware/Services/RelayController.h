@@ -222,7 +222,14 @@ public:
   /// physical state is unknown — safety must attempt the write anyway).
   /// Increments the safety generation, invalidating queued normal commands.
   /// Cannot be overridden, and is not blocked by minOnTime.
+  /// [GATE-1 / PH8-01] FIRST step is the driver-level atomic barrier
+  /// (forceSafetyAllOff: latch + single 0xFF write) — see RelayExpanderDriver.
   void emergencyAllOff();
+
+  /// [GATE-1 / PH8-01] Release the driver safety latch — ONLY the explicit
+  /// operator ARM path (EmergencySupervisor::_arm) may call this. Restores
+  /// the ON-direction write authority after the emergency gates pass.
+  void clearEmergencyLatch();
 
   /// [P1-7] all_off with per-channel result tracking.
   /// EXECUTOR-ONLY: invoked from applyCommand("all_off") inside relayTask.

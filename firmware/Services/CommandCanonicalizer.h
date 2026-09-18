@@ -62,10 +62,15 @@ public:
   // the journal ring (see TransactionJournal.h). A command whose expiresAt
   // is in the past can no longer be safely deduplicated NOR safely applied.
   // Every ingress (REST + MQTT) MUST call this BEFORE decideTransaction().
-  // Returns TRUE when the command is expired (reject). A device without a
-  // usable clock cannot evaluate freshness and fails open on THIS check only
-  // (journal + HMAC auth remain in force).
-  static bool isCommandExpired(JsonDocument& doc, String& errOut);
+  // Returns TRUE when the command is expired (reject).
+  //
+  // [GATE-1 / PH8-03] actuatorEnergizing=true (relay on/pulse, ota.start):
+  // an unusable clock (time()==0) is REJECTED as CLOCK_INVALID — an
+  // energizing mutation must never execute when its freshness window cannot
+  // be evaluated. actuatorEnergizing=false keeps the legacy fail-open path
+  // (safe-direction/config commands: journal + HMAC auth remain in force).
+  static bool isCommandExpired(JsonDocument& doc, String& errOut,
+                               bool actuatorEnergizing = false);
 
   // [CORE-02] Mandatory mutation envelope: version + transactionId/requestId
   // + issuedAt + expiresAt must ALL be present and sane. Envelope presence is
