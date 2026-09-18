@@ -165,7 +165,7 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
     _duplicates++;
     if (previousAck.length() > 0) {
       String ackTopic = mqttTransport.getDeviceTopic("ack");
-      mqttTransport.publish(ackTopic.c_str(), previousAck.c_str(),
+      mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), previousAck.c_str(),
                              previousAck.length(), false);
     } else {
       _publishAck(canon.transactionId.c_str(), true, "DUPLICATE",
@@ -325,7 +325,7 @@ void MqttOtaHandler::handle(const char* topic, const uint8_t* payload, size_t le
 
   {
     String ackTopic = mqttTransport.getDeviceTopic("ack");
-    mqttTransport.publish(ackTopic.c_str(), ackJson.c_str(),
+    mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), ackJson.c_str(),
                            ackJson.length(), false);
   }
 
@@ -350,7 +350,7 @@ void MqttOtaHandler::_publishAck(const char* transactionId, bool ok,
     serializeJson(ack, ackJson);
   }
   String ackTopic = mqttTransport.getDeviceTopic("ack");
-  mqttTransport.publish(ackTopic.c_str(), ackJson.c_str(),
+  mqttTransport.publishBestEffortQoS0(ackTopic.c_str(), ackJson.c_str(),
                         ackJson.length(), false);
 }
 

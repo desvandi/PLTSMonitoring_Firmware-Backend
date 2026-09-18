@@ -57,6 +57,16 @@ public:
   // QoS-aware publish. qos: 0 (telemetry/fire-and-forget) or 1 (commands/acks).
   bool publish(const char* topic, const char* payload, size_t len,
                bool retained = false, uint8_t qos = 0);
+
+  // [GATE-5 / F3 + F4-04 2026-09] HONEST QoS API — the canonical publish name.
+  // PubSubClient 2.8 outbound publish is ALWAYS QoS 0: `true` means the
+  // socket write was accepted, NOT that the broker accepted the message
+  // (no PUBACK exists on this path). Durability for critical events comes
+  // from TelemetrySpool + GAS sequence dedup, not from this transport.
+  // There is NO publishGuaranteedQoS1() on this transport — broker-confirmed
+  // QoS 1 requires the espMqttClient migration (documented limitation).
+  bool publishBestEffortQoS0(const char* topic, const char* payload,
+                             size_t len, bool retained = false);
   // Register a topic for persistent subscription (re-established on every
   // reconnect). qos 1 for command topics. Returns false when the table is full.
   bool subscribe(const char* topic, uint8_t qos = 1);
@@ -83,6 +93,10 @@ private:
   String _deviceId;
   unsigned long _lastReconnectMs = 0;
   uint16_t _reconnectDelayMs = Core::MQTT_RECONNECT_MIN_MS;
+  // [GATE-5 / P7-S2-01] Actual wait before the NEXT attempt — drawn uniformly
+  // from [MIN, _reconnectDelayMs] (full jitter) so a recovering fleet spreads
+  // its retries instead of stampeding on one schedule.
+  uint16_t _reconnectWaitMs = Core::MQTT_RECONNECT_MIN_MS;
   bool _initialized = false;
   MessageCallback _msgCb;
   MqttConnState _state = MqttConnState::Disabled;
