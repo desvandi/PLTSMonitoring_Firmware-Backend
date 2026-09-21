@@ -1,0 +1,131 @@
+name: hil-evidence-gate
+
+# ============================================================================
+# CI wiring untuk tooling HIL / load-soak (GATE-9 / GATE-10, F4/F8-12).
+#
+# Scope: gerbang HIGIENE TOOLING+BUKTI untuk push/PR reguler. Penegakan bukti
+# HIL pada saat RILIS tetap di job verify-hardware-acceptance (P0-2,
+# build-firmware.yml, build tag). Job ini TIDAK pernah bicara ke broker dan
+# TIDAK pernah menyentuh perangkat:
+#   1. Tooling compile; mode --plan tetap jujur (tanpa device/broker/publish).
+#   2. Precondition fail-closed: beban publikasi ditolak tanpa
+#      --i-confirm-publisher; HIL ditolak tanpa --device (exit 2).
+#   3. Suite kontrak verifier PASS, termasuk regresi N9 null-leniency
+#      (22 check null + verdict PASS + signoff → harus BLOCK).
+#   4. Semua file bukti gate ter-commit: parseable, schemaVersion 1,
+#      persis 22 check wajib; DRAFT/template WAJIB all-PENDING
+#      (PASS pra-isi tanpa pengukuran = kegagalan pipeline).
+#   5. DRAFT v1.9.4 yang ter-commit DITOLAK verifier (exit 1) — bukti
+#      fail-closed pada konten repo nyata, bukan fixture.
+# ============================================================================
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/hardware-acceptance/**'
+      - 'scripts/hil_runner.py'
+      - 'scripts/load_soak_runner.py'
+      - 'scripts/device_healthcheck.py'
+      - 'scripts/serial_diagnostic.py'
+      - 'scripts/verify_gate_qualification.py'
+      - 'scripts/check_hil_evidence_files.py'
+      - 'scripts/test_gate9_qualification_2026_09.py'
+      - '.github/workflows/hil-evidence-gate.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/hardware-acceptance/**'
+      - 'scripts/hil_runner.py'
+      - 'scripts/load_soak_runner.py'
+      - 'scripts/device_healthcheck.py'
+      - 'scripts/serial_diagnostic.py'
+      - 'scripts/verify_gate_qualification.py'
+      - 'scripts/check_hil_evidence_files.py'
+      - 'scripts/test_gate9_qualification_2026_09.py'
+      - '.github/workflows/hil-evidence-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_VERSION: "24.2"
+  PAHO_VERSION: "2.1.0"
+
+jobs:
+  hil-evidence-gate:
+    name: HIL evidence + tooling integrity gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
+        with:
+          python-version: '3.11'
+
+      - name: Pin dependencies
+        run: |
+          python -m pip install --upgrade "pip==${PIP_VERSION}"
+          pip install "paho-mqtt==${PAHO_VERSION}"
+
+      - name: Compile tooling
+        run: |
+          python3 -m py_compile \
+            scripts/hil_runner.py \
+            scripts/load_soak_runner.py \
+            scripts/device_healthcheck.py \
+            scripts/serial_diagnostic.py \
+            scripts/verify_gate_qualification.py \
+            scripts/check_hil_evidence_files.py \
+            scripts/test_gate9_qualification_2026_09.py
+
+      - name: Plan modes jujur (tanpa device/broker/publish)
+        run: |
+          python3 scripts/hil_runner.py --plan
+          python3 scripts/load_soak_runner.py --plan
+
+      - name: Precondition fail-closed menolak beban tanpa konfirmasi
+        run: |
+          set +e
+          # Tanpa env broker sama sekali → exit 2 (bukan silent-pass)
+          python3 scripts/load_soak_runner.py >/dev/null 2>&1
+          RC_HOST=$?
+          # Env broker terpasang TANPA --i-confirm-publisher → exit 2
+          SOAK_MQTT_HOST=example.invalid SOAK_MQTT_USERNAME=u \
+            python3 scripts/load_soak_runner.py >/dev/null 2>&1
+          RC_PUB=$?
+          # HIL runner tanpa --device → exit 2
+          python3 scripts/hil_runner.py >/dev/null 2>&1
+          RC_DEV=$?
+          set -e
+          echo "rc_host=$RC_HOST rc_pub=$RC_PUB rc_dev=$RC_DEV"
+          [ "$RC_HOST" -eq 2 ] || { echo "FAIL: env-broker-kosong harus exit 2"; exit 1; }
+          [ "$RC_PUB" -eq 2 ]   || { echo "FAIL: publisher-tanpa-konfirmasi harus exit 2"; exit 1; }
+          [ "$RC_DEV" -eq 2 ]   || { echo "FAIL: tanpa --device harus exit 2"; exit 1; }
+
+      - name: Suite kontrak verifier (N1-N9 termasuk regresi null-leniency)
+        run: python3 scripts/test_gate9_qualification_2026_09.py
+
+      - name: Higiene file bukti gate (DRAFT wajib all-PENDING)
+        run: python3 scripts/check_hil_evidence_files.py
+
+      - name: DRAFT ter-commit harus MEMBLOKIR verifier (bukti fail-closed)
+        run: |
+          mkdir -p "$RUNNER_TEMP/hw"
+          cp docs/hardware-acceptance/v1.9.4-gate.DRAFT.json \
+             "$RUNNER_TEMP/hw/v1.9.4-gate.json"
+          printf '%s\n' \
+            '{"gitCommit":"0000000000000000000000000000000000000000","firmwareSha256":""}' \
+            > "$RUNNER_TEMP/release.json"
+          set +e
+          python3 scripts/verify_gate_qualification.py \
+            --version 1.9.4 \
+            --hw-dir "$RUNNER_TEMP/hw" \
+            --release-json "$RUNNER_TEMP/release.json"
+          RC=$?
+          set -e
+          echo "verifier exit pada DRAFT = $RC (harus 1 = BLOCK)"
+          [ "$RC" -eq 1 ] || { echo "FAIL: bukti PENDING/DRAFT harus mem-BLOK"; exit 1; }

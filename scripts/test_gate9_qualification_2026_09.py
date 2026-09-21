@@ -19,6 +19,9 @@ false-green gate. Both directions are proven here:
     N6  one of the 10 gate checks = FAIL
     N7  signoff empty
     N8  version mismatch (evidence for a different release)
+    N9  checks null (22x null + verdict PASS + signoffs) — regression for
+        the 2026-09 null-leniency hole: a check is passing ONLY if it is
+        explicitly "PASS"; null must BLOCK (fail-closed)
 
   SOURCE-SHAPE — the CI step exists, is version-gated (>1.9.3), and the
   template carries all 22 checks + honest observed fields.
@@ -151,6 +154,18 @@ make_case("N7 signoff kosong → BLOCK",
           lambda ev, h, r: ev.update(releaseManager="  "))
 make_case("N8 version beda → BLOCK",
           lambda ev, h, r: ev.update(version="1.9.3"))
+
+
+def _null_all_checks(ev, h, r):
+    # [REGRESI 2026-09 null-leniency] 22 check = null + verdict PASS +
+    # signoff lengkap pernah lolos sebagai VERIFIED (null dikecualikan dari
+    # not_pass). Setelah hardening: null BUKAN "PASS" eksplisit → BLOCK.
+    for k in ev["checks"]:
+        ev["checks"][k] = None
+
+
+make_case("N9 semua check null (verdict PASS + signoff lengkap) → BLOCK (regresi null-leniency)",
+          _null_all_checks)
 
 print()
 print("=" * 72)

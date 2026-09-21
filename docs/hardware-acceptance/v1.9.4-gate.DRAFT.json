@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "version": "1.9.4",
+  "gitCommit": "",
+  "firmwareSha256": "",
+  "verdict": "PENDING",
+  "testEngineer": "",
+  "reviewer": "",
+  "releaseManager": "",
+  "testDate": "2026-09-18",
+  "hardwareSerial": "",
+  "hardwareIdentity": "bench-prototype",
+  "broker": "",
+  "checks": {
+    "boot": "PENDING",
+    "sensors": "PENDING",
+    "alarms": "PENDING",
+    "otaRest": "PENDING",
+    "otaMqtt": "PENDING",
+    "rollback": "PENDING",
+    "emergencyRelay": "PENDING",
+    "configPersistence": "PENDING",
+    "security": "PENDING",
+    "soak24h": "PENDING",
+    "factoryReset": "PENDING",
+    "emergencyAtomicity": "PENDING",
+    "watchdogStarvationBank": "PENDING",
+    "clockInvalidReject": "PENDING",
+    "safetyConfigLockdown": "PENDING",
+    "commLossFailSafe": "PENDING",
+    "pinChangeRefused": "PENDING",
+    "mqttTopicBinding": "PENDING",
+    "otaDurableReservation": "PENDING",
+    "qosTimeoutBudget": "PENDING",
+    "staleCommandBlocked": "PENDING",
+    "telemetryJournalRetention": "PENDING"
+  },
+  "observed": {
+    "session": {
+      "sections": {
+        "A": "SKIPPED"
+      },
+      "actuationConfirmed": false,
+      "emergencyViaRest": false,
+      "soakMinutes": 0
+    }
+  },
+  "operatorLog": [],
+  "notes": "DRAFT dihasilkan hil_runner.py — nilai PENDING = belum dieksekusi/terukur. gitCommit dikosongkan (diikat ke release.json/source-commit saat sesi bench via --release-json / --source-commit; verifier mem-BLOK gitCommit kosong — fail-closed). Finalisasi manual oleh operator (HIL-PROCEDURE.md, lihat HIL-RUNNER-QUICKSTART.md); verifier menolak PENDING."
+}
