@@ -204,7 +204,11 @@ def run() -> int:
     # 8. ALL required checks PASS.
     checks = hw.get("checks", {})
     missing = [c for c in REQUIRED_CHECKS if c not in checks]
-    not_pass = [c for c in REQUIRED_CHECKS if checks.get(c) not in (None,) and checks.get(c) != "PASS"]
+    # [HARDENING 2026-09-18 hil-runner session] null-leniency ditembus: nilai
+    # null sebelumnya DIKECUALIKAN dari not_pass (checks.get(c) not in (None,))
+    # sehingga 22 check null + verdict PASS + signoff bisa lolos sebagai
+    # VERIFIED. Check yang tidak BUKAN "PASS" eksplisit = blocker (fail-closed).
+    not_pass = [c for c in REQUIRED_CHECKS if checks.get(c) != "PASS"]
     for c in missing:
         blockers.append(f"check '{c}' missing — HIL procedure incomplete")
         print(f"[FAIL] check: {c} missing")
