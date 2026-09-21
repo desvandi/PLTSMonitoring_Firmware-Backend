@@ -103,8 +103,14 @@ def build_client(client_id, ctx, m, on_disconnect_cb=None, on_message_cb=None):
     pw = os.environ.get("SOAK_MQTT_PASSWORD", "")
     if user:
         c.username_pw_set(user, pw)
+    # paho (1.x & 2.x) tidak menerima SSLContext via tls_set(); gunakan
+    # tls_set_context() agar CA kustom (SOAK_MQTT_CA) dan verifikasi penuh
+    # tetap berlaku. (Bug ditemukan saat soak nyata vs broker publik TLS.)
     if ctx is not None:
-        c.tls_set(ca_certs=os.environ.get("SOAK_MQTT_CA") or None, context=ctx)
+        ca = os.environ.get("SOAK_MQTT_CA")
+        if ca:
+            ctx.load_verify_locations(ca)
+        c.tls_set_context(ctx)
     c.reconnect_delay_set(min_delay=1, max_delay=30)   # backoff w/ jitter bawaan
     if on_disconnect_cb:
         c.on_disconnect = on_disconnect_cb
@@ -115,9 +121,16 @@ def build_client(client_id, ctx, m, on_disconnect_cb=None, on_message_cb=None):
 
 def on_disconnect_factory(m, label):
     def cb(client, userdata, *args):
+        # paho API v2: (client, userdata, flags, reason_code, properties).
+        # reason_code 0 = disconnect NORMAL di akhir run — jangan dihitung
+        # sebagai kegagalan (dulu: tiap run "sukses" tetap disc=3).
+        reason = args[1] if len(args) >= 2 else None
+        abnormal = reason is not None and reason != 0
         with m.lock:
-            m.disconnects += 1
-            m.disconnect_events.append({"who": label, "at": time.time()})
+            if abnormal:
+                m.disconnects += 1
+                m.disconnect_events.append(
+                    {"who": label, "at": time.time(), "reason": str(reason)})
     return cb
 
 
@@ -148,16 +161,28 @@ def device_worker(idx, run_id, cfg, m, ctx, stop_evt):
         t0 = time.time()
         try:
             info = c.publish(topic, payload, qos=cfg["qos"])
-            with m.lock:
-                m.sent += 1
-            if cfg["qos"] > 0:
-                ok = info.wait_for_publish(timeout=cfg["ack_timeout"])
+            if info.rc != 0:
+                # publish() tidak raise — rc != 0 = tidak terkirim (NO_CONN dsb.)
                 with m.lock:
-                    if ok:
-                        m.acked += 1
-                        m.ack_latencies.append((time.time() - t0) * 1000.0)
-                    else:
-                        m.errors += 1
+                    m.errors += 1
+            else:
+                with m.lock:
+                    m.sent += 1
+                if cfg["qos"] > 0:
+                    # paho v2: wait_for_publish() mengembalikan None (raise
+                    # bila gagal antre); status PUBACK dicek via is_published().
+                    try:
+                        info.wait_for_publish(timeout=cfg["ack_timeout"])
+                        if info.is_published():
+                            with m.lock:
+                                m.acked += 1
+                                m.ack_latencies.append((time.time() - t0) * 1000.0)
+                        else:
+                            with m.lock:
+                                m.errors += 1   # timeout PUBACK
+                    except (ValueError, RuntimeError):
+                        with m.lock:
+                            m.errors += 1
         except Exception:
             with m.lock:
                 m.errors += 1
@@ -170,9 +195,15 @@ def device_worker(idx, run_id, cfg, m, ctx, stop_evt):
         pass
 
 
-def observer_worker(run_id, cfg, m, ctx, stop_evt):
+def observer_worker(run_id, cfg, m, ctx, stop_evt, subscribed_evt=None):
     obs_id = f"{SOAK_PREFIX}-{run_id}-obs"
     seen = {}
+
+    def on_subscribe(client, userdata, mid, granted=None, properties=None):
+        # SUBACK diterima — perangkat boleh mulai publish (hapus race start-up:
+        # dulu 2-4 pesan pertama hilang sebelum subscribe aktif).
+        if subscribed_evt is not None:
+            subscribed_evt.set()
 
     def on_message(client, userdata, msg):
         try:
@@ -202,6 +233,8 @@ def observer_worker(run_id, cfg, m, ctx, stop_evt):
 
     c = build_client(obs_id, ctx, m, on_disconnect_cb=on_disconnect_factory(m, "observer"),
                      on_message_cb=on_message)
+    if subscribed_evt is not None:
+        c.on_subscribe = on_subscribe
     try:
         c.connect(cfg["host"], cfg["port"], keepalive=30)
         c.loop_start()
@@ -211,12 +244,21 @@ def observer_worker(run_id, cfg, m, ctx, stop_evt):
         if c.is_connected():
             with m.lock:
                 m.observer_connected = True
-            c.subscribe(f"plts/{SOAK_PREFIX}-{run_id}/#", qos=cfg["qos"])
+            # [FIX] '#' tidak cocok utk plts/SOAK-<runId>-NNN/status (level
+            # "SOAK-<runId>-NNN" != "SOAK-<runId>"). Subscribe TOPIK EXAKT
+            # tiap perangkat virtual — lebih konservatif & tetap cuma
+            # namespace soak.
+            subs = [(f"plts/{SOAK_PREFIX}-{run_id}-{i:03d}/{ALLOWED_TOPIC_KINDS[0]}",
+                     cfg["qos"]) for i in range(cfg["devices"])]
+            c.subscribe(subs)
     except Exception as e:
         print(f"[OBSERVER] connect gagal: {type(e).__name__}")
         return
     while not stop_evt.is_set():
         time.sleep(0.5)
+    # [FIX] observer tetap tersambung selama drain window agar QoS1 in-flight
+    # dari detik-detik terakhir benar-benar terhitung delivered (bukan drop).
+    time.sleep(10)
     try:
         c.disconnect()
         c.loop_stop()
@@ -238,9 +280,17 @@ def run_soak(cfg):
             ctx.load_verify_locations(ca)
     m = Metrics()
     stop_evt = threading.Event()
-    obs = threading.Thread(target=observer_worker, args=(run_id, cfg, m, ctx, stop_evt), daemon=True)
+    subscribed_evt = threading.Event()          # gate SUBACK observer
+    obs = threading.Thread(target=observer_worker,
+                           args=(run_id, cfg, m, ctx, stop_evt, subscribed_evt), daemon=True)
     obs.start()
-    time.sleep(1.0)     # observer siap lebih dulu (kontrol positif delivery)
+    # [FIX] tunggu subscribe observer aktif (SUBACK) sebelum fleet mulai
+    # publish — menghapus race start-up yang dulu dihitung sebagai drop.
+    if not subscribed_evt.wait(timeout=15):
+        print("[SOAK] observer belum menyelesaikan SUBACK dalam 15s — "
+              "fleet tetap dimulai; pesan awal yang hilang akan tercatat "
+              "jujur sebagai drop (verdict menangkapnya).")
+    time.sleep(0.5)
     workers = [threading.Thread(target=device_worker, args=(i, run_id, cfg, m, ctx, stop_evt),
                                 daemon=True) for i in range(cfg["devices"])]
     for w in workers:

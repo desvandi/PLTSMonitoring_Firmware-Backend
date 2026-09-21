@@ -400,7 +400,8 @@ def section_J(dev, ev, args):
     user = os.environ.get("HIL_MQTT_USERNAME", "")
     if user:
         c.username_pw_set(user, os.environ.get("HIL_MQTT_PASSWORD", ""))
-    c.tls_set(context=ctx)
+    # tls_set_context() — paho tidak menerima context= di tls_set()
+    c.tls_set_context(ctx)
 
     def on_message(client, userdata, msg):
         ack_msgs.append((msg.topic, time.time()))
