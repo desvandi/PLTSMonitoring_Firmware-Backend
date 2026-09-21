@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "version": "1.9.4",
+  "gitCommit": "11ef9149fd10a9f464f122434c3d8e60c87be646",
+  "firmwareSha256": "",
+  "verdict": "PENDING",
+  "testEngineer": "",
+  "reviewer": "",
+  "releaseManager": "",
+  "testDate": "2026-09-18",
+  "hardwareSerial": "",
+  "hardwareIdentity": "bench-prototype",
+  "broker": "",
+  "checks": {
+    "boot": "PENDING",
+    "sensors": "PENDING",
+    "alarms": "PENDING",
+    "otaRest": "PENDING",
+    "otaMqtt": "PENDING",
+    "rollback": "PENDING",
+    "emergencyRelay": "PENDING",
+    "configPersistence": "PENDING",
+    "security": "PENDING",
+    "soak24h": "PENDING",
+    "factoryReset": "PENDING",
+    "emergencyAtomicity": "PENDING",
+    "watchdogStarvationBank": "PENDING",
+    "clockInvalidReject": "PENDING",
+    "safetyConfigLockdown": "PENDING",
+    "commLossFailSafe": "PENDING",
+    "pinChangeRefused": "PENDING",
+    "mqttTopicBinding": "PENDING",
+    "otaDurableReservation": "PENDING",
+    "qosTimeoutBudget": "PENDING",
+    "staleCommandBlocked": "PENDING",
+    "telemetryJournalRetention": "PENDING"
+  },
+  "observed": {
+    "session": {
+      "sections": {
+        "A": "SKIPPED"
+      },
+      "actuationConfirmed": false,
+      "emergencyViaRest": false,
+      "soakMinutes": 0
+    }
+  },
+  "operatorLog": [],
+  "notes": "DRAFT dihasilkan hil_runner.py \u2014 nilai PENDING = belum dieksekusi/terukur. Finalisasi manual oleh operator (HIL-PROCEDURE.md); verifier menolak PENDING."
+}
