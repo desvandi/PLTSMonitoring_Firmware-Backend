@@ -75,6 +75,13 @@ def build_tree(dst, declare_inventory=False, inventory_name=None):
             for m in s.get("markers", []):
                 _copy_repo_file(dst, m["file"])
                 copied.append(m["file"])
+    # File governance yang dideklarasikan ikut disalin (T1 = repo as-is
+    # harus bisa lolos lengkap, termasuk validasi inventaris kredensial).
+    inv_declared = (reg.get("governanceFiles") or {}).get(
+        "credentialInventory")
+    if inv_declared:
+        _copy_repo_file(dst, inv_declared)
+        copied.append(inv_declared)
     return reg, copied
 
 

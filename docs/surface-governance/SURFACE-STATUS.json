@@ -18,6 +18,7 @@
     ]
   },
   "governanceFiles": {
+    "credentialInventory": "docs/security/credential-inventory.json",
     "surfacesDoc": "docs/surface-governance/SURFACES.md"
   },
   "surfaces": [
