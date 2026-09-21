@@ -332,6 +332,9 @@ def main():
     ap.add_argument("--plan", action="store_true", help="cetak rencana run tanpa menjalankan")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--out", help="tulis JSON hasil ke file")
+    ap.add_argument("--raw-out", help="tulis sampel latensi mentah (ack/delivery, ms) "
+                    "ke file — untuk agregasi multi-chunk / re-budgeting pasca-run "
+                    "tanpa re-run")
     args = ap.parse_args()
 
     host = os.environ.get("SOAK_MQTT_HOST", "")
@@ -413,6 +416,25 @@ def main():
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
+    if args.raw_out:
+        with m.lock:
+            raw = {
+                "schemaVersion": 1, "tool": "load_soak_runner.py", "runId": run_id,
+                "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "config": {"devices": args.devices, "intervalSec": args.interval,
+                           "durationSec": args.duration, "qos": args.qos,
+                           "insecureTls": bool(args.insecure_tls)},
+                "counters": {"sent": m.sent, "acked": m.acked, "delivered": m.delivered,
+                             "duplicates": m.duplicates, "outOfOrder": m.out_of_order,
+                             "abnormalDisconnects": m.disconnects,
+                             "publishErrors": m.errors},
+                "ackLatenciesMs": [round(x, 2) for x in m.ack_latencies],
+                "deliveryLatenciesMs": [round(x, 2) for x in m.delivery_latencies],
+            }
+        with open(args.raw_out, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        print(f"[RAW] sampel latensi ditulis: {args.raw_out} "
+              f"(ack={len(raw['ackLatenciesMs'])}, delivery={len(raw['deliveryLatenciesMs'])})")
     if args.json:
         print(json.dumps(result, indent=2))
     print("\n" + "=" * 72)
