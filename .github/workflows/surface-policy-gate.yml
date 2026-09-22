@@ -1,0 +1,119 @@
+name: surface-policy-gate
+
+# ============================================================================
+# CI wiring untuk tata kelola permukaan + inventaris kredensial
+# (temuan #18 / #19 audit baseline 2026-09-18).
+#
+# Scope: gerbang HIGIENE TATA KELOLA untuk push/PR yang menyentuh
+# permukaan firmware/GAS atau file governance. Job ini TIDAK bicara ke
+# broker, TIDAK menyentuh perangkat, TIDAK mengeksekusi rotasi:
+#   1. Tooling compile (murni stdlib — tanpa pip install).
+#   2. Positive: repo HEAD lolos semua kebijakan (pin SHA-256 permukaan
+#      beku, marker hardening permukaan aktif, inventaris kredensial).
+#   3. NEGATIF fail-closed (pada salinan tar dari HEAD, repo tidak
+#      disentuh): drift konten file beku → exit 1; lastRotated fabrikasi
+#      tanpa bukti → exit 1; marker hardening hilang → exit 1.
+#   4. Suite regresi 9 skenario (test_governance_2026_09.py).
+#
+# Kebijakan penegakan: lihat docs/surface-governance/SURFACES.md §3.
+# ============================================================================
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'firmware/**'
+      - 'firmware-generic/**'
+      - 'code.gs/**'
+      - 'push-alarm/gas/**'
+      - 'push-alarm/firmware/**'
+      - 'docs/surface-governance/**'
+      - 'docs/security/**'
+      - 'scripts/check_surface_policy.py'
+      - 'scripts/test_governance_2026_09.py'
+      - '.github/workflows/surface-policy-gate.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'firmware/**'
+      - 'firmware-generic/**'
+      - 'code.gs/**'
+      - 'push-alarm/gas/**'
+      - 'push-alarm/firmware/**'
+      - 'docs/surface-governance/**'
+      - 'docs/security/**'
+      - 'scripts/check_surface_policy.py'
+      - 'scripts/test_governance_2026_09.py'
+      - '.github/workflows/surface-policy-gate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  surface-policy-gate:
+    name: Surface policy + credential inventory gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c  # v5
+        with:
+          python-version: '3.11'
+
+      - name: Compile tooling (stdlib saja — tanpa dependensi)
+        run: |
+          python3 -m py_compile \
+            scripts/check_surface_policy.py \
+            scripts/test_governance_2026_09.py
+
+      - name: Positive — HEAD lolos semua kebijakan
+        run: python3 scripts/check_surface_policy.py --repo-root .
+
+      - name: Negatif 1 — drift konten file beku HARUS ditolak
+        run: |
+          N1="$RUNNER_TEMP/n1"; mkdir -p "$N1"
+          git archive --format=tar HEAD | tar -xf - -C "$N1"
+          printf '\n// tamper-ci: baris ilegal\n' >> "$N1/push-alarm/gas/Code.gs"
+          set +e
+          python3 scripts/check_surface_policy.py --repo-root "$N1" >/dev/null 2>&1
+          RC=$?
+          set -e
+          echo "checker exit pada file beku tertamper = $RC (harus 1)"
+          [ "$RC" -eq 1 ] || { echo "FAIL: modifikasi senyap permukaan beku tidak ditolak"; exit 1; }
+
+      - name: Negatif 2 — lastRotated fabrikasi HARUS ditolak
+        run: |
+          N2="$RUNNER_TEMP/n2"; mkdir -p "$N2"
+          git archive --format=tar HEAD | tar -xf - -C "$N2"
+          python3 - "$N2" <<'EOF'
+          import json, sys
+          p = sys.argv[1] + "/docs/security/credential-inventory.json"
+          d = json.load(open(p))
+          d["credentials"][0]["lastRotated"] = "2026-01-01"  # tanpa evidenceRef
+          json.dump(d, open(p, "w"), indent=2)
+          EOF
+          set +e
+          python3 scripts/check_surface_policy.py --repo-root "$N2" >/dev/null 2>&1
+          RC=$?
+          set -e
+          echo "checker exit pada lastRotated fabrikasi = $RC (harus 1)"
+          [ "$RC" -eq 1 ] || { echo "FAIL: klaim rotasi tanpa bukti tidak ditolak"; exit 1; }
+
+      - name: Negatif 3 — marker hardening hilang HARUS ditolak
+        run: |
+          N3="$RUNNER_TEMP/n3"; mkdir -p "$N3"
+          git archive --format=tar HEAD | tar -xf - -C "$N3"
+          sed -i 's/getOrCreateApPassword/AP_PASSWORD_DIHAPUS_CI/' \
+            "$N3/firmware-generic/src/plts_firmware_v1.ino"
+          set +e
+          python3 scripts/check_surface_policy.py --repo-root "$N3" >/dev/null 2>&1
+          RC=$?
+          set -e
+          echo "checker exit pada marker hilang = $RC (harus 1)"
+          [ "$RC" -eq 1 ] || { echo "FAIL: hilangnya marker [FW-A3] tidak ditolak"; exit 1; }
+
+      - name: Suite regresi tata kelola (9 skenario)
+        run: python3 scripts/test_governance_2026_09.py

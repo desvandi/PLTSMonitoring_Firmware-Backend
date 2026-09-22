@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "tool": "check_surface_policy.py",
+  "generatedAt": "2026-09-22",
+  "findingRef": "Baseline 14-field audit 2026-09-18, temuan #18 (permukaan paralel legacy)",
+  "policy": {
+    "statuses": {
+      "active": "Permukaan jalur produksi. WAJIB mempertahankan marker hardening terdaftar (hilang = FAIL).",
+      "frozen": "Perubahan konten DITOLAK tanpa pembaruan pin eksplisit di registry (keputusan paritas belum diambil).",
+      "deprecated": "Permukaan legacy. Perubahan konten DITOLAK; menunggu keputusan pensiun/hapus.",
+      "external-ref": "Permukaan di repo lain — di luar scope checker ini (dicatat jujur untuk inventaris lengkap)."
+    },
+    "enforcement": [
+      "File set di bawah path surface berstatus frozen/deprecated HARUS persis sama dengan daftar pin (tidak ada file hilang/baru).",
+      "SHA-256 setiap file ter-pin HARUS cocok.",
+      "Setiap marker hardening surface AKTIF HARUS ditemukan (pattern regex pada file yang ditunjuk).",
+      "credentialInventory (jika terdaftar di governanceFiles) WAJIB lolos validasi anti-fabrikasi: lastRotated hanya boleh non-null bila evidenceRef menunjuk file yang ada."
+    ]
+  },
+  "governanceFiles": {
+    "credentialInventory": "docs/security/credential-inventory.json",
+    "surfacesDoc": "docs/surface-governance/SURFACES.md"
+  },
+  "surfaces": [
+    {
+      "id": "firmware-main",
+      "path": "firmware/",
+      "status": "active",
+      "role": "Firmware modular utama (REST + MQTT + OTA bertanda-tangan) untuk PWA direct-connect.",
+      "channel": "REST HTTP (WebServer) + MQTT TLS",
+      "deployPath": "PlatformIO env development/staging/production; rilis via build-firmware.yml (tag).",
+      "markers": [
+        {"file": "firmware/Web/AuthHandlers.cpp", "pattern": "AuthHandlers", "desc": "permukaan auth web ada (login/CSRF/cookie)"},
+        {"file": "firmware/Services/AuthManager.cpp", "pattern": "P0-003", "desc": "device secret NVS fail-closed, tidak pernah fallback default"},
+        {"file": "firmware/firmware_v1.ino", "pattern": "esp_task_wdt", "desc": "watchdog task aktif"}
+      ]
+    },
+    {
+      "id": "firmware-generic",
+      "path": "firmware-generic/",
+      "status": "active",
+      "role": "Firmware fleet single-file untuk kanal GAS (telemetri + emergency + OTA) dan flashing browser (ESP Web Tools).",
+      "channel": "HTTPS ke GAS (identitas token + device_key + sequence)",
+      "deployPath": "PlatformIO env esp32dev; manifest PWA public/firmware/manifest.json (LEGACY manifest browser-flash).",
+      "markers": [
+        {"file": "firmware-generic/src/plts_firmware_v1.ino", "pattern": "getOrCreateApPassword", "desc": "[FW-A3] AP setup WPA2 CSPRNG per-device"},
+        {"file": "firmware-generic/src/plts_firmware_v1.ino", "pattern": "setCACert\\(GAS_ROOT_CA\\)", "desc": "[WAVE-4/GAS-2-D] pinning TLS GAS (anti-MITM kanal token)"},
+        {"file": "firmware-generic/src/plts_firmware_v1.ino", "pattern": "esp_task_wdt", "desc": "watchdog task aktif"}
+      ]
+    },
+    {
+      "id": "code-gas-canonical",
+      "path": "code.gs/",
+      "status": "active",
+      "role": "Backend GAS kanonik PLTS (ingest telemetri, alarm, push, OTA_MANIFEST per-device hmac).",
+      "channel": "Google Apps Script (Web app deployment)",
+      "deployPath": "Deploy manual via make-gas-bundle.sh + prep-deploy-secrets.js.",
+      "markers": [
+        {"file": "code.gs/Code.gs", "pattern": "HMAC-SHA256", "desc": "kontrak auth v2.1 (timestamp+nonce+deviceId+signature)"},
+        {"file": "code.gs/Code.gs", "pattern": "DEVICES_HEADER", "desc": "registry per-device (secret, last_nonce) di sheet DEVICES"},
+        {"file": "code.gs/Code.gs", "pattern": "SeqIndex", "desc": "[P1-004] ledger gap sequence"}
+      ]
+    },
+    {
+      "id": "push-alarm-gas-duplicate",
+      "path": "push-alarm/gas/",
+      "status": "frozen",
+      "role": "Implementasi GAS KEDUA (duplikat paralel, kontrak berbeda dari code.gs/) — keputusan paritas/pensiun menunggu pemilik repo.",
+      "channel": "Google Apps Script",
+      "deployPath": "Tidak terhubung ke pipeline rilis; deployment terpisah (repos.conf push-alarm).",
+      "pins": {
+        "push-alarm/gas/Code.gs": "12d10eb27802e1fa3cb83859c5d7832ecbeafd1edf8ecca96784b29490354851",
+        "push-alarm/gas/WebPushCore.gs": "6dd6a28e33c4247b7cbba337af57e427ccb848ac5654d2ff27226cf2c1f45c66",
+        "push-alarm/gas/README.md": "0c798c43ace638f04158a1cc7d93aa58587f4f1bc75904dc6f51b814feac931c"
+      },
+      "decisionOpen": "Pilih: pensiunkan (migrasi fleet ke code.gs/) ATAU promosikan jadi kanonik (naikkan kontrak P1-00x + HMAC v2.1). Lihat SURFACES.md §Keputusan Terbuka."
+    },
+    {
+      "id": "push-alarm-firmware-monitoriot",
+      "path": "push-alarm/firmware/MonitorIoT_Firmware/",
+      "status": "deprecated",
+      "role": "Firmware legacy ekosistem MonitorIoT (greenhouse) — garis keturunan tertua; tanpa identitas sequence, HMAC v2.1, OTA bertanda-tangan.",
+      "channel": "HTTPS ke GAS (action=ingest, kontrak Tabel 11)",
+      "deployPath": "Tidak terhubung ke pipeline rilis mana pun.",
+      "pins": {
+        "push-alarm/firmware/MonitorIoT_Firmware/MonitorIoT_Firmware.ino": "3e0696522f7009d4aa34634f44a7ba03f2765ad6050fd9b438a3079f90725cbe",
+        "push-alarm/firmware/MonitorIoT_Firmware/README.md": "7b4b6c03db6674fa6d7712e504091cfd92d94f118d6a4df3e1e673635f3f7200"
+      },
+      "replacement": "firmware-generic/ (kanal GAS PLTS) atau firmware/ (REST+MQTT).",
+      "decisionOpen": "Hapus direktori setelah konfirmasi tidak ada fleet greenhouse aktif yang mem-flash dari sini."
+    },
+    {
+      "id": "pwa-push-alarm-js",
+      "repo": "PLTSMonitoring_PWA",
+      "path": "pwa-push-alarm/",
+      "status": "external-ref",
+      "role": "Aplikasi push-alarm browser (JS) + deployment Vercel terpisah di repo PWA — dicatat untuk inventaris lengkap; penegakan ada di repo PWA.",
+      "note": "Checker repo FW TIDAK memeriksa repo lain — jujur soal batas scope."
+    },
+    {
+      "id": "pwa-firmware-manifest",
+      "repo": "PLTSMonitoring_PWA",
+      "path": "public/firmware/manifest.json",
+      "status": "external-ref",
+      "role": "Manifest LEGACY browser-flash (ESP Web Tools); manifest OTA kanonik schema 2.0 (SHA-256 + Ed25519) hidup di GitHub Release firmware.",
+      "note": "Sinkronisasi versi manifest PWA vs rilis firmware dijaga release-policy.json PWA (tag v*)."
+    }
+  ]
+}

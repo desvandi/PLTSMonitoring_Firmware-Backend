@@ -1,4 +1,27 @@
 /*
+ * =====================================================================
+ * [DEPRECATED — SURFACE F18, status 2026-09-22] ========================
+ * =====================================================================
+ * Permukaan ini berstatus DEPRECATED pada registry tata kelola permukaan
+ * (docs/surface-governance/SURFACE-STATUS.json, surface id:
+ * push-alarm-firmware-monitoriot).
+ *
+ * Alasan: basis kode ekosistem MonitorIoT (greenhouse) yang berjalan
+ * PARALEL dengan jalur PLTS aktif. Tidak menerima:
+ *   - kontrak identitas (device_key, sequence) + ledger gap [P1-00x]
+ *   - autentikasi HMAC-SHA256 kontrak v2.1 (code.gs/)
+ *   - OTA bertanda-tangan + rollback (firmware-generic/)
+ * Perbaikan keamanan di permukaan PLTS AKAN TIDAK sampai ke sini.
+ *
+ * Perubahan apa pun pada berkas di bawah direktori ini DITOLAK oleh
+ * scripts/check_surface_policy.py (content pin SHA-256) sampai pin
+ * diperbarui secara eksplisit di registry — tidak ada modifikasi senyap.
+ * Pengganti: firmware-generic/ (kanal GAS PLTS) atau firmware/ (REST+MQTT).
+ * Lihat docs/surface-governance/SURFACES.md untuk keputusan migrasi.
+ * =====================================================================
+ */
+
+/*
  * MonitorIoT_Firmware.ino - Firmware ESP32 untuk ekosistem MonitorIoT
  * =====================================================================
  * Peran dalam arsitektur (kontrak Tabel 11 - Ambang alarm FW-GAS):
